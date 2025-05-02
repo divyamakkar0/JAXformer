@@ -104,13 +104,14 @@ class FeedForward(nn.Module):
 
     def setup(self):
         self.linear1 = nn.Dense(features=self.ff_dim)
-        self.linear2 = nn.Dense(features=self.model_dimension) 
+        self.linear2 = nn.Dense(features=self.model_dimension)
+        self.dropout = nn.Dropout(rate=self.dropout) 
     
     def __call__(self, x):
         x = self.linear1(x)
         x = nn.relu(x)
+        x = nn.dropout(x)
         x = self.linear2(x)
-        x = nn.relu(x)
         return x
 
 class Block(nn.Module):
