@@ -3,7 +3,6 @@ import jax.numpy as jnp
 from jax import random
 import math
 from typing import Callable
-
 import flax
 
 from flax import linen as nn
@@ -40,19 +39,20 @@ class PositionalEncoding(nn.Module):
         
     def __call__(self, x):
         return x + self.encodings
-    
+
 class ScaledDotProduct(nn.Module):
     dk : int 
     max_token_len : int
 
     def setup(self):
         self.W = nn.Dense(features=3*self.dk)
+        self.key_cache = None
         self.value_cache = None
         self.token_ind = 0
 
     def __call__(self, x, train:bool = True):
         B, T, C = x.shape
-        qkv = self.W(x)
+        qkv = self.W(x) #still works when q, k, v is t x dk  or b x t x dk
         q,k,v = jnp.split(qkv, 3, axis=-1)
         if train == False:
             if self.key_cache is None or self.value_cache is None:
@@ -61,8 +61,11 @@ class ScaledDotProduct(nn.Module):
 
             self.key_cache = self.key_cache.at[:, self.token_ind:self.token_ind + T, :].set(k)
             self.value_cache = self.value_cache.at[:, self.token_ind:self.token_ind + T, :].set(v)
-            self.token_ind += T
 
+            k = self.key_cache[:, :self.token_ind + T,:]
+            v = self.value_cache[:, :self.token_ind + T, :] 
+
+            self.token_ind = min(self.token_ind + T, self.max_token_len-1)
         
         weights = jnp.einsum('b t c, b T c -> b t T', q, k) / math.sqrt(self.dk)
         size = weights.shape[-1]
@@ -72,7 +75,7 @@ class ScaledDotProduct(nn.Module):
         values = jnp.einsum('b t T, b T c -> b t c', attention, v)
 
         return values
-    
+
 class MultiHeadAttention(nn.Module):
     n_heads :int 
     model_dim : int
@@ -91,7 +94,7 @@ class MultiHeadAttention(nn.Module):
         mha = jnp.concatenate(scores, axis=-1)
         res = self.WO(mha)
         return res
-
+    
 class LayerNorm(nn.Module):
     model_dimension : int
     gamma_init : Callable = nn.initializers.lecun_normal()
@@ -109,7 +112,7 @@ class LayerNorm(nn.Module):
         y = jnp.einsum('B T C, C -> B T C', norm, self.gamma) + self.beta[None, None, :]
         
         return y
-    
+
 class Expert(nn.Module):
     model_dimension : int
     ff_dim : int
@@ -126,7 +129,7 @@ class Expert(nn.Module):
         x = nn.dropout(x)
         x = self.linear2(x)
         return x
-    
+
 class SoftmaxGate(nn.Module):
     model_dimension : int
     n_experts : int
@@ -138,7 +141,7 @@ class SoftmaxGate(nn.Module):
         g = self.Wg(x)
         gate = nn.softmax(g, axis=-1)
         return gate
-    
+
 class NoisyKGate(nn.Module):
     model_dimension : int
     n_experts : int
@@ -165,7 +168,7 @@ class NoisyKGate(nn.Module):
         Hx = self.Wg(x) + ((jax.random.normal(self.rng, shape=(b, t, self.n_experts))) * nn.softplus(self.Wnoise(x)))
         g_scores, indices = jnp.apply_along_axis(func1d=self.top, axis=-1, arr=Hx)
         return g_scores, indices
-    
+
 class MoE(nn.Module):
     model_dimension : int
     n_experts : int
@@ -208,14 +211,15 @@ class FeedForward(nn.Module):
         x = nn.dropout(x)
         x = self.linear2(x)
         return x
-    
+
 class Block(nn.Module):
     model_dimension : int
     n_heads : int
     dropount : float
+    max_token_len : int
     
     def setup(self):
-        self.attention = MultiHeadAttention(model_dim=self.model_dimension, n_heads=self.n_heads)
+        self.attention = MultiHeadAttention(model_dim=self.model_dimension, n_heads=self.n_heads, max_token_len=self.max_token_len)
         self.norm1 = LayerNorm(model_dimension=self.model_dimension)
         self.norm2 = LayerNorm(model_dimension=self.model_dimension)
         self.feedForward = FeedForward(model_dimension=self.model_dimension, ff_dim=4*self.model_dimension, dropout=self.dropout)
@@ -224,7 +228,7 @@ class Block(nn.Module):
         x = self.norm1(x + self.attention(x))
         x = self.norm2(x + self.feedForward(x))
         return x
-    
+
 class Decoder(nn.Module):
     model_dimension : int
     n_heads : int
@@ -232,10 +236,11 @@ class Decoder(nn.Module):
     vocab_size : int
     dropout : float
     blocks : int
+    max_token_len : int 
 
     def setup(self):
         self.embeddingTable = Embeddings(model_dimension=self.model_dimension, vocab_size=self.vocab_size)
-        self.Blocks = [Block(model_dimension=self.model_dimension, n_heads=self.n_heads, dropount=self.dropout) for i in range(self.blocks)]
+        self.Blocks = [Block(model_dimension=self.model_dimension, n_heads=self.n_heads, dropount=self.dropout, max_token_len=self.max_token_len) for i in range(self.blocks)]
         self.encodings = PositionalEncoding(model_dimension=self.model_dimension, seq_len=self.seq_len)
         self.linear = nn.Dense(features=self.vocab_size)
 
