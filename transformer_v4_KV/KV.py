@@ -51,6 +51,7 @@ class ScaledDotProduct(nn.Module):
         self.token_ind = 0
 
     def __call__(self, x, train:bool = True):
+        x = x[:, -1:, :]
         B, T, C = x.shape
         qkv = self.W(x) #still works when q, k, v is t x dk  or b x t x dk
         q,k,v = jnp.split(qkv, 3, axis=-1)
@@ -59,13 +60,18 @@ class ScaledDotProduct(nn.Module):
                 self.key_cache = jnp.zeros((B, self.max_token_len, self.dk))
                 self.value_cache = jnp.zeros((B, self.max_token_len, self.dk))
 
+
             self.key_cache = self.key_cache.at[:, self.token_ind:self.token_ind + T, :].set(k)
             self.value_cache = self.value_cache.at[:, self.token_ind:self.token_ind + T, :].set(v)
 
             k = self.key_cache[:, :self.token_ind + T,:]
-            v = self.value_cache[:, :self.token_ind + T, :] 
+            v = self.value_cache[:, :self.token_ind + T, :]
 
             self.token_ind = min(self.token_ind + T, self.max_token_len-1)
+
+            if self.token_ind == self.max_token_len - 1:
+                self.key_cache.at[:,0:-1,:].set(self.key_cache[:, 1:, :])
+                self.value_cache.at[:,0:-1,:].set(self.value_cache[:, 1:, :])
         
         weights = jnp.einsum('b t c, b T c -> b t T', q, k) / math.sqrt(self.dk)
         size = weights.shape[-1]
