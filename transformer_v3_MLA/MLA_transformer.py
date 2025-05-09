@@ -46,14 +46,11 @@ class ScaledDotProduct(nn.Module):
 
     def setup(self):
         self.W = nn.Dense(features=3*self.dk)
-        self.key_cache = None
-        self.value_cache = None
+        self.cKV = None
         self.token_ind = 0
 
     def __call__(self, x, train:bool = True):
-        if train == False:
-            x = x[:, -1:, :]
-
+        x = x[:, -1:, :]
         B, T, C = x.shape
         qkv = self.W(x) #still works when q, k, v is t x dk  or b x t x dk
         q,k,v = jnp.split(qkv, 3, axis=-1)
@@ -63,8 +60,8 @@ class ScaledDotProduct(nn.Module):
                 self.value_cache = jnp.zeros((B, self.max_token_len, self.dk))
 
 
-            self.key_cache.at[:, self.token_ind:self.token_ind + T, :].set(k)
-            self.value_cache.at[:, self.token_ind:self.token_ind + T, :].set(v)
+            self.key_cache = self.key_cache.at[:, self.token_ind:self.token_ind + T, :].set(k)
+            self.value_cache = self.value_cache.at[:, self.token_ind:self.token_ind + T, :].set(v)
 
             k = self.key_cache[:, :self.token_ind + T,:]
             v = self.value_cache[:, :self.token_ind + T, :]
