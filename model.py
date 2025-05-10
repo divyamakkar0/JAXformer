@@ -116,9 +116,15 @@ class MLA(nn.Module):
             q = jnp.concatenate([q, qrt], axis=-1)
        
         weights = jnp.einsum('B nh T dk, B nh t dk -> B nh T t', q, k) * (1/ ((self.dk) ** 0.5))
-        weights = nn.softmax(weights, axis=-1)
-        attention = jnp.einsum('B nh T t, B nh t dk -> B nh T dk', weights, v)
-        attention = rearrange(attention, 'B nh T dk, B T (nh dk)')
+
+        if train == True:
+            size = weights.shape[-1]
+            mask = jnp.tril(jnp.ones((B, self.n_heads, size, size)))
+            weights = jnp.where(mask == 0, -9e15, weights)
+            
+        logits = nn.softmax(weights, axis=-1)
+        attention = jnp.einsum('B nh T t, B nh t dk -> B nh T dk', logits, v)
+        attention = rearrange(attention, 'B nh T dk -> B T (nh dk)')
         output = self.output(attention)
         
         return output
