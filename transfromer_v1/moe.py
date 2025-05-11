@@ -5,12 +5,14 @@ x
 
 y, i = jax.lax.top_k(x, 2)
 
-def top(x): 
+
+def top(x):
     k = 2
-    y,i = jax.lax.top_k(x, k)
+    y, i = jax.lax.top_k(x, k)
     z = jnp.ones(x.shape) * -jnp.inf
     z = z.at[i].set(y)
     return z
+
 
 x2 = jnp.apply_along_axis(func1d=top, axis=-1, arr=x)
 x2
