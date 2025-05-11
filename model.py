@@ -11,15 +11,11 @@ class Embeddings(nn.Module):
     model_dimension : int
     vocab_size : int
 
-    def setup(self):
-        self.embedding = nn.Embed(num_embeddings=self.vocab_size, features=self.model_dimension)
-
+    @nn.compact()
     def __call__(self, x):
-        x = self.embedding(x) * math.sqrt(self.model_dimension)
+        embedding = nn.Embed(num_embeddings=self.vocab_size, features=self.model_dimension)
+        x = embedding(x) * math.sqrt(self.model_dimension)
         return x
-
-from flax import linen as nn
-from einops import rearrange
 
 class RoPE:
 
@@ -142,40 +138,22 @@ class LayerNorm(nn.Module):
     beta_init : Callable = nn.initializers.lecun_normal()
 
     def setup(self):
-        self.gamma = self.param('gamma', self.gamma_init, self.model_dimension)
-        self.beta = self.param('beta',self.beta_init, self.model_dimension)
+        self.gamma = self.param('gamma', self.gamma_init, (1, 1, self.model_dimension))
+        self.beta = self.param('beta',self.beta_init, (1, 1, self.model_dimension))
         self.eps = 1e-05
 
     def __call__(self, x):
         mean = jnp.mean(x, axis=-1, keepdims=True)
         var = jnp.var(x, axis=-1, keepdims=True)
         norm = ((x - mean)/jnp.sqrt(var + self.eps))
-        y = jnp.einsum('B T C, C -> B T C', norm, self.gamma) + self.beta[None, None, :]
+        y = norm * self.gamma + self.beta
 
         return y
-
-class Expert(nn.Module):
-    model_dimension : int
-    ff_dim : int
-    dropout : float
-
-    def setup(self):
-        self.linear1 = nn.Dense(features=self.ff_dim)
-        self.linear2 = nn.Dense(features=self.model_dimension)
-        self.dropout = nn.Dropout(rate=self.dropout)
-
-    def __call__(self, x):
-        x = self.linear1(x)
-        x = nn.relu(x)
-        x = self.dropout(x)
-        x = self.linear2(x)
-        return x
 
 class NoisyKGate(nn.Module):
     model_dimension : int
     n_experts : int
     k : int
-    dropout : float
 
     def setup(self):
         self.rng = jax.random.PRNGKey(42)
@@ -202,21 +180,30 @@ class MoE(nn.Module):
     dropout : float
 
     def setup(self):
-        self.experts = [Expert(model_dimension=self.model_dimension, ff_dim=4*self.model_dimension, dropout=self.dropout) for i in range(self.n_experts)]
-        self.gate = NoisyKGate(model_dim=self.model_dimension, n_experts=self.n_experts, k=self.k, dropout=self.dropout)
+        self.experts = [FeedForward(model_dimension=self.model_dimension, ff_dim=4*self.model_dimension, dropout=self.dropout) for i in range(self.n_experts)]
+        self.gate = NoisyKGate(model_dimension=self.model_dimension, n_experts=self.n_experts, k=self.k)
 
-    def gScores(self, scores, indices, x):
-        expert = lambda i : self.experts[i](x) # (C) -> (C)
-        expert_parallel = jax.vmap(fun=expert, in_axes=(0), out_axes=(0))
+    def get_gScores(self, scores, indices, x, train=True):
 
-        experts = expert_parallel(indices) # (K) -> (K, C)
-        gscore = scores[:, None] * experts #(K, 1), (K, C) -> (K, C)
-        gscore = jnp.sum(gscore, axis=0) #(K, C) -> C
-        return gscore
+
+        expert_lambda = [lambda mdl, x: mdl.experts[i](x) for i in range(self.n_experts)]
+
+        if self.is_mutable_collection('params'):
+            for expert_ffn in expert_lambda:
+                _ = expert_ffn(self, x)
+
+        expert_fn = lambda j, experts, x : nn.switch(j, expert_lambda, self, x)
+        expert_parallel = jax.vmap(fun=expert_fn, in_axes=(0, None, None), out_axes=(0))
+
+        expert_scores = expert_parallel(indices, self.experts, x) # (K) -> (K, C)
+        gScore = scores[:, None] * expert_scores #(K, 1), (K, C) -> (K, C)
+        gScore = jnp.sum(gScore, axis=0) #(K, C) -> C
+
+        return gScore
 
     def __call__(self, x):
-        s, i= self.gate(x)
-        gscore_parallel = jax.vmap(fun=jax.vmap(fun=self.gScores, in_axes=(0,0,0), out_axes=(0)), in_axis=(0,0,0), out_axes=(0))
+        s, i = self.gate(x)
+        gscore_parallel = jax.vmap(fun=jax.vmap(fun=self.get_gScores, in_axes=(0,0,0), out_axes=(0)), in_axes=(0,0,0), out_axes=(0))
         res = gscore_parallel(s, i, x)
         return res
 
@@ -228,12 +215,12 @@ class FeedForward(nn.Module):
     def setup(self):
         self.linear1 = nn.Dense(features=self.ff_dim)
         self.linear2 = nn.Dense(features=self.model_dimension)
-        self.dropout = nn.Dropout(rate=self.dropout)
+        self.dropout_layer = nn.Dropout(rate=self.dropout)
 
-    def __call__(self, x):
+    def __call__(self, x, train: bool = True):
         x = self.linear1(x)
         x = nn.relu(x)
-        x = self.dropout(x)
+        x = self.dropout_layer(x, deterministic=not train)
         x = self.linear2(x)
         return x
 
@@ -260,7 +247,7 @@ class Block(nn.Module):
 
     def __call__(self, x, train=True):
         x = self.norm1(x + self.attention(x, train=train))
-        x = self.norm2(x + self.ff(x))
+        x = self.norm2(x + self.ff(x, train=train))
         return x
 
 class Decoder(nn.Module):
