@@ -23,10 +23,17 @@ class KeyState:
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
 
+#TODO: make this a classmethod on decoder model similar to dataset
+def get_model(model_config, init_key: jax.random.key) -> Tuple[nn.Module, Any]:
 
-def get_model(model_config, init_key: jax.random.key, b, t, c) -> Tuple[nn.Module, Any]:
+    # 1. don't need t,c since model_config has that
+    # 2. don't need batch_size since model_config has that
+    # 3. input is size B,T where x[i,t] is an ith token so it is an integr and the model coverts it to
+    # (B,T,C) where C embd dim
+    # 4. the decoder doesn't know what a "model_config" is so it you make this a class method then you can
+    # extract each arugment into the init
 
-    x = jnp.ones((b, t, c))
+    x = jnp.ones((1, model_config.T))
 
     model = Decoder(model_config)
     params = model.init(init_key, x, training=False)['params']
@@ -79,14 +86,14 @@ def learning_rate(time_step, warmup_steps, total_steps, min_rate, max_rate):
 
 def main(config):
 
-    breakpoint()
+
     key = KeyState(config.seed) #fix this line
 
     print("setting up dataset")
-    train_dataset = Dataset()
-    
+    train_dataset, val_dataset, = Dataset.getDataset(cfg.data, key())
+
     print("setting up model")
-    model, params = get_model(model_config=config.model, init_key=key(), b=config.batch_size, t=config.T, c=config.model_dimension)
+    model, params = get_model(model_config=config.model, init_key=key())
 
     param_count = sum(x.size for x in jax.tree.leaves(params))
     print(f"Model parameter count: {param_count:,d} ")

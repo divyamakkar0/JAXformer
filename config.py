@@ -71,8 +71,10 @@ def parse_args():
     parser.add_argument("--latent_dim", type=int, default=64)
 
     parser.add_argument("--dataset", type=str, default="./tokens.npy")
+    parser.add_argument("--idx", type=int, default=0)
     parser.add_argument("--batch_size", type=int, default=3)
-    parser.add_argument("--idx", nargs='+', type=int, default=None)
+    parser.add_argument("--shuffle", action='store_true')
+    parser.add_argument("--val_spilt", type=float, default=0.1)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)
     parser.add_argument("--min_lr", type=float, default=0)
@@ -106,10 +108,11 @@ def parse_args():
     )
 
     data_cfg = dataConfig(
-        dataset=args.dataset,
+        dataset_path=args.dataset,
         T=args.T,
         batch_size=args.batch_size,
-        idx=args.idx
+        shuffle=args.shuffle,
+        val_spilt=args.val_spilt
     )
 
     lr_cfg = LRConfig(

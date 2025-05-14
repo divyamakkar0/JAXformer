@@ -31,7 +31,6 @@ class Dataset:
 
         self.data = data
 
-        print("loading data")
         self.dataset = jnp.stack([self.data[i: i + T] for i in range(0, self.data.shape[0] - T)])
         self.labels = jnp.stack([self.data[i + 1: i + T + 1] for i in range(0, self.data.shape[0] - T)])
 
