@@ -70,7 +70,7 @@ class MLA(nn.Module):
             self.Wqr = nn.Dense(features=(self.dhR * self.n_heads))
             self.rope = RoPE(model_dim=self.dhR, T=self.T)
 
-    def __call__(self, x, cKV_cache=None, kRT_cache=None, train=True):
+    def __call__(self, x, cKV_cache=None, kRT_cache=None, attention_mask=None, train=True):
         print(x.shape)
         B, T, C = x.shape
         if train == False:
@@ -129,6 +129,7 @@ class MLA(nn.Module):
             size = weights.shape[-1]
             mask = jnp.tril(jnp.ones((B, self.n_heads, size, size)))
             weights = jnp.where(mask == 0, -9e15, weights)
+            weights = jnp.where(attention_mask == 0, -9e15, weights) # add attention mask in case we need to pad
 
         weights = nn.softmax(weights, axis=-1)
 

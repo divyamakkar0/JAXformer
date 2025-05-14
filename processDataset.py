@@ -1,24 +1,19 @@
 import tiktoken
 import numpy as np
+import os
 
 
-enc = tiktoken.get_encoding("gpt2")
+enc = tiktoken.get_encoding("cl100k_base")
+
 eot = enc._special_tokens["<|endoftext|>"]
-
 
 def tokenize(text):
     tokens = [eot]
     tokens.extend(enc.encode(text))
-    tokens_np = np.array(tokens)
-    assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), (
-        "token dictionary too large for uint16"
-    )
-    tokens_np_uint16 = tokens_np.astype(np.uint16)
-    return tokens_np_uint16
+    tokens_np = np.array(tokens, dtype=np.uint32)
+    return tokens_np
 
+files = []
 
-with open("shake.txt", "r") as f:
-    txt = f.read()
-
-tokens = tokenize(txt)
-np.save("tokens.npy", tokens)
+for i in range(1, 100):
+    files.push_back(os.path.join("./train"))
