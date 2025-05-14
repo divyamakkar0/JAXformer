@@ -17,7 +17,7 @@ def tokenize(text):
     return tokens_np_uint16
 
 
-with open("shake.txt", "r") as f:
+with open("dataset.txt", "r") as f:
     txt = f.read()
 
 tokens = tokenize(txt)

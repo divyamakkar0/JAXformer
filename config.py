@@ -3,8 +3,25 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 @dataclass
+class modelConfig:
+    """model config class"""
+    model_dimension: int
+    n_heads: int
+    T: int 
+    dhR: int
+    rope_ratio: int
+    vocab_size: int
+    dropout: float
+    blocks: int
+    n_experts: int
+    k: int
+    moe: bool
+    latent_dim: int
+
+@dataclass
 class config:
     """class for keeping track of model args"""
+    model: modelConfig
     model_dimension: int
     n_heads: int
     T: int 
@@ -35,38 +52,59 @@ class config:
     output_dir: str = "./results/"
     checkpoint_steps: int = 10
     seed: int = 0
+    dataset: str = "./tokens.npy"
+    training_steps: int
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="model traning")
-    parser.add_argument("-model_dimension", dest="model_dimension", type=int, required=False)
-    parser.add_argument("-n_heads", dest="n_heads", type=int, required=False)
-    parser.add_argument("-T", dest="T", type=int, required=False)
-    parser.add_argument("-vocab_size", dest="vocab_size", type=int, required=False)
-    parser.add_argument("-dropout", dest="dropout", type=float, required=False)
-    parser.add_argument("-blocks", dest="blocks", type=int, required=False)
-    parser.add_argument("-n_experts", dest="n_experts", type=int, required=False)
-    parser.add_argument("-k", dest="k", type=int, required=False)
-    parser.add_argument("-moe", dest="moe", action='store_true', required=False)
-    parser.add_argument("-latent_dim", dest="latent_dim", type=int, required=False)
-    parser.add_argument("-dhR", dest="dhR", type=int, required=False)
-    parser.add_argument("-batch_size", dest="batch_size", type=int, required=False)
-    parser.add_argument("-rope_ratio", dest="rope_ratio", type=int, required=False)
-    parser.add_argument("-max_lr", dest="max_lr", type=float, required=False, default=4e-3)
-    parser.add_argument("-min_lr", dest="min_lr", type=float, required=False, default=0)
-    parser.add_argument("-end_lr", dest="end_lr", type=float, required=False, default=4e-4)
-    parser.add_argument("-warmup_steps", dest="warmup_steps", type=int, required=False, default=1000)
-    parser.add_argument("-end_steps", dest="end_steps", type=int, required=False, default=6000)
-    parser.add_argument("-project", dest="project", type=str, required=False, default="jaxformer")
-    parser.add_argument("-description", dest="description", type=str, required=False, default="transformer in jax")
-    parser.add_argument("-tags", dest="tags", nargs='*', type=str, required=False, default=None)
-    parser.add_argument("-name", dest="name", type=str, required=False, default=None)
-    parser.add_argument("-output_dir", dest="output_dir", type=str, required=False, default="./results/")
-    parser.add_argument("-checkpoint_steps", dest="checkpoint_steps", type=int, required=False, default=10)
-    parser.add_argument("-seed", dest="seed", type=int, required=False, default=0)
+    parser = argparse.ArgumentParser(description="model training")
+    parser.add_argument("-model_dimension", type=int, required=False)
+    parser.add_argument("-n_heads", type=int, required=False)
+    parser.add_argument("-T", type=int, required=False)
+    parser.add_argument("-vocab_size", type=int, required=False)
+    parser.add_argument("-dropout", type=float, required=False)
+    parser.add_argument("-blocks", type=int, required=False)
+    parser.add_argument("-n_experts", type=int, required=False)
+    parser.add_argument("-k", type=int, required=False)
+    parser.add_argument("-moe", action='store_true', required=False)
+    parser.add_argument("-latent_dim", type=int, required=False)
+    parser.add_argument("-dhR", type=int, required=False)
+    parser.add_argument("-batch_size", type=int, required=False)
+    parser.add_argument("-rope_ratio", type=int, required=False)
+    parser.add_argument("-max_lr", type=float, required=False, default=4e-3)
+    parser.add_argument("-min_lr", type=float, required=False, default=0)
+    parser.add_argument("-end_lr", type=float, required=False, default=4e-4)
+    parser.add_argument("-warmup_steps", type=int, required=False, default=1000)
+    parser.add_argument("-end_steps", type=int, required=False, default=6000)
+    parser.add_argument("-project", type=str, required=False, default="jaxformer")
+    parser.add_argument("-description", type=str, required=False, default="transformer in jax")
+    parser.add_argument("-tags", nargs='*', type=str, required=False, default=None)
+    parser.add_argument("-name", type=str, required=False, default=None)
+    parser.add_argument("-output_dir", type=str, required=False, default="./results/")
+    parser.add_argument("-checkpoint_steps", type=int, required=False, default=10)
+    parser.add_argument("-seed", type=int, required=False, default=0)
+    parser.add_argument("-dataset", type=str, required=False, default="./tokens.npy")
+    parser.add_argument("-training-steps", type=int, required=False, default=1000)
+
 
     args = parser.parse_args()
 
+    model_cfg = modelConfig(
+        model_dimension=args.model_dimension,
+        n_heads=args.n_heads,
+        T=args.T,
+        dhR=args.dhR,
+        rope_ratio=args.rope_ratio,
+        vocab_size=args.vocab_size,
+        dropout=args.dropout,
+        blocks=args.blocks,
+        n_experts=args.n_experts,
+        k=args.k,
+        moe=args.moe,
+        latent_dim=args.latent_dim
+    )
+
     cfg = config(
+        model=model_cfg,
         model_dimension=args.model_dimension,
         n_heads=args.n_heads,
         T=args.T,
@@ -91,7 +129,9 @@ def parse_args():
         name=args.name,
         output_dir=args.output_dir,
         checkpoint_steps=args.checkpoint_steps,
-        seed=args.seed
+        seed=args.seed,
+        dataset=args.dataset
+        training_steps=args.training_steps
     )
 
     return cfg
