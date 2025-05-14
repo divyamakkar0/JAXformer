@@ -7,7 +7,7 @@ class modelConfig:
     """model config class"""
     model_dimension: int
     n_heads: int
-    T: int 
+    T: int
     dhR: int
     rope_ratio: int
     vocab_size: int
@@ -19,32 +19,29 @@ class modelConfig:
     latent_dim: int
 
 @dataclass
+class dataConfig:
+    dataset_path: str = "./tokens.npy"
+    val_spilt: float = 0.1
+    T: int = 6
+    batch_size: int = 3
+    shuffle: bool = True
+
+@dataclass
+class LRConfig:
+    """class for keeping track of learning rate args"""
+    max_lr: float = 4e-3
+    min_lr: float = 0
+    end_lr: float = 4e-4
+    warmup_steps: int = 1000
+    end_steps: int = 6000
+
+@dataclass
 class config:
     """class for keeping track of model args"""
     model: modelConfig
-    model_dimension: int
-    n_heads: int
-    T: int 
-    vocab_size: int
-    dropout: float
-    blocks: int
-    n_experts: int
-    k: int
-    moe: bool
-    latent_dim: int
-    dhR: int
-    batch_size: int
-    rope_ratio : int
-    max_lr: float = 4e-3
-    min_lr: float = 0
-    end_lr: float = 4e-4
-    warmup_steps: int = 1000
-    end_steps: int = 6000
-    max_lr: float = 4e-3
-    min_lr: float = 0
-    end_lr: float = 4e-4
-    warmup_steps: int = 1000
-    end_steps: int = 6000
+    data: dataConfig
+    lr: LRConfig
+    training_steps: int
     project: str = "jaxformer"
     description: str = "transformer in jax"
     tags: Optional[List[str]] = None
@@ -52,40 +49,45 @@ class config:
     output_dir: str = "./results/"
     checkpoint_steps: int = 10
     seed: int = 0
-    dataset: str = "./tokens.npy"
-    training_steps: int
+
+    def __repr__(self):
+        return f"model: {self.model}\n data: {self.data}\n lr: {self.lr}\n project: {self.project}\n description: {self.description}\n tags: {self.tags}\n name: {self.name}\n output_dir: {self.output_dir}\n checkpoint_steps: {self.checkpoint_steps}\n seed: {self.seed}\n"
+
 
 def parse_args():
+
     parser = argparse.ArgumentParser(description="model training")
-    parser.add_argument("-model_dimension", type=int, required=False)
-    parser.add_argument("-n_heads", type=int, required=False)
-    parser.add_argument("-T", type=int, required=False)
-    parser.add_argument("-vocab_size", type=int, required=False)
-    parser.add_argument("-dropout", type=float, required=False)
-    parser.add_argument("-blocks", type=int, required=False)
-    parser.add_argument("-n_experts", type=int, required=False)
-    parser.add_argument("-k", type=int, required=False)
-    parser.add_argument("-moe", action='store_true', required=False)
-    parser.add_argument("-latent_dim", type=int, required=False)
-    parser.add_argument("-dhR", type=int, required=False)
-    parser.add_argument("-batch_size", type=int, required=False)
-    parser.add_argument("-rope_ratio", type=int, required=False)
-    parser.add_argument("-max_lr", type=float, required=False, default=4e-3)
-    parser.add_argument("-min_lr", type=float, required=False, default=0)
-    parser.add_argument("-end_lr", type=float, required=False, default=4e-4)
-    parser.add_argument("-warmup_steps", type=int, required=False, default=1000)
-    parser.add_argument("-end_steps", type=int, required=False, default=6000)
-    parser.add_argument("-project", type=str, required=False, default="jaxformer")
-    parser.add_argument("-description", type=str, required=False, default="transformer in jax")
-    parser.add_argument("-tags", nargs='*', type=str, required=False, default=None)
-    parser.add_argument("-name", type=str, required=False, default=None)
-    parser.add_argument("-output_dir", type=str, required=False, default="./results/")
-    parser.add_argument("-checkpoint_steps", type=int, required=False, default=10)
-    parser.add_argument("-seed", type=int, required=False, default=0)
-    parser.add_argument("-dataset", type=str, required=False, default="./tokens.npy")
-    parser.add_argument("-training-steps", type=int, required=False, default=1000)
+    parser.add_argument("--model_dimension", type=int, default=512)
+    parser.add_argument("--n_heads", type=int, default=8)
+    parser.add_argument("--T", type=int, default=6)
+    parser.add_argument("--dhR", type=int, default=64)
+    parser.add_argument("--rope_ratio", type=int, default=10000)
+    parser.add_argument("--vocab_size", type=int, default=50000)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--blocks", type=int, default=6)
+    parser.add_argument("--n_experts", type=int, default=4)
+    parser.add_argument("--k", type=int, default=2)
+    parser.add_argument("--moe", action='store_true')
+    parser.add_argument("--latent_dim", type=int, default=64)
 
+    parser.add_argument("--dataset", type=str, default="./tokens.npy")
+    parser.add_argument("--batch_size", type=int, default=3)
+    parser.add_argument("--idx", nargs='+', type=int, default=None)
 
+    parser.add_argument("--max_lr", type=float, default=4e-3)
+    parser.add_argument("--min_lr", type=float, default=0)
+    parser.add_argument("--end_lr", type=float, default=4e-4)
+    parser.add_argument("--warmup_steps", type=int, default=1000)
+    parser.add_argument("--end_steps", type=int, default=6000)
+
+    parser.add_argument("--project", type=str, default="jaxformer")
+    parser.add_argument("--description", type=str, default="transformer in jax")
+    parser.add_argument("--tags", nargs='*', type=str, default=None)
+    parser.add_argument("--name", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default="./results/")
+    parser.add_argument("--checkpoint_steps", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--training_steps", type=int, default=1000)
     args = parser.parse_args()
 
     model_cfg = modelConfig(
@@ -103,26 +105,25 @@ def parse_args():
         latent_dim=args.latent_dim
     )
 
-    cfg = config(
-        model=model_cfg,
-        model_dimension=args.model_dimension,
-        n_heads=args.n_heads,
+    data_cfg = dataConfig(
+        dataset=args.dataset,
         T=args.T,
-        vocab_size=args.vocab_size,
-        dropout=args.dropout,
-        blocks=args.blocks,
-        n_experts=args.n_experts,
-        k=args.k,
-        moe=args.moe,
-        latent_dim=args.latent_dim,
-        dhR=args.dhR,
         batch_size=args.batch_size,
-        rope_ratio=args.rope_ratio,
+        idx=args.idx
+    )
+
+    lr_cfg = LRConfig(
         max_lr=args.max_lr,
         min_lr=args.min_lr,
         end_lr=args.end_lr,
         warmup_steps=args.warmup_steps,
-        end_steps=args.end_steps,
+        end_steps=args.end_steps
+    )
+
+    cfg = config(
+        model=model_cfg,
+        data=data_cfg,
+        lr=lr_cfg,
         project=args.project,
         description=args.description,
         tags=args.tags,
@@ -130,8 +131,11 @@ def parse_args():
         output_dir=args.output_dir,
         checkpoint_steps=args.checkpoint_steps,
         seed=args.seed,
-        dataset=args.dataset
         training_steps=args.training_steps
     )
 
     return cfg
+
+if __name__ == "__main__":
+    cfg = parse_args()
+    print(cfg)
