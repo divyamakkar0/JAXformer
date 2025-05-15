@@ -71,7 +71,6 @@ class MLA(nn.Module):
             self.rope = RoPE(model_dim=self.dhR, T=self.T)
 
     def __call__(self, x, cKV_cache=None, kRT_cache=None, attention_mask=None, train=True):
-        print(x.shape)
         B, T, C = x.shape
         if train == False:
             x = x[:, -1:, :]
@@ -102,10 +101,10 @@ class MLA(nn.Module):
                     kRT_cache = jnp.concatenate([kRT_cache, kRt[:, 0, :, :]], axis=1)
                 kRt = kRT_cache[:, None, ...].repeat(self.n_heads, axis=1)
 
-            if cKV_cache.shape[1] >= self.max_tokens:
-                cKV_cache = cKV_cache[:, -self.max_tokens :, :]
+            if cKV_cache.shape[1] >= self.T:
+                cKV_cache = cKV_cache[:, -self.T:, :]
                 if self.rope:
-                    kRT_cache = kRT_cache[:, -self.max_tokens :, :]
+                    kRT_cache = kRT_cache[:, -self.T:, :]
 
         v_k = rearrange(
             self.W_uKV(cKVt), "B T (nh d) -> B nh T d", nh=self.n_heads, d=2 * self.dk
@@ -336,16 +335,16 @@ class Decoder(nn.Module):
             x = nn.softmax(x, axis=-1)
 
         return x, out_cache
-    
+
     @classmethod
     def get_model(cls, model_config, init_key: jax.random.key):
-        x = jnp.ones((1, model_config.T))
+        x = jnp.ones((1, model_config.T), dtype=jnp.int32)
 
-        model = cls(model_config.model_dimension, 
-                        model_config.n_heads, 
-                        model_config.dhR, 
-                        model_config.rope_ratio, 
-                        model_config.T, 
+        model = cls(model_config.model_dimension,
+                        model_config.n_heads,
+                        model_config.dhR,
+                        model_config.rope_ratio,
+                        model_config.T,
                         model_config.vocab_size,
                         model_config.dropout,
                         model_config.blocks,
@@ -354,6 +353,13 @@ class Decoder(nn.Module):
                         model_config.moe,
                         model_config.latent_dim,
                         )
+
+        params = model.init(
+            init_key,
+            x,
+            train=False,
+        )
+
         return model, params
 
 

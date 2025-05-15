@@ -1,14 +1,24 @@
+import os
+os.environ['XLA_FLAGS'] = (
+    '--xla_gpu_triton_gemm_any=True '
+    '--xla_gpu_enable_latency_hiding_scheduler=true '
+)
+
+
 import jax
 import jax.numpy as jnp
-from jax import grad, jit, vmap
-from jax import random
-from flax import linen as nn
+
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
+
 from flax.training import train_state
 import time
 import math
 import optax
 
-from config import parse_args
+from config import parse_args, config
 from model import Decoder
 from dataset import Dataset
 
@@ -22,8 +32,6 @@ class KeyState:
     def __call__(self, num: int = 2):
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
-
-    
 
 def cross_entropy_loss(model, params, key, x, y, train=True):
 
@@ -70,7 +78,10 @@ def learning_rate(time_step, warmup_steps, total_steps, min_rate, max_rate):
     else:
         return min_rate
 
-def main(config):
+def main(config: config):
+    """
+    main function
+    """
 
 
     key = KeyState(config.seed) #fix this line
@@ -79,7 +90,7 @@ def main(config):
     train_dataset, val_dataset, = Dataset.getDataset(cfg.data, key())
 
     print("setting up model")
-    model, params = get_model(model_config=config.model, init_key=key())
+    model, params = Decoder.get_model(model_config=config.model, init_key=key())
 
     param_count = sum(x.size for x in jax.tree.leaves(params))
     print(f"Model parameter count: {param_count:,d} ")
@@ -87,11 +98,11 @@ def main(config):
 
     #cosine scheduler
     lr_scheduler = optax.warmup_cosine_decay_schedule(
-        init_value=config.min_lr,
-        peak_value=config.max_lr,
-        warmup_steps=config.warmup_steps,
-        decay_steps=config.end_steps,
-        end_value=config.end_lr,
+        init_value=config.lr.min_lr,
+        peak_value=config.lr.max_lr,
+        warmup_steps=config.lr.warmup_steps,
+        decay_steps=config.lr.end_steps,
+        end_value=config.lr.end_lr,
     )
 
     #optax adam optimizer
@@ -116,12 +127,15 @@ def main(config):
     train_loss = 0.0
 
     for current_step in range(total_steps):
-        #get batch needs to be fixed
-        x_t, label_t = get_batch(key=key(), scheduler=scheduler, data=train_dataset())
-        grads, metrics = train_step_jit(key(), state.params, x, label_t, t, noise)
-        wandb.log({"step": current_step, "train_loss": metrics['loss']})
+        x_t, label_t = train_dataset()
+        breakpoint()
+        grads, metrics = train_step_jit(key(), state.params, x_t, label_t)
+        # wandb.log({"step": current_step, "train_loss": metrics['loss']})
         state = state.apply_gradients(grads=grads)
         train_loss += metrics['loss']
+
+        print(f"step: {current_step}, train_loss: {metrics['loss']:.4f}, time: {time.time() - start:.2f}s")
+        start = time.time()
 
 if __name__ == "__main__":
     cfg = parse_args()

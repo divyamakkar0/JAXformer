@@ -1,5 +1,7 @@
 # !/bin/bash
 
+# Script to prepare billion word shards
+
 if [ -f "training-monolingual.tgz" ]; then
     echo "File already downloaded."
 else
