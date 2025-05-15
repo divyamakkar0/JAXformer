@@ -8,6 +8,7 @@ import flax
 from flax import linen as nn
 
 
+
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int

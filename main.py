@@ -23,6 +23,9 @@ from model import Decoder
 from dataset import Dataset
 
 from typing import Tuple, Any
+import orbax.checkpoint
+import shutil
+from flax.training import orbax_utils
 
 #key gen
 class KeyState:
@@ -125,6 +128,14 @@ def main(config: config):
 
     start = time.time()
     train_loss = 0.0
+    checkpoint_dir = config.checkpoint_dir
+    if os.path.exists(checkpoint_dir):
+        shutil.rmtree(checkpoint_dir)
+
+    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+    options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=1, create=True)
+    checkpoint_manager = orbax.checkpoint.CheckpointManager(
+    checkpoint_dir, checkpointer, options)
 
     for current_step in range(total_steps):
         x_t, label_t = train_dataset()
@@ -134,8 +145,11 @@ def main(config: config):
         state = state.apply_gradients(grads=grads)
         train_loss += metrics['loss']
 
-        print(f"step: {current_step}, train_loss: {metrics['loss']:.4f}, time: {time.time() - start:.2f}s")
-        start = time.time()
+        if current_step % cfg.checkpoint_steps == 0:
+            checkpoint_manager.save(current_step, orbax_utils.from_train_state(state))
+
+            print(f"step: {current_step}, train_loss: {metrics['loss']:.4f}, time: {time.time() - start:.2f}s")
+            start = time.time()
 
 if __name__ == "__main__":
     cfg = parse_args()
