@@ -53,7 +53,7 @@ class Dataset:
 
         data = jnp.load(cfg.dataset_path)
         idx = int(data.shape[0] * cfg.val_spilt)
-        train_data, val_data = data[:idx], data[idx:]
+        val_data, train_data = data[:idx], data[idx:]
         train_key, val_key = jax.random.split(key)
         train_dataset = cls(train_data, cfg.T, cfg.batch_size, shuffle=cfg.shuffle, key=train_key)
         val_dataset = cls(val_data, cfg.T, cfg.batch_size, shuffle=cfg.shuffle, key=val_key)
@@ -76,6 +76,7 @@ class Dataset:
             x = jnp.concat([x, self.dataset[:self.idx]])
             y = jnp.concat([y, self.labels[:self.idx]])
 
+
         return x, y
 
 if __name__ == "__main__":
@@ -83,7 +84,7 @@ if __name__ == "__main__":
     test_cfg = dataConfig(
         dataset_path="./tokens.npy",
         val_spilt=0.1,
-        T=6,
+        T=1024,
         batch_size=3,
         shuffle=True
     )

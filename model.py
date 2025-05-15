@@ -332,8 +332,6 @@ class Decoder(nn.Module):
             out_cache.append(current_cache)
 
         x = x @ embed.embedding.embedding.T
-        if not train:
-            x = nn.softmax(x, axis=-1)
 
         return x, out_cache
 
