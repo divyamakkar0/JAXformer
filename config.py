@@ -48,6 +48,8 @@ class config:
     name: str = None
     output_dir: str = "./results/"
     checkpoint_steps: int = 10
+    checkpoint_dir: str = "./checkpoints/"
+    checkpoint_manager: str = "./checkpoints/manager/"
     seed: int = 0
 
     def __repr__(self):
@@ -88,6 +90,8 @@ def parse_args():
     parser.add_argument("--name", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default="./results/")
     parser.add_argument("--checkpoint_steps", type=int, default=10)
+    parser.add_argument("--checkpoint_dir", type=str, default="./checkpoints/")
+    parser.add_argument("--checkpoint_manager", type=str, default="./checkpoints/manager/")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--training_steps", type=int, default=1000)
     args = parser.parse_args()
@@ -133,6 +137,8 @@ def parse_args():
         name=args.name,
         output_dir=args.output_dir,
         checkpoint_steps=args.checkpoint_steps,
+        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_manager=args.checkpoint_manager,
         seed=args.seed,
         training_steps=args.training_steps
     )
