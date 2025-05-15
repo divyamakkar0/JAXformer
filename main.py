@@ -38,11 +38,12 @@ class KeyState:
 
 def cross_entropy_loss(model, params, key, x, y, train=True):
 
-    pred = model.apply({'params': params}, x, training=train, rngs={'dropout': key})
-    log_prob = jax.nn.log_softmax(pred, axis=-1)
-    targets = jnp.sum(log_prob * jax.nn.one_hot(y, pred.shape[-1]), axis=-1)
-    loss = -jnp.mean(targets)
-    return loss, pred
+    B, T = x.shape
+    pred, cache = model.apply({'params': params}, x, train=train, rngs={'dropout': key})
+    log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
+    y = y.reshape(B * T)
+    loss = -jnp.mean(log_prob[jnp.arange(B * T), y])
+    return loss, (pred, cache)
 
 #MoE Loss
 
@@ -53,7 +54,7 @@ def train_step(loss_fn, params, key, *args, **kwargs):
         has_aux=True
     )
     val, grads = loss(params, key, *args, **kwargs, train=True)
-    loss, pred = val
+    loss, pred, _ = val[0], *val[1] # don't need cache in training
 
     metrics = {
         'loss': loss,
@@ -63,23 +64,14 @@ def train_step(loss_fn, params, key, *args, **kwargs):
     return grads, metrics
 
 def eval_step(loss_fn, params, key, *args, **kwargs):
-    loss, pred = loss_fn(params, key, *args, **kwargs, train=False)
+    loss, (pred, cache) = loss_fn(params, key, *args, **kwargs, train=False)
+    pred = jax.nn.softmax(pred, axis=-1)
     metrics = {
         'loss': loss,
         'pred': pred,
+        'cache': cache,
     }
     return metrics
-
-def learning_rate(time_step, warmup_steps, total_steps, min_rate, max_rate):
-    if time_step < warmup_steps:
-        return min_rate + (max_rate - min_rate) * (time_step/warmup_steps)
-    elif time_step <= total_steps:
-        decay_steps = total_steps - warmup_steps
-        decay_time = time_step - warmup_steps
-        cosine_decay = 0.5 * (1 + jnp.cos(math.pi * (decay_time / decay_steps)))
-        return min_rate + (max_rate - min_rate)*cosine_decay
-    else:
-        return min_rate
 
 def main(config: config):
     """
@@ -91,6 +83,7 @@ def main(config: config):
 
     print("setting up dataset")
     train_dataset, val_dataset, = Dataset.getDataset(cfg.data, key())
+    print(len(train_dataset), len(val_dataset))
 
     print("setting up model")
     model, params = Decoder.get_model(model_config=config.model, init_key=key())
@@ -120,15 +113,14 @@ def main(config: config):
 
     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
     train_step_jit = jax.jit(
-            lambda key, params, x, y : train_step(loss_fn, params, key, x, y)
+        lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
+        donate_argnames=("params")
         )
-    eval_step_jit = jax.jit(
-        lambda key, params, x, y : eval_step( loss_fn, params, key, x, y)
-        )
+    eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
 
-    start = time.time()
-    train_loss = 0.0
-    checkpoint_dir = config.checkpoint_dir
+
+
+    checkpoint_dir = os.path.abspath(config.checkpoint_dir)
     if os.path.exists(checkpoint_dir):
         shutil.rmtree(checkpoint_dir)
 
@@ -137,19 +129,39 @@ def main(config: config):
     checkpoint_manager = orbax.checkpoint.CheckpointManager(
     checkpoint_dir, checkpointer, options)
 
+    start = time.time()
+    train_loss = 0.0
     for current_step in range(total_steps):
-        x_t, label_t = train_dataset()
-        breakpoint()
-        grads, metrics = train_step_jit(key(), state.params, x_t, label_t)
-        # wandb.log({"step": current_step, "train_loss": metrics['loss']})
+        grads = None
+        grad_loss = 0.0
+        for i in range(config.grad_step):
+            x_t, label_t = train_dataset()
+            grads_step, metrics = train_step_jit(key(), state.params, x_t, label_t)
+            # wandb.log({"step": current_step, "train_loss": metrics['loss']})
+            if grads is None:
+                grads = grads_step
+            else:
+                grads = jax.tree.map(lambda x, y: x + y, grads, grads_step)
+            grad_loss += metrics['loss']
+
+        grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         state = state.apply_gradients(grads=grads)
-        train_loss += metrics['loss']
+        train_loss += grad_loss / config.grad_step
 
-        if current_step % cfg.checkpoint_steps == 0:
-            checkpoint_manager.save(current_step, orbax_utils.from_train_state(state))
+        if current_step > 0 and current_step % cfg.checkpoint_steps == 0:
 
-            print(f"step: {current_step}, train_loss: {metrics['loss']:.4f}, time: {time.time() - start:.2f}s")
+            # checkpoint_manager.save(current_step, state)
+            val_loss = 0.0
+            for i in range(config.checkpoint_steps):
+                x_t, label_t = val_dataset()
+                metrics = eval_step_jit(key(), state.params, x_t, label_t)
+                # wandb.log({"step": current_step, "val_loss": metrics['loss']})
+                val_loss += metrics['loss']
+            val_loss /= config.checkpoint_steps
+            print(f"step: {current_step}, val_loss: {val_loss:.4f}, train_loss: {train_loss / cfg.checkpoint_steps:.4f}, time: {time.time() - start:.2f}s")
+
             start = time.time()
+            train_loss = 0.0
 
 if __name__ == "__main__":
     cfg = parse_args()

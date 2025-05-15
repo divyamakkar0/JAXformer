@@ -42,6 +42,7 @@ class config:
     data: dataConfig
     lr: LRConfig
     training_steps: int
+    grad_step: int = 1
     project: str = "jaxformer"
     description: str = "transformer in jax"
     tags: Optional[List[str]] = None
@@ -53,7 +54,28 @@ class config:
     seed: int = 0
 
     def __repr__(self):
-        return f"model: {self.model}\n data: {self.data}\n lr: {self.lr}\n project: {self.project}\n description: {self.description}\n tags: {self.tags}\n name: {self.name}\n output_dir: {self.output_dir}\n checkpoint_steps: {self.checkpoint_steps}\n seed: {self.seed}\n"
+        return f"""Configuration:
+      Model:
+        {self.model}
+      Data:
+        {self.data}
+      Learning Rate:
+        {self.lr}
+      Training:
+        training_steps: {self.training_steps}
+        seed: {self.seed}
+      Checkpointing:
+        checkpoint_steps: {self.checkpoint_steps}
+        checkpoint_dir: {self.checkpoint_dir}
+        checkpoint_manager: {self.checkpoint_manager}
+      Output:
+        output_dir: {self.output_dir}
+      Project:
+        project: {self.project}
+        name: {self.name}
+        description: {self.description}
+        tags: {self.tags}
+    """
 
 
 def parse_args():
@@ -61,10 +83,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description="model training")
     parser.add_argument("--model_dimension", type=int, default=512)
     parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--T", type=int, default=6)
+    parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--dhR", type=int, default=64)
     parser.add_argument("--rope_ratio", type=int, default=10000)
-    parser.add_argument("--vocab_size", type=int, default=50000)
+    parser.add_argument("--vocab_size", type=int, default=100277)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--blocks", type=int, default=6)
     parser.add_argument("--n_experts", type=int, default=4)
@@ -74,8 +96,7 @@ def parse_args():
 
     parser.add_argument("--dataset", type=str, default="./tokens.npy")
     parser.add_argument("--idx", type=int, default=0)
-    parser.add_argument("--batch_size", type=int, default=3)
-    parser.add_argument("--shuffle", action='store_true')
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--val_spilt", type=float, default=0.1)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)
@@ -94,6 +115,7 @@ def parse_args():
     parser.add_argument("--checkpoint_manager", type=str, default="./checkpoints/manager/")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--training_steps", type=int, default=1000)
+    parser.add_argument("--grad_step", type=int, default=1)
     args = parser.parse_args()
 
     model_cfg = modelConfig(
@@ -115,7 +137,6 @@ def parse_args():
         dataset_path=args.dataset,
         T=args.T,
         batch_size=args.batch_size,
-        shuffle=args.shuffle,
         val_spilt=args.val_spilt
     )
 
@@ -140,7 +161,8 @@ def parse_args():
         checkpoint_dir=args.checkpoint_dir,
         checkpoint_manager=args.checkpoint_manager,
         seed=args.seed,
-        training_steps=args.training_steps
+        training_steps=args.training_steps,
+        grad_step=args.grad_step
     )
 
     return cfg

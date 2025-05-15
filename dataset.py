@@ -31,8 +31,14 @@ class Dataset:
 
         self.data = data
 
-        self.dataset = jnp.stack([self.data[i: i + T] for i in range(0, self.data.shape[0] - T)])
-        self.labels = jnp.stack([self.data[i + 1: i + T + 1] for i in range(0, self.data.shape[0] - T)])
+        print("loading dataset ... ")
+
+        inx = jnp.arange(self.data.shape[0] - T, dtype=jnp.int32)
+
+        slice_fn = lambda i: jax.lax.dynamic_slice(self.data, (i,), (T,))
+        self.dataset = jax.vmap(slice_fn, in_axes=(0))(inx)
+        self.labels = jax.vmap(slice_fn, in_axes=(0))(inx + 1)
+
 
         if shuffle:
             self.key, shuffle_key = jax.random.split(self.key)
@@ -47,7 +53,7 @@ class Dataset:
 
         data = jnp.load(cfg.dataset_path)
         idx = int(data.shape[0] * cfg.val_spilt)
-        train_data, val_data = data[:idx], data[idx:]
+        val_data, train_data = data[:idx], data[idx:]
         train_key, val_key = jax.random.split(key)
         train_dataset = cls(train_data, cfg.T, cfg.batch_size, shuffle=cfg.shuffle, key=train_key)
         val_dataset = cls(val_data, cfg.T, cfg.batch_size, shuffle=cfg.shuffle, key=val_key)
@@ -70,6 +76,7 @@ class Dataset:
             x = jnp.concat([x, self.dataset[:self.idx]])
             y = jnp.concat([y, self.labels[:self.idx]])
 
+
         return x, y
 
 if __name__ == "__main__":
@@ -77,10 +84,14 @@ if __name__ == "__main__":
     test_cfg = dataConfig(
         dataset_path="./tokens.npy",
         val_spilt=0.1,
-        T=6,
+        T=1024,
         batch_size=3,
         shuffle=True
     )
+    import time
+    start = time.time()
     shake_dataset = Dataset.getDataset(test_cfg, jax.random.key(0))
+    end = time.time()
+    print(f"time taken to load dataset: {(end - start):.2f} seconds")
     print(len(shake_dataset))
     breakpoint()
