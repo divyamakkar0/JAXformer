@@ -57,7 +57,7 @@ class config:
 def parse_args():
 
     parser = argparse.ArgumentParser(description="model training")
-    parser.add_argument("--model_dimension", type=int, default=512)
+    parser.add_argument("--model_dimension", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--dhR", type=int, default=64)

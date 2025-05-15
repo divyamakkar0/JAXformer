@@ -124,8 +124,9 @@ def main(config: config):
 
     start = time.time()
     train_loss = 0.0
-    x_t, label_t = train_dataset()
+   
     for current_step in range(total_steps):
+        x_t, label_t = train_dataset()
         grads, metrics = train_step_jit(key(), state.params, x_t, label_t)
         # wandb.log({"step": current_step, "train_loss": metrics['loss']})
         state= state.apply_gradients(grads=grads)
