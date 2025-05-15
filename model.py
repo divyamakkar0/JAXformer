@@ -336,6 +336,25 @@ class Decoder(nn.Module):
             x = nn.softmax(x, axis=-1)
 
         return x, out_cache
+    
+    @classmethod
+    def get_model(cls, model_config, init_key: jax.random.key):
+        x = jnp.ones((1, model_config.T))
+
+        model = cls(model_config.model_dimension, 
+                        model_config.n_heads, 
+                        model_config.dhR, 
+                        model_config.rope_ratio, 
+                        model_config.T, 
+                        model_config.vocab_size,
+                        model_config.dropout,
+                        model_config.blocks,
+                        model_config.n_experts,
+                        model_config.k,
+                        model_config.moe,
+                        model_config.latent_dim,
+                        )
+        return model, params
 
 
 if __name__ == "__main__":

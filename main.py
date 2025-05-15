@@ -23,21 +23,7 @@ class KeyState:
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
 
-#TODO: make this a classmethod on decoder model similar to dataset
-def get_model(model_config, init_key: jax.random.key) -> Tuple[nn.Module, Any]:
-
-    # 1. don't need t,c since model_config has that
-    # 2. don't need batch_size since model_config has that
-    # 3. input is size B,T where x[i,t] is an ith token so it is an integr and the model coverts it to
-    # (B,T,C) where C embd dim
-    # 4. the decoder doesn't know what a "model_config" is so it you make this a class method then you can
-    # extract each arugment into the init
-
-    x = jnp.ones((1, model_config.T))
-
-    model = Decoder(model_config)
-    params = model.init(init_key, x, training=False)['params']
-    return model, params
+    
 
 def cross_entropy_loss(model, params, key, x, y, train=True):
 
