@@ -6,6 +6,7 @@ from typing import Callable
 from einops import rearrange
 import flax
 from flax import linen as nn
+import tiktoken
 
 
 
@@ -362,6 +363,25 @@ class Decoder(nn.Module):
         )
 
         return model, params
+
+    def generate(self, idx, key, k, temperature, max_token_len=100):
+        enc = tiktoken.get_encoding("cl100k_base")
+        t = idx.shape[-1]
+        cache = None
+        for i in range(max_token_len):
+            idx_crop = idx[:, -self.T:]
+            logits, layer_cache = self(x, cache, train=False)
+            cache.append(layer_cache)
+
+            logits = logits[: ,-1, :] / temperature
+            k_scores, k_indices = jax.lax.top_k(x, k)
+
+            probs = nn.softmax(k_scores, axis=-1)
+            idx_next = jax.random.categorical(key, probs, axis=-1)
+            idx = idx.append((idx, enc.decode(idx_next)), dim=1) 
+        return idx
+
+
 
 
 if __name__ == "__main__":
