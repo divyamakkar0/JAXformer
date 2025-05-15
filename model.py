@@ -206,7 +206,7 @@ class MoE(nn.Module):
 
     def get_gScores(self, scores, indices, x, train=True):
         expert_lambda = [
-            lambda mdl, x: mdl.experts[i](x) for i in range(self.n_experts)
+            lambda mdl, x: mdl.experts[i](x) for i in range(mdl.n_experts)
         ]
 
         if self.is_mutable_collection("params"):
@@ -358,7 +358,7 @@ class Decoder(nn.Module):
             init_key,
             x,
             train=False,
-        )
+        )['params']
 
         return model, params
 

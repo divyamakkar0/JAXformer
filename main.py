@@ -35,11 +35,12 @@ class KeyState:
 
 def cross_entropy_loss(model, params, key, x, y, train=True):
 
-    pred = model.apply({'params': params}, x, training=train, rngs={'dropout': key})
-    log_prob = jax.nn.log_softmax(pred, axis=-1)
-    targets = jnp.sum(log_prob * jax.nn.one_hot(y, pred.shape[-1]), axis=-1)
-    loss = -jnp.mean(targets)
-    return loss, pred
+    B, T = x.shape
+    pred, cache = model.apply({'params': params}, x, train=train, rngs={'dropout': key})
+    log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
+    y = y.reshape(B * T)
+    loss = -jnp.mean(log_prob[jnp.arange(B * T), y])
+    return loss, (pred, cache)
 
 #MoE Loss
 
@@ -50,7 +51,7 @@ def train_step(loss_fn, params, key, *args, **kwargs):
         has_aux=True
     )
     val, grads = loss(params, key, *args, **kwargs, train=True)
-    loss, pred = val
+    loss, pred, _ = val[0], *val[1] # don't need cache in training
 
     metrics = {
         'loss': loss,
@@ -60,10 +61,11 @@ def train_step(loss_fn, params, key, *args, **kwargs):
     return grads, metrics
 
 def eval_step(loss_fn, params, key, *args, **kwargs):
-    loss, pred = loss_fn(params, key, *args, **kwargs, train=False)
+    loss, (pred, cache) = loss_fn(params, key, *args, **kwargs, train=False)
     metrics = {
         'loss': loss,
         'pred': pred,
+        'cache': cache,
     }
     return metrics
 
@@ -116,22 +118,17 @@ def main(config: config):
     print("starting training")
 
     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
-    train_step_jit = jax.jit(
-            lambda key, params, x, y : train_step(loss_fn, params, key, x, y)
-        )
-    eval_step_jit = jax.jit(
-        lambda key, params, x, y : eval_step( loss_fn, params, key, x, y)
-        )
+    train_step_jit = jax.jit(lambda key, params, x, y : train_step(loss_fn, params, key, x, y))
+    eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
+
 
     start = time.time()
     train_loss = 0.0
-
+    x_t, label_t = train_dataset()
     for current_step in range(total_steps):
-        x_t, label_t = train_dataset()
-        breakpoint()
         grads, metrics = train_step_jit(key(), state.params, x_t, label_t)
         # wandb.log({"step": current_step, "train_loss": metrics['loss']})
-        state = state.apply_gradients(grads=grads)
+        state= state.apply_gradients(grads=grads)
         train_loss += metrics['loss']
 
         print(f"step: {current_step}, train_loss: {metrics['loss']:.4f}, time: {time.time() - start:.2f}s")

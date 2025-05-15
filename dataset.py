@@ -31,8 +31,14 @@ class Dataset:
 
         self.data = data
 
-        self.dataset = jnp.stack([self.data[i: i + T] for i in range(0, self.data.shape[0] - T)])
-        self.labels = jnp.stack([self.data[i + 1: i + T + 1] for i in range(0, self.data.shape[0] - T)])
+        print("loading dataset ... ")
+
+        inx = jnp.arange(self.data.shape[0] - T, dtype=jnp.int32)
+
+        slice_fn = lambda i: jax.lax.dynamic_slice(self.data, (i,), (T,))
+        self.dataset = jax.vmap(slice_fn, in_axes=(0))(inx)
+        self.labels = jax.vmap(slice_fn, in_axes=(0))(inx + 1)
+
 
         if shuffle:
             self.key, shuffle_key = jax.random.split(self.key)
@@ -81,6 +87,10 @@ if __name__ == "__main__":
         batch_size=3,
         shuffle=True
     )
+    import time
+    start = time.time()
     shake_dataset = Dataset.getDataset(test_cfg, jax.random.key(0))
+    end = time.time()
+    print(f"time taken to load dataset: {(end - start):.2f} seconds")
     print(len(shake_dataset))
     breakpoint()

@@ -6,6 +6,7 @@ import time
 import asyncio
 
 enc = tiktoken.get_encoding("cl100k_base")
+print(enc.n_vocab)
 eot = enc._special_tokens["<|endoftext|>"]
 
 #async version
