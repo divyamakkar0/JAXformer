@@ -99,17 +99,16 @@ def main(config):
     print(f"Model parameter count: {param_count:,d} ")
     total_steps = config.training_steps
 
-   #cosine scheduler
+    #cosine scheduler
     lr_scheduler = optax.warmup_cosine_decay_schedule(
         init_value=config.min_lr,
         peak_value=config.max_lr,
         warmup_steps=config.warmup_steps,
         decay_steps=config.end_steps,
         end_value=config.end_lr,
-        )
+    )
 
-
-   #optax adam optimizer
+    #optax adam optimizer
     tx = optax.adam(lr_scheduler)
     state = train_state.TrainState.create(
         apply_fn=model.apply,
