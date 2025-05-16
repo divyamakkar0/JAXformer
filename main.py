@@ -4,7 +4,6 @@ os.environ['XLA_FLAGS'] = (
     '--xla_gpu_enable_latency_hiding_scheduler=true '
 )
 
-
 import jax
 import jax.numpy as jnp
 
@@ -16,7 +15,7 @@ jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_
 import flax
 from flax.training import train_state
 import time
-import math
+import ast
 import optax
 
 from config import parse_args, config
@@ -25,8 +24,8 @@ from dataset import Dataset
 
 from typing import Tuple, Any
 import orbax.checkpoint as ocp
-import shutil
-from flax.training import orbax_utils
+import wandb
+from dataclasses import asdict
 
 #key gen
 class KeyState:
@@ -103,7 +102,7 @@ def main(config: config):
     )
 
     #optax adam optimizer
-    tx = optax.adam(lr_scheduler)
+    tx = optax.inject_hyperparams(optax.adam)(lr_scheduler)
     state = train_state.TrainState.create(
         apply_fn=model.apply,
         params=params,
@@ -124,18 +123,43 @@ def main(config: config):
     options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
 
+    def save_checkpoint(step):
+        save_tree = {
+                'state': flax.serialization.to_state_dict(state),
+                'key': key.key,
+                'train_idx': train_dataset.idx,
+                'val_idx': val_dataset.idx,
+                'step': step,
+            }
+        checkpoint_manager.save(step, save_tree)
+
     init_step = 0
-    def props(cls):
-        return [i for i in cls.__dict__.keys() if i[:1] != '_']
 
     if load:
+        print("loading checkpoint")
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
         key.key = tree_state['key']
-        new_state = flax.serialization.from_state_dict(state, tree_state['state'])
+        state = flax.serialization.from_state_dict(state, tree_state['state'])
         train_dataset.idx = tree_state['train_idx']
         val_dataset.idx = tree_state['val_idx']
         init_step = tree_state['step']
+    else:
+        print("No checkpoint found, starting from scratch")
+        save_checkpoint(0)
 
+
+    use_wandb = config.project is not None
+    if use_wandb:
+        wandb.init(
+            entity="waterloo2",
+            project=config.project,
+            name=config.name,
+            id=config.name,
+            resume="allow",
+            notes=config.description,
+            tags=config.tags,
+            config=asdict(config),
+        )
 
     start = time.time()
     train_loss = 0.0
@@ -144,43 +168,70 @@ def main(config: config):
         grads = None
         grad_loss = 0.0
         for i in range(config.grad_step):
-            x_t, label_t = train_dataset()
-            grads_step, metrics = train_step_jit(key(), state.params, x_t, label_t)
-            # wandb.log({"step": current_step, "train_loss": metrics['loss']})
-            if grads is None:
-                grads = grads_step
-            else:
-                grads = jax.tree.map(lambda x, y: x + y, grads, grads_step)
+            grads_step, metrics = train_step_jit(key(), state.params, *train_dataset())
+            grads = grads_step if grads is None else jax.tree.map(
+                lambda x, y: x + y, grads, grads_step
+            )
             grad_loss += metrics['loss']
 
         grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         state = state.apply_gradients(grads=grads)
-        train_loss += grad_loss / config.grad_step
+        train_loss += (grad_loss/config.grad_step)
+        if use_wandb:
+            wandb_log = {
+                "step": current_step,
+                "train_loss": grad_loss,
+                "lr": state.opt_state.hyperparams["learning_rate"],
+            }
 
-        if current_step > 0 and current_step % cfg.checkpoint_steps == 0:
+        if current_step > 0 and current_step % config.checkpoint_steps == 0:
             end = time.time()
             total_time = end - start
-            tokens_per_second = (cfg.data.batch_size * cfg.grad_step)/ total_time
+            tokens_per_second = (config.data.batch_size * config.grad_step)/ total_time
             val_loss = 0.0
             for i in range(config.checkpoint_steps):
-                x_t, label_t = val_dataset()
-                metrics = eval_step_jit(key(), state.params, x_t, label_t)
-                # wandb.log({"step": current_step, "val_loss": metrics['loss']})
+                metrics = eval_step_jit(key(), state.params, *val_dataset())
                 val_loss += metrics['loss']
             val_loss /= config.checkpoint_steps
+            if use_wandb:
+                wandb_log['val_loss'] = val_loss
             print(f"step: {current_step} | val_loss: {val_loss:.4f} | train_loss: {train_loss / cfg.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s")
 
-            save_tree = {
-                'state': flax.serialization.to_state_dict(state),
-                'key': key.key,
-                'train_idx': train_dataset.idx,
-                'val_idx': val_dataset.idx,
-                'step': current_step,
-            }
-            checkpoint_manager.save(current_step, save_tree)
+            save_checkpoint(current_step)
+
+            tokens = model.generate(
+                state.params,
+                key(),
+                "hello",
+                B=config.inference_batch,
+                k=10000,
+                max_tokens=30,
+                temperature=1,
+            )
+            print("tokens: ", tokens)
+            with open(os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"), "a") as f:
+                f.write(f"{current_step} | {tokens}\n")
 
             start = time.time()
             train_loss = 0.0
+
+        if use_wandb:
+                    wandb.log(wandb_log)
+
+    if use_wandb:
+        table = wandb.Table(columns=[f"tokens_{i}" for i in range(config.inference_batch)])
+        wandb.Table.MAX_ROWS = total_steps // config.checkpoint_steps
+        with open(
+            os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"), "r"
+        ) as f:
+            lines = f.readlines()
+        for line in lines:
+            tokens = line.split("|")[1]
+            tokens = ast.literal_eval(tokens)
+            table.add_data(tokens)
+
+        wandb.log({"inference_tokens": table})
+        wandb.finish()
 
 if __name__ == "__main__":
     cfg = parse_args()

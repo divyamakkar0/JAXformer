@@ -45,14 +45,15 @@ class config:
     data: dataConfig
     lr: LRConfig
     training_steps: int
+    name: str
     grad_step: int = 1
-    project: str = "jaxformer"
+    project: str = None
     description: str = "transformer in jax"
     tags: Optional[List[str]] = None
-    name: str = None
     output_dir: str = "./results/"
     checkpoint_steps: int = 10
     checkpoint_manager: str = "./checkpoints/manager/"
+    inference_batch: int = 1
     seed: int = 0
     
     def __repr__(self):
@@ -106,7 +107,7 @@ def parse_args():
     parser.add_argument("--warmup_steps", type=int, default=1000)
     parser.add_argument("--end_steps", type=int, default=6000)
 
-    parser.add_argument("--project", type=str, default="jaxformer")
+    parser.add_argument("--project", type=str, default=None)
     parser.add_argument("--description", type=str, default="transformer in jax")
     parser.add_argument("--tags", nargs='*', type=str, default=None)
     parser.add_argument("--name", type=str, default=None, required=True)
@@ -116,7 +117,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--training_steps", type=int, default=1000)
     parser.add_argument("--grad_step", type=int, default=1)
+    parser.add_argument("--inference_batch", type=int, default=1)
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
+
     args = parser.parse_args()
 
     model_cfg = modelConfig(
@@ -163,7 +166,8 @@ def parse_args():
         checkpoint_manager=args.checkpoint_manager,
         seed=args.seed,
         training_steps=args.training_steps,
-        grad_step=args.grad_step
+        grad_step=args.grad_step,
+        inference_batch=args.inference_batch,
     )
 
     return cfg

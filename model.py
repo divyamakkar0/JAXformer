@@ -7,6 +7,7 @@ from einops import rearrange
 import flax
 from flax import linen as nn
 import tiktoken
+
 from jax.numpy import dtype
 from config import parse_args
 
@@ -76,20 +77,21 @@ class MLA(nn.Module):
 
     def __call__(self, x, cKV_cache=None, kRT_cache=None, attention_mask=None, train=True):
         B, T, C = x.shape
-        if train == False:
-            x = x[:, -1:, :]
-
+        t_idx = 0
+        if train == False and cKV_cache is not None:
+            t_idx = cKV_cache.shape[1]
+        x = x[:, t_idx :, :]
         cKVt, cqt = jnp.split(self.W_down(x), 2, axis=-1)
 
         if self.rope:
-            t_start = T - 1 if not train else 0
-            kRt = self.rope(self.Wkr(x)[:, None, ...], t_start, T)
+
+            kRt = self.rope(self.Wkr(x)[:, None, ...], t_idx, T)
             kRt = kRt.repeat(self.n_heads, axis=1)
 
-            qrt = rearrange(
+            qRt = rearrange(
                 self.Wqr(x), "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR
             )
-            qrt = self.rope(qrt, t_start, T)
+            qRt = self.rope(qRt, t_idx, T)
 
         if not train:
             if cKV_cache is None:
@@ -99,16 +101,17 @@ class MLA(nn.Module):
             cKVt = cKV_cache
 
             if self.rope:
+                krt_head = kRt[:, 0, :, :]
                 if kRT_cache is None:
-                    kRT_cache = jnp.zeros((B, 1, self.dhR))
+                    kRT_cache = krt_head
                 else:
-                    kRT_cache = jnp.concatenate([kRT_cache, kRt[:, 0, :, :]], axis=1)
+                    kRT_cache = jnp.concatenate([kRT_cache, krt_head], axis=1)
                 kRt = kRT_cache[:, None, ...].repeat(self.n_heads, axis=1)
 
             if cKV_cache.shape[1] >= self.T:
-                cKV_cache = cKV_cache[:, -self.T:, :]
+                cKV_cache = cKV_cache[:, -self.T + 1:, :]
                 if self.rope:
-                    kRT_cache = kRT_cache[:, -self.T:, :]
+                    kRT_cache = kRT_cache[:, -self.T + 1:, :]
 
         v_k = rearrange(
             self.W_uKV(cKVt), "B T (nh d) -> B nh T d", nh=self.n_heads, d=2 * self.dk
@@ -122,7 +125,7 @@ class MLA(nn.Module):
         q = rearrange(q, "B T (nh dk) -> B nh T dk", nh=self.n_heads, dk=self.dk)
 
         if self.rope:
-            q = jnp.concatenate([q, qrt], axis=-1)
+            q = jnp.concatenate([q, qRt], axis=-1)
 
         weights = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
             1 / ((self.dk) ** 0.5)
@@ -393,23 +396,43 @@ class Decoder(nn.Module):
 
         return model, params
 
-    def generate(self, idx, key, k, temperature, max_token_len=100):
+    def generate(
+        self,
+        params,
+        key,
+        x: str = "",
+        B=1, k=10000,
+        temperature=1,
+        max_tokens=100
+    ):
+
         enc = tiktoken.get_encoding("cl100k_base")
-        t = idx.shape[-1]
         cache = None
-        for i in range(max_token_len):
-            idx_crop = idx[:, -self.T:]
-            logits, layer_cache = self(x, cache, train=False)
-            cache.append(layer_cache)
+
+        start_of_text = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
+        x_encoded = jnp.array(enc.encode(x), dtype=jnp.int32)
+        x = jnp.concatenate([start_of_text, x_encoded], axis=-1)
+        x = jnp.repeat(x[None, :], B, axis=0)
+
+        out = x
+
+        for i in range(max_tokens):
+            x = out[:, -self.T:]
+            logits, cache = self.apply({'params': params}, x, cache, train=False)
 
             logits = logits[: ,-1, :] / temperature
-            k_scores, k_indices = jax.lax.top_k(x, k)
-
+            k_scores, _ = jax.lax.top_k(logits, k)
             probs = nn.softmax(k_scores, axis=-1)
-            idx_next = jax.random.categorical(key, probs, axis=-1)
-            idx = idx.append((idx, enc.decode(idx_next)), dim=1) 
-        return idx
 
+            key, sample_key = jax.random.split(key)
+            out_next = jax.random.categorical(sample_key, probs, axis=-1)[:, None]
+            out = jnp.concatenate([out, out_next], axis=-1)
+
+        tokens = jax.device_get(out[:, 1:])
+        decode_fn = lambda x: enc.decode(x)
+        outputs = list(map(decode_fn, tokens))
+
+        return outputs
 
 if __name__ == "__main__":
     model = Decoder(
