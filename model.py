@@ -6,16 +6,18 @@ from typing import Callable
 from einops import rearrange
 import flax
 from flax import linen as nn
-
-
+import tiktoken
+from jax.numpy import dtype
+from config import parse_args
 
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
+    model_type: jnp.dtype
 
     def setup(self):
         self.embedding = nn.Embed(
-            num_embeddings=self.vocab_size, features=self.model_dimension
+            num_embeddings=self.vocab_size, features=self.model_dimension, dtype=self.model_type
         )
 
     @nn.compact
@@ -25,13 +27,13 @@ class Embeddings(nn.Module):
 
 
 class RoPE:
-    def __init__(self, T, model_dim):
+    def __init__(self, T, model_dim, dtype=jnp.bfloat16):
         self.T = T
         self.model_dim = model_dim
         assert model_dim % 2 == 0, "model_dim must be even"
 
-        freq = jnp.arange(self.T)[:, None]
-        pos = jnp.arange(self.model_dim // 2)[:, None].repeat(2, axis=-1).reshape(1, -1)
+        freq = jnp.arange(self.T, dtype=dtype)[:, None]
+        pos = jnp.arange(self.model_dim // 2, dtype=dtype)[:, None].repeat(2, axis=-1).reshape(1, -1)
         theta = 10000 ** (-2 * pos / self.model_dim)
         self.cos = jnp.cos(freq * theta)
         self.sin = jnp.sin(freq * theta)
@@ -55,21 +57,22 @@ class MLA(nn.Module):
     T: int
     latent_dim: int
     dhR: int
+    model_dtype: str
 
     def setup(self):
-        self.W_down = nn.Dense(features=2 * self.latent_dim)
-        self.W_uKV = nn.Dense(features=2 * self.model_dim)
-        self.W_uQ = nn.Dense(features=self.model_dim)
+        self.W_down = nn.Dense(features=2*self.latent_dim, dtype=self.model_dtype)
+        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
+        self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
-        self.output = nn.Dense(features=self.model_dim)
+        self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.rope = None
 
         if self.dhR != 0:
-            self.Wkr = nn.Dense(features=self.dhR)
-            self.Wqr = nn.Dense(features=(self.dhR * self.n_heads))
-            self.rope = RoPE(model_dim=self.dhR, T=self.T)
+            self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
+            self.Wqr = nn.Dense(features=(self.dhR * self.n_heads), dtype=self.model_dtype)
+            self.rope = RoPE(model_dim=self.dhR, T=self.T, model_dtype=self.model_dtype)
 
     def __call__(self, x, cKV_cache=None, kRT_cache=None, attention_mask=None, train=True):
         B, T, C = x.shape
@@ -163,11 +166,12 @@ class NoisyKGate(nn.Module):
     model_dimension: int
     n_experts: int
     k: int
+    model_dtype: jnp.dtype
 
     def setup(self):
         self.rng = jax.random.PRNGKey(42)
-        self.Wg = nn.Dense(features=self.n_experts)
-        self.Wnoise = nn.Dense(features=self.n_experts)
+        self.Wg = nn.Dense(features=self.n_experts, dtype=self.model_dtype)
+        self.Wnoise = nn.Dense(features=self.n_experts, dtype=self.model_dimension)
 
     def top(self, x):
         k = self.k
@@ -191,6 +195,7 @@ class MoE(nn.Module):
     n_experts: int
     k: int
     dropout: float
+    model_dtype: jnp.dtype
 
     def setup(self):
         self.experts = [
@@ -198,11 +203,12 @@ class MoE(nn.Module):
                 model_dimension=self.model_dimension,
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
+                model_dtype=self.model_dtype
             )
             for i in range(self.n_experts)
         ]
         self.gate = NoisyKGate(
-            model_dimension=self.model_dimension, n_experts=self.n_experts, k=self.k
+            model_dimension=self.model_dimension, n_experts=self.n_experts, k=self.k, model_dtype=self.model_dtype
         )
 
     def get_gScores(self, scores, indices, x, train=True):
@@ -238,13 +244,14 @@ class FeedForward(nn.Module):
     model_dimension: int
     ff_dim: int
     dropout: float
+    model_dtype: jnp.dtype
 
     @nn.compact
     def __call__(self, x, train: bool = True):
-        x = nn.Dense(features=self.ff_dim)(x)
+        x = nn.Dense(features=self.ff_dim, dtype=self.model_dtype)(x)
         x = nn.relu(x)
         x = nn.Dropout(rate=self.dropout)(x, deterministic=not train)
-        x = nn.Dense(features=self.model_dimension)(x)
+        x = nn.Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
 
         return x
 
@@ -258,6 +265,8 @@ class Block(nn.Module):
     n_experts: int = 0
     k: int = 0
     moe: bool = False
+    model_dtype: jnp.dtype 
+    
 
     @nn.compact
     def __call__(self, x, cache=(None, None), train=True):
@@ -267,6 +276,7 @@ class Block(nn.Module):
             T=self.T,
             latent_dim=self.latent_dim,
             dhR=self.dhR,
+            model_dtype=self.model_dtype
         )(x, *cache, train=train)
 
         x = LayerNorm(model_dimension=self.model_dimension)(x + x_up)
@@ -277,15 +287,18 @@ class Block(nn.Module):
                 n_experts=self.n_experts,
                 k=self.k,
                 dropout=self.dropout,
+                model_dtype=self.model_dtype
             )
         else:
             ff = FeedForward(
                 model_dimension=self.model_dimension,
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
+                model_dtype=self.model_dtype
             )
 
         x = LayerNorm(model_dimension=self.model_dimension)(x + ff(x=x, train=train))
+    
 
         return x, cache
 
@@ -303,12 +316,13 @@ class Decoder(nn.Module):
     k: int
     moe: bool
     latent_dim: int
+    model_type: dtype.dtype
 
     @nn.compact
     def __call__(self, x, cache=None, train=True):
 
         embed = Embeddings(
-            model_dimension=self.model_dimension, vocab_size=self.vocab_size
+            model_dimension=self.model_dimension, vocab_size=self.vocab_size, model_type=self.model_type
         )
         x = embed(x)
 
@@ -318,7 +332,22 @@ class Decoder(nn.Module):
                 layer_cache = (None, None)
             else:
                 layer_cache = cache[i]
-            x, current_cache = Block(
+            
+            if train:
+                block = nn.remat(Block(
+                    model_dimension=self.model_dimension,
+                    n_heads=self.n_heads,
+                    dropout=self.dropout,
+                    T=self.T,
+                    latent_dim=self.latent_dim,
+                    dhR=0 if (self.rope_ratio == 0 or i % self.rope_ratio == 0) else self.dhR,
+                    n_experts=self.n_experts,
+                    k=self.k,
+                    moe=self.moe,
+                    model_dtype=self.model_type,
+                ))
+            else:
+                block = Block(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
                 dropout=self.dropout,
@@ -328,7 +357,9 @@ class Decoder(nn.Module):
                 n_experts=self.n_experts,
                 k=self.k,
                 moe=self.moe,
-            )(x, cache=layer_cache, train=train)
+                model_dtype=self.model_type,
+            )
+            x, current_cache = block(x, cache=layer_cache, train=train)
             out_cache.append(current_cache)
 
         x = x @ embed.embedding.embedding.T
@@ -351,6 +382,7 @@ class Decoder(nn.Module):
                         model_config.k,
                         model_config.moe,
                         model_config.latent_dim,
+                        model_dtype=jnp.bfloat16 if (model_config.model_dtype == "bfloat16") else jnp.float32,
                         )
 
         params = model.init(
@@ -360,6 +392,23 @@ class Decoder(nn.Module):
         )['params']
 
         return model, params
+
+    def generate(self, idx, key, k, temperature, max_token_len=100):
+        enc = tiktoken.get_encoding("cl100k_base")
+        t = idx.shape[-1]
+        cache = None
+        for i in range(max_token_len):
+            idx_crop = idx[:, -self.T:]
+            logits, layer_cache = self(x, cache, train=False)
+            cache.append(layer_cache)
+
+            logits = logits[: ,-1, :] / temperature
+            k_scores, k_indices = jax.lax.top_k(x, k)
+
+            probs = nn.softmax(k_scores, axis=-1)
+            idx_next = jax.random.categorical(key, probs, axis=-1)
+            idx = idx.append((idx, enc.decode(idx_next)), dim=1) 
+        return idx
 
 
 if __name__ == "__main__":
