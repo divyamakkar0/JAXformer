@@ -53,7 +53,7 @@ class config:
     inference_batch: int = 1
     seed: int = 0
     wandb: bool = True
-    
+
     def __repr__(self):
         return f"""Configuration:
       Model:
@@ -105,7 +105,7 @@ def parse_args():
     parser.add_argument("--checkpoint_steps", type=int, default=25)
     parser.add_argument("--checkpoint_manager", type=str, default="./checkpoints/manager/")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--wandb", type=bool, default=True)
+    parser.add_argument("--wandb", type=bool, action='store_true')
     parser.add_argument("--training_steps", type=int, default=1000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--inference_batch", type=int, default=1)

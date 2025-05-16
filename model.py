@@ -264,12 +264,13 @@ class Block(nn.Module):
     dropout: float
     T: int
     latent_dim: int
+    model_dtype: jnp.dtype 
     dhR: int = 0
     n_experts: int = 0
     k: int = 0
     moe: bool = False
-    model_dtype: jnp.dtype 
-    
+
+
 
     @nn.compact
     def __call__(self, x, cache=(None, None), train=True):
@@ -301,7 +302,7 @@ class Block(nn.Module):
             )
 
         x = LayerNorm(model_dimension=self.model_dimension)(x + ff(x=x, train=train))
-    
+
 
         return x, cache
 
@@ -335,7 +336,7 @@ class Decoder(nn.Module):
                 layer_cache = (None, None)
             else:
                 layer_cache = cache[i]
-            
+
             if train:
                 block = nn.remat(Block(
                     model_dimension=self.model_dimension,
