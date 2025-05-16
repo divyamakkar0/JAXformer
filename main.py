@@ -148,16 +148,14 @@ def main(config: config):
         save_checkpoint(0)
 
 
-    use_wandb = config.project is not None
+    use_wandb = config.wandb is True
     if use_wandb:
         wandb.init(
             entity="waterloo2",
-            project=config.project,
+            project="jaxformer",
             name=config.name,
             id=config.name,
             resume="allow",
-            notes=config.description,
-            tags=config.tags,
             config=asdict(config),
         )
 

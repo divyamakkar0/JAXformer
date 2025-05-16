@@ -47,14 +47,12 @@ class config:
     training_steps: int
     name: str
     grad_step: int = 1
-    project: str = None
-    description: str = "transformer in jax"
-    tags: Optional[List[str]] = None
     output_dir: str = "./results/"
     checkpoint_steps: int = 10
     checkpoint_manager: str = "./checkpoints/manager/"
     inference_batch: int = 1
     seed: int = 0
+    wandb: bool = True
     
     def __repr__(self):
         return f"""Configuration:
@@ -72,11 +70,6 @@ class config:
         checkpoint_manager: {self.checkpoint_manager}
       Output:
         output_dir: {self.output_dir}
-      Project:
-        project: {self.project}
-        name: {self.name}
-        description: {self.description}
-        tags: {self.tags}
     """
 
 
@@ -107,14 +100,12 @@ def parse_args():
     parser.add_argument("--warmup_steps", type=int, default=1000)
     parser.add_argument("--end_steps", type=int, default=6000)
 
-    parser.add_argument("--project", type=str, default=None)
-    parser.add_argument("--description", type=str, default="transformer in jax")
-    parser.add_argument("--tags", nargs='*', type=str, default=None)
     parser.add_argument("--name", type=str, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="./results/")
     parser.add_argument("--checkpoint_steps", type=int, default=25)
     parser.add_argument("--checkpoint_manager", type=str, default="./checkpoints/manager/")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--wandb", type=bool, default=True)
     parser.add_argument("--training_steps", type=int, default=1000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--inference_batch", type=int, default=1)
@@ -157,9 +148,6 @@ def parse_args():
         model=model_cfg,
         data=data_cfg,
         lr=lr_cfg,
-        project=args.project,
-        description=args.description,
-        tags=args.tags,
         name=args.name,
         output_dir=args.output_dir,
         checkpoint_steps=args.checkpoint_steps,
@@ -168,6 +156,7 @@ def parse_args():
         training_steps=args.training_steps,
         grad_step=args.grad_step,
         inference_batch=args.inference_batch,
+        wandb=args.wandb
     )
 
     return cfg
