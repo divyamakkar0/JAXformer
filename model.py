@@ -366,6 +366,7 @@ class Decoder(nn.Module):
             out_cache.append(current_cache)
 
         x = x @ embed.embedding.embedding.T
+        x - jnp.asarray(x, dtype=jnp.float32)
 
         return x, out_cache
 
