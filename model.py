@@ -319,7 +319,7 @@ class Decoder(nn.Module):
     k: int
     moe: bool
     latent_dim: int
-    model_type: dtype.dtype
+    model_type: jnp.dtype
 
     @nn.compact
     def __call__(self, x, cache=None, train=True):
