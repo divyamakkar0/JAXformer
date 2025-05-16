@@ -29,12 +29,13 @@ class Embeddings(nn.Module):
 
 class RoPE:
     model_dtype: jnp.dtype
-    def __init__(self, T, model_dim, dtype=jnp.bfloat16):
+
+    def __init__(self, T, model_dim):
         self.T = T
         self.model_dim = model_dim
         assert model_dim % 2 == 0, "model_dim must be even"
 
-        freq = jnp.arange(self.T, dtype=dtype)[:, None]
+        freq = jnp.arange(self.T, dtype=self.dtype)[:, None]
         pos = jnp.arange(self.model_dim // 2, dtype=self.dtype)[:, None].repeat(2, axis=-1).reshape(1, -1)
         theta = 10000 ** (-2 * pos / self.model_dim)
         self.cos = jnp.cos(freq * theta)
