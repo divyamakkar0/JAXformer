@@ -13,6 +13,7 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
+import flax
 from flax.training import train_state
 import time
 import math
@@ -23,7 +24,7 @@ from model import Decoder
 from dataset import Dataset
 
 from typing import Tuple, Any
-import orbax.checkpoint
+import orbax.checkpoint as ocp
 import shutil
 from flax.training import orbax_utils
 
@@ -114,24 +115,32 @@ def main(config: config):
     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
     train_step_jit = jax.jit(
         lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
-        donate_argnames=("params")
         )
     eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
 
+    checkpoint_dir = os.path.join(os.path.abspath(config.output_dir), config.name, "checkpoints")
+    load = os.path.exists(checkpoint_dir)
+    checkpointer = ocp.PyTreeCheckpointer()
+    options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
 
+    init_step = 0
+    def props(cls):
+        return [i for i in cls.__dict__.keys() if i[:1] != '_']
 
-    checkpoint_dir = os.path.abspath(config.checkpoint_dir)
-    if os.path.exists(checkpoint_dir):
-        shutil.rmtree(checkpoint_dir)
+    if load:
+        tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
+        key.key = tree_state['key']
+        new_state = flax.serialization.from_state_dict(state, tree_state['state'])
+        train_dataset.idx = tree_state['train_idx']
+        val_dataset.idx = tree_state['val_idx']
+        init_step = tree_state['step']
 
-    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    options = orbax.checkpoint.CheckpointManagerOptions(max_to_keep=1, create=True)
-    checkpoint_manager = orbax.checkpoint.CheckpointManager(
-    checkpoint_dir, checkpointer, options)
 
     start = time.time()
     train_loss = 0.0
-    for current_step in range(total_steps):
+
+    for current_step in range(init_step, total_steps):
         grads = None
         grad_loss = 0.0
         for i in range(config.grad_step):
@@ -149,8 +158,9 @@ def main(config: config):
         train_loss += grad_loss / config.grad_step
 
         if current_step > 0 and current_step % cfg.checkpoint_steps == 0:
-
-            # checkpoint_manager.save(current_step, state)
+            end = time.time()
+            total_time = end - start
+            tokens_per_second = (cfg.data.batch_size * cfg.grad_step)/ total_time
             val_loss = 0.0
             for i in range(config.checkpoint_steps):
                 x_t, label_t = val_dataset()
@@ -158,7 +168,16 @@ def main(config: config):
                 # wandb.log({"step": current_step, "val_loss": metrics['loss']})
                 val_loss += metrics['loss']
             val_loss /= config.checkpoint_steps
-            print(f"step: {current_step}, val_loss: {val_loss:.4f}, train_loss: {train_loss / cfg.checkpoint_steps:.4f}, time: {time.time() - start:.2f}s")
+            print(f"step: {current_step} | val_loss: {val_loss:.4f} | train_loss: {train_loss / cfg.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s")
+
+            save_tree = {
+                'state': flax.serialization.to_state_dict(state),
+                'key': key.key,
+                'train_idx': train_dataset.idx,
+                'val_idx': val_dataset.idx,
+                'step': current_step,
+            }
+            checkpoint_manager.save(current_step, save_tree)
 
             start = time.time()
             train_loss = 0.0
