@@ -28,13 +28,14 @@ class Embeddings(nn.Module):
 
 
 class RoPE:
+    model_dtype: jnp.dtype
     def __init__(self, T, model_dim, dtype=jnp.bfloat16):
         self.T = T
         self.model_dim = model_dim
         assert model_dim % 2 == 0, "model_dim must be even"
 
         freq = jnp.arange(self.T, dtype=dtype)[:, None]
-        pos = jnp.arange(self.model_dim // 2, dtype=dtype)[:, None].repeat(2, axis=-1).reshape(1, -1)
+        pos = jnp.arange(self.model_dim // 2, dtype=self.dtype)[:, None].repeat(2, axis=-1).reshape(1, -1)
         theta = 10000 ** (-2 * pos / self.model_dim)
         self.cos = jnp.cos(freq * theta)
         self.sin = jnp.sin(freq * theta)
@@ -58,7 +59,7 @@ class MLA(nn.Module):
     T: int
     latent_dim: int
     dhR: int
-    model_dtype: str
+    model_dtype: jnp.dtype
 
     def setup(self):
         self.W_down = nn.Dense(features=2*self.latent_dim, dtype=self.model_dtype)
