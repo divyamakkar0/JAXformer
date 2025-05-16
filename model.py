@@ -28,11 +28,10 @@ class Embeddings(nn.Module):
 
 
 class RoPE:
-    model_dtype: jnp.dtype
-
-    def __init__(self, T, model_dim):
+    def __init__(self, T, model_dim, model_dtype):
         self.T = T
         self.model_dim = model_dim
+        self.model_dtype = model_dtype
         assert model_dim % 2 == 0, "model_dim must be even"
 
         freq = jnp.arange(self.T, dtype=self.model_dtype)[:, None]
