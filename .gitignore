@@ -4,3 +4,6 @@
 trainSet/*
 valSet/*
 *.tgz
+results/*
+*.env
+wandb/*
