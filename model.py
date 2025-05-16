@@ -14,11 +14,11 @@ from config import parse_args
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
-    model_type: jnp.dtype
+    model_dtype: jnp.dtype
 
     def setup(self):
         self.embedding = nn.Embed(
-            num_embeddings=self.vocab_size, features=self.model_dimension, dtype=self.model_type
+            num_embeddings=self.vocab_size, features=self.model_dimension, dtype=self.model_dtype
         )
 
     @nn.compact
@@ -320,13 +320,13 @@ class Decoder(nn.Module):
     k: int
     moe: bool
     latent_dim: int
-    model_type: jnp.dtype
+    model_dtype: jnp.dtype
 
     @nn.compact
     def __call__(self, x, cache=None, train=True):
 
         embed = Embeddings(
-            model_dimension=self.model_dimension, vocab_size=self.vocab_size, model_type=self.model_type
+            model_dimension=self.model_dimension, vocab_size=self.vocab_size, model_dtype=self.model_dtype
         )
         x = embed(x)
 
@@ -348,7 +348,7 @@ class Decoder(nn.Module):
                     n_experts=self.n_experts,
                     k=self.k,
                     moe=self.moe,
-                    model_dtype=self.model_type,
+                    model_dtype=self.model_dtype,
                 ))
             else:
                 block = Block(
@@ -361,7 +361,7 @@ class Decoder(nn.Module):
                 n_experts=self.n_experts,
                 k=self.k,
                 moe=self.moe,
-                model_dtype=self.model_type,
+                model_dtype=self.model_dtype,
             )
             x, current_cache = block(x, cache=layer_cache, train=train)
             out_cache.append(current_cache)
