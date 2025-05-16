@@ -10,8 +10,6 @@ import tiktoken
 from jax.numpy import dtype
 from config import parse_args
 
-
-
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
@@ -334,7 +332,22 @@ class Decoder(nn.Module):
                 layer_cache = (None, None)
             else:
                 layer_cache = cache[i]
-            x, current_cache = Block(
+            
+            if train:
+                block = nn.remat(Block(
+                    model_dimension=self.model_dimension,
+                    n_heads=self.n_heads,
+                    dropout=self.dropout,
+                    T=self.T,
+                    latent_dim=self.latent_dim,
+                    dhR=0 if (self.rope_ratio == 0 or i % self.rope_ratio == 0) else self.dhR,
+                    n_experts=self.n_experts,
+                    k=self.k,
+                    moe=self.moe,
+                    model_dtype=self.model_type,
+                ))
+            else:
+                block = Block(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
                 dropout=self.dropout,
@@ -345,7 +358,8 @@ class Decoder(nn.Module):
                 k=self.k,
                 moe=self.moe,
                 model_dtype=self.model_type,
-            )(x, cache=layer_cache, train=train)
+            )
+            x, current_cache = block(x, cache=layer_cache, train=train)
             out_cache.append(current_cache)
 
         x = x @ embed.embedding.embedding.T
