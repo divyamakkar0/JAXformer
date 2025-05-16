@@ -1,6 +1,8 @@
 import argparse
 from dataclasses import dataclass, field
 from typing import List, Optional
+import jax.numpy as jnp
+from jax.numpy import dtype
 
 @dataclass
 class modelConfig:
@@ -17,6 +19,7 @@ class modelConfig:
     k: int
     moe: bool
     latent_dim: int
+    model_dtype: str = "bfloat16"
 
 @dataclass
 class dataConfig:
@@ -52,7 +55,7 @@ class config:
     checkpoint_manager: str = "./checkpoints/manager/"
     inference_batch: int = 1
     seed: int = 0
-
+    
     def __repr__(self):
         return f"""Configuration:
       Model:
@@ -115,6 +118,8 @@ def parse_args():
     parser.add_argument("--training_steps", type=int, default=1000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--inference_batch", type=int, default=1)
+    parser.add_argument("--model_dtype", type=str, default="bfloat16")
+
     args = parser.parse_args()
 
     model_cfg = modelConfig(
@@ -129,7 +134,8 @@ def parse_args():
         n_experts=args.n_experts,
         k=args.k,
         moe=args.moe,
-        latent_dim=args.latent_dim
+        latent_dim=args.latent_dim,
+        model_dtype=args.model_dtype,
     )
 
     data_cfg = dataConfig(
