@@ -15,7 +15,7 @@ from config import parse_args
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
-    model_type: dtype
+    model_type: jnp.dtype
 
     def setup(self):
         self.embedding = nn.Embed(
@@ -59,7 +59,7 @@ class MLA(nn.Module):
     T: int
     latent_dim: int
     dhR: int
-    model_dtype: dtype
+    model_dtype: str
 
     def setup(self):
         self.W_down = nn.Dense(features=2*self.latent_dim, dtype=self.model_dtype)
@@ -149,11 +149,10 @@ class LayerNorm(nn.Module):
     model_dimension: int
     gamma_init: Callable = nn.initializers.lecun_normal()
     beta_init: Callable = nn.initializers.lecun_normal()
-    param_dtype: dtype
 
     def setup(self):
-        self.gamma = self.param("gamma", self.gamma_init, (1, 1, self.model_dimension), dtype=self.param_dtype)
-        self.beta = self.param("beta", self.beta_init, (1, 1, self.model_dimension), dtype=self.param_dtype)
+        self.gamma = self.param("gamma", self.gamma_init, (1, 1, self.model_dimension))
+        self.beta = self.param("beta", self.beta_init, (1, 1, self.model_dimension))
         self.eps = 1e-05
 
     def __call__(self, x):
@@ -169,7 +168,7 @@ class NoisyKGate(nn.Module):
     model_dimension: int
     n_experts: int
     k: int
-    model_dtype: dtype
+    model_dtype: jnp.dtype
 
     def setup(self):
         self.rng = jax.random.PRNGKey(42)
@@ -198,7 +197,7 @@ class MoE(nn.Module):
     n_experts: int
     k: int
     dropout: float
-    model_dtype: dtype
+    model_dtype: jnp.dtype
 
     def setup(self):
         self.experts = [
@@ -247,7 +246,7 @@ class FeedForward(nn.Module):
     model_dimension: int
     ff_dim: int
     dropout: float
-    model_dtype: dtype
+    model_dtype: jnp.dtype
 
     @nn.compact
     def __call__(self, x, train: bool = True):
@@ -268,8 +267,7 @@ class Block(nn.Module):
     n_experts: int = 0
     k: int = 0
     moe: bool = False
-    model_dtype: dtype 
-    param_dtype: dtype
+    model_dtype: jnp.dtype 
     
 
     @nn.compact
@@ -283,7 +281,7 @@ class Block(nn.Module):
             model_dtype=self.model_dtype
         )(x, *cache, train=train)
 
-        x = LayerNorm(model_dimension=self.model_dimension, param_dtype=self.param_dtype)(x + x_up)
+        x = LayerNorm(model_dimension=self.model_dimension)(x + x_up)
 
         if self.moe == True:
             ff = MoE(
@@ -301,7 +299,8 @@ class Block(nn.Module):
                 model_dtype=self.model_dtype
             )
 
-        x = LayerNorm(model_dimension=self.model_dimension, param_dtype=self.param_dtype)(x + ff(x=x, train=train))
+        x = LayerNorm(model_dimension=self.model_dimension)(x + ff(x=x, train=train))
+    
 
         return x, cache
 
@@ -319,8 +318,7 @@ class Decoder(nn.Module):
     k: int
     moe: bool
     latent_dim: int
-    model_type: dtype
-    param_type: dtype
+    model_type: dtype.dtype
 
     @nn.compact
     def __call__(self, x, cache=None, train=True):
@@ -347,7 +345,6 @@ class Decoder(nn.Module):
                 k=self.k,
                 moe=self.moe,
                 model_dtype=self.model_type,
-                param_dtype=self.param_type
             )(x, cache=layer_cache, train=train)
             out_cache.append(current_cache)
 
@@ -371,8 +368,7 @@ class Decoder(nn.Module):
                         model_config.k,
                         model_config.moe,
                         model_config.latent_dim,
-                        model_config.model_dtype,
-                        model_config.param_dtype
+                        model_dtype=jnp.bfloat16 if (model_config.model_dtype == "bfloat16") else jnp.float32,
                         )
 
         params = model.init(

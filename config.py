@@ -19,8 +19,7 @@ class modelConfig:
     k: int
     moe: bool
     latent_dim: int
-    model_dtype: dtype = jnp.bfloat16
-    param_dtype: dtype = jnp.float32
+    model_dtype: str = "bfloat16"
 
 @dataclass
 class dataConfig:
@@ -120,8 +119,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--training_steps", type=int, default=1000)
     parser.add_argument("--grad_step", type=int, default=1)
-    parser.add_argument("--model_dtype", type=dtype, default=jnp.bfloat16)
-    parser.add_argument("--param_dtype", type=dtype, default=jnp.float32)
+    parser.add_argument("--model_dtype", type=str, default="bfloat16")
     args = parser.parse_args()
 
     model_cfg = modelConfig(
@@ -138,7 +136,6 @@ def parse_args():
         moe=args.moe,
         latent_dim=args.latent_dim,
         model_dtype=args.model_dtype,
-        param_dtype=args.param_dtype
     )
 
     data_cfg = dataConfig(
