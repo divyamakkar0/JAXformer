@@ -127,11 +127,11 @@ class MLA(nn.Module):
 
         if self.rope:
             q = jnp.concatenate([q, qRt], axis=-1)
-
+        
         weights = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
-            1 / ((self.dk) ** 0.5)
+                1 / ((self.dk) ** 0.5)
         )
-
+        
         if train == True:
             size = weights.shape[-1]
             mask = jnp.tril(jnp.ones((B, self.n_heads, size, size)))
@@ -200,6 +200,7 @@ class MoE(nn.Module):
     k: int
     dropout: float
     model_dtype: jnp.dtype
+    grad_checkpoint: bool
 
     def setup(self):
         self.experts = [
@@ -207,7 +208,8 @@ class MoE(nn.Module):
                 model_dimension=self.model_dimension,
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
-                model_dtype=self.model_dtype
+                model_dtype=self.model_dtype,
+                grad_checkpoint=self.grad_checkpoint
             )
             for i in range(self.n_experts)
         ]
@@ -243,21 +245,42 @@ class MoE(nn.Module):
         res = gscore_parallel(s, i, x)
         return res
 
-
-class FeedForward(nn.Module):
+class FFBody(nn.Module):
     model_dimension: int
     ff_dim: int
     dropout: float
     model_dtype: jnp.dtype
 
     @nn.compact
-    def __call__(self, x, train: bool = True):
+    def __call__(self, x):
         x = nn.Dense(features=self.ff_dim, dtype=self.model_dtype)(x)
         x = nn.relu(x)
-        x = nn.Dropout(rate=self.dropout)(x, deterministic=not train)
         x = nn.Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
-
+         
         return x
+
+class FeedForward(nn.Module):
+    model_dimension: int
+    ff_dim: int
+    dropout: float
+    model_dtype: jnp.dtype
+    grad_checkpoint: bool
+
+    @nn.compact
+    def __call__(self, x, train: bool = True):
+        ff = FFBody
+        if self.grad_checkpoint:
+            ff = nn.remat(FFBody)
+
+        ff = ff(
+            model_dimension=self.model_dimension,
+            ff_dim=4 * self.model_dimension,
+            dropout=self.dropout,
+            model_dtype=self.model_dtype
+        )
+        x_ff = nn.Dropout(rate=self.dropout,deterministic=not train)(ff(x))
+
+        return x_ff
 
 class Block(nn.Module):
     model_dimension: int
@@ -270,19 +293,22 @@ class Block(nn.Module):
     n_experts: int = 0
     k: int = 0
     moe: bool = False
-
-
+    grad_checkpoint: bool = False
 
     @nn.compact
     def __call__(self, x, cache=(None, None), train=True):
-        x_up, cache = MLA(
-            model_dim=self.model_dimension,
-            n_heads=self.n_heads,
-            T=self.T,
-            latent_dim=self.latent_dim,
-            dhR=self.dhR,
-            model_dtype=self.model_dtype
-        )(x, *cache, train=train)
+        attn = MLA
+        # if self.grad_checkpoint: 
+        #     attn = nn.checkpoint(attn, prevent_cse=False, static_argnums=(1,2,3,4))
+        
+        x_up, cache = attn(
+                model_dim=self.model_dimension,
+                n_heads=self.n_heads,
+                T=self.T,
+                latent_dim=self.latent_dim,
+                dhR=self.dhR,
+                model_dtype=self.model_dtype
+            )(x, *cache,attention_mask=None, train=train)
 
         x = LayerNorm(model_dimension=self.model_dimension)(x + x_up)
 
@@ -292,18 +318,19 @@ class Block(nn.Module):
                 n_experts=self.n_experts,
                 k=self.k,
                 dropout=self.dropout,
-                model_dtype=self.model_dtype
+                model_dtype=self.model_dtype,
+                grad_checkpoint=self.grad_checkpoint
             )
         else:
             ff = FeedForward(
                 model_dimension=self.model_dimension,
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
-                model_dtype=self.model_dtype
+                model_dtype=self.model_dtype,
+                grad_checkpoint=self.grad_checkpoint
             )
 
         x = LayerNorm(model_dimension=self.model_dimension)(x + ff(x=x, train=train))
-
 
         return x, cache
 
@@ -322,6 +349,7 @@ class Decoder(nn.Module):
     moe: bool
     latent_dim: int
     model_dtype: jnp.dtype
+    grad_checkpoint: bool
 
     @nn.compact
     def __call__(self, x, cache=None, train=True):
@@ -338,21 +366,8 @@ class Decoder(nn.Module):
             else:
                 layer_cache = cache[i]
 
-            if train:
-                block = nn.remat(Block(
-                    model_dimension=self.model_dimension,
-                    n_heads=self.n_heads,
-                    dropout=self.dropout,
-                    T=self.T,
-                    latent_dim=self.latent_dim,
-                    dhR=0 if (self.rope_ratio == 0 or i % self.rope_ratio == 0) else self.dhR,
-                    n_experts=self.n_experts,
-                    k=self.k,
-                    moe=self.moe,
-                    model_dtype=self.model_dtype,
-                ))
-            else:
-                block = Block(
+                
+            block = Block(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
                 dropout=self.dropout,
@@ -363,12 +378,13 @@ class Decoder(nn.Module):
                 k=self.k,
                 moe=self.moe,
                 model_dtype=self.model_dtype,
+                grad_checkpoint=self.grad_checkpoint
             )
             x, current_cache = block(x, cache=layer_cache, train=train)
             out_cache.append(current_cache)
 
         x = x @ embed.embedding.embedding.T
-        x - jnp.asarray(x, dtype=jnp.float32)
+        x = jnp.asarray(x, dtype=jnp.float32)
 
         return x, out_cache
 
@@ -389,7 +405,8 @@ class Decoder(nn.Module):
                         model_config.moe,
                         model_config.latent_dim,
                         model_dtype=jnp.bfloat16 if (model_config.model_dtype == "bfloat16") else jnp.float32,
-                        )
+                        grad_checkpoint=model_config.grad_checkpoint, 
+                    )
 
         params = model.init(
             init_key,
