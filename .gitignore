@@ -1,2 +1,6 @@
 *.txt
-*.npy 
+*.npy
+*.pyc
+trainSet/*
+valSet/*
+*.tgz
