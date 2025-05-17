@@ -90,7 +90,7 @@ class MLA(nn.Module):
             self.Wqr = nn.Dense(
                 features=(self.dhR * self.n_heads), dtype=self.model_dtype
             )
-            self.rope = RoPE(model_dim=self.dhR, T=self.T, dtype=self.model_dtype)
+            self.rope = RoPE(model_dim=self.dhR, T=self.T, model_dtype=self.model_dtype)
 
     def __call__(
         self, x, cKV_cache=None, kRT_cache=None, attention_mask=None, train=True
