@@ -132,16 +132,15 @@ class MLA(nn.Module):
 
         if self.rope:
             q = jnp.concatenate([q, qRt], axis=-1)
-        
-        def scaledDotProd(q, k, v):
+
+        def scaledDotProd(q, k, v, mask):
             w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
                     1 / ((self.dk) ** 0.5)
             )
 
-            # if mask is not None: #model is in train mode
-            #     weights = weights * mask
-
+            w = jnp.where(mask==0, -9e15, w)
             w = nn.softmax(w, axis=-1)
+
             output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
 
             return output
@@ -149,28 +148,14 @@ class MLA(nn.Module):
         if self.grad_checkpoint:
             scaledDotProd = jax.remat(scaledDotProd)
 
-        # mask = jnp.ones((B, self.n_heads, T, T))
-        # if train:
-        #     mask = jnp.tril(mask)
-        #     mask = jnp.where(mask == 0, -9e15, )
+        mask = jnp.ones((B, self.n_heads, T, T))
+        if train:
+            mask = jnp.tril(mask)
 
-        output = scaledDotProd(q,k,v)
+        output = scaledDotProd(q,k,v, mask)
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
         output = self.output(output)
-
-        
-        # if train == True:
-        #     size = weights.shape[-1]
-        #     mask = jnp.tril(jnp.ones((B, self.n_heads, size, size)))
-        #     weights = jnp.where(mask == 0, -9e15, weights)
-        #     weights = jnp.where(attention_mask == 0, -9e15, weights) # add attention mask in case we need to pad
-
-        # weights = nn.softmax(weights, axis=-1)
-
-        # output = jnp.einsum("B n T t, B n t d -> B n T d", weights, v)
-        # output = rearrange(output, "B nh T dk -> B T (nh dk)")
-        # output = self.output(output)
 
         return output, (cKV_cache, kRT_cache)
 
