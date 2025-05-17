@@ -1,3 +1,9 @@
+import os
+os.environ['XLA_FLAGS'] = (
+    '--xla_gpu_triton_gemm_any=True '
+    '--xla_gpu_enable_latency_hiding_scheduler=true '
+)
+
 import jax
 import jax.numpy as jnp
 
@@ -230,7 +236,7 @@ def main(config: config):
         wandb.finish()
 
 if __name__ == "__main__":
-    cfg = parse_args()
+    cfg, profile = parse_args()
     print(cfg)
     with jax.profiler.trace("/tmp/jax-trace", create_perfetto_link=True):
         main(cfg)
