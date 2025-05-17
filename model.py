@@ -21,7 +21,7 @@ class Embeddings(nn.Module):
         self.embedding = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.model_dimension,
-            dtype=self.model_type,
+            dtype=self.model_dtype,
         )
 
     @nn.compact
