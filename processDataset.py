@@ -9,7 +9,7 @@ enc = tiktoken.get_encoding("cl100k_base")
 print(enc.n_vocab)
 eot = enc._special_tokens["<|endoftext|>"]
 
-#async version
+# async version
 
 # async def tokenize(file_path):
 #     with open(file_path, "r", encoding="utf-8") as f:
