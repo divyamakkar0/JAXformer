@@ -23,6 +23,7 @@ class modelConfig:
     n_shared: int = 0
     latent_dim: int = 0
     model_dtype: str = "bfloat16"
+    grad_checkpoint: bool = False
 
 @dataclass
 class dataConfig:
@@ -61,6 +62,7 @@ class config:
     inference_batch: int = 1
     seed: int = 0
     wandb: bool = True
+    grad_clip_norm: float = 1.0
 
     def __repr__(self):
         return f"""Configuration:
@@ -118,11 +120,14 @@ def parse_args():
         "--checkpoint_manager", type=str, default="./checkpoints/manager/"
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--wandb", action='store_true')
+    parser.add_argument("--grad_checkpoint", action='store_true')
+
     parser.add_argument("--training_steps", type=int, default=1000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--inference_batch", type=int, default=1)
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
+    parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 
     args = parser.parse_args()
 
@@ -141,6 +146,7 @@ def parse_args():
         moe=args.moe,
         latent_dim=args.latent_dim,
         model_dtype=args.model_dtype,
+        grad_checkpoint=args.grad_checkpoint
     )
 
     data_cfg = dataConfig(
@@ -172,6 +178,8 @@ def parse_args():
         inference_batch=args.inference_batch,
         alpha=args.alpha,
         wandb=args.wandb,
+        grad_clip_norm=args.grad_clip_norm,
+
     )
 
     return cfg

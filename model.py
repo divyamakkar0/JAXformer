@@ -15,7 +15,7 @@ from config import parse_args
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
-    model_type: jnp.dtype
+    model_dtype: jnp.dtype
 
     def setup(self):
         self.embedding = nn.Embed(
@@ -31,20 +31,23 @@ class Embeddings(nn.Module):
 
 
 class RoPE:
-    def __init__(self, T, model_dim, dtype=jnp.bfloat16):
+    def __init__(self, T, model_dim, model_dtype):
         self.T = T
         self.model_dim = model_dim
+        self.model_dtype = model_dtype
         assert model_dim % 2 == 0, "model_dim must be even"
 
-        freq = jnp.arange(self.T, dtype=dtype)[:, None]
+
+        freq = jnp.arange(self.T, dtype=jnp.float32)[:, None]
         pos = (
-            jnp.arange(self.model_dim // 2, dtype=dtype)[:, None]
+            jnp.arange(self.model_dim // 2, dtype=jnp.float32)[:, None]
             .repeat(2, axis=-1)
             .reshape(1, -1)
         )
+
         theta = 10000 ** (-2 * pos / self.model_dim)
-        self.cos = jnp.cos(freq * theta)
-        self.sin = jnp.sin(freq * theta)
+        self.cos = jnp.cos(freq * theta, dtype=self.model_dtype)
+        self.sin = jnp.sin(freq * theta, dtype=self.model_dtype)
 
     def __call__(self, x, t_start, t_end):
         B, nh, T, C = x.shape
@@ -65,7 +68,8 @@ class MLA(nn.Module):
     T: int
     latent_dim: int
     dhR: int
-    model_dtype: str
+    model_dtype: jnp.dtype
+    grad_checkpoint: bool 
 
     def setup(self):
         self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
@@ -73,7 +77,11 @@ class MLA(nn.Module):
         self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
-        self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+        
+        if self.grad_checkpoint: 
+            self.output = nn.remat(nn.Dense)(features=self.model_dim, dtype=self.model_dtype)
+        else:
+            self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.rope = None
 
@@ -137,22 +145,28 @@ class MLA(nn.Module):
         if self.rope:
             q = jnp.concatenate([q, qRt], axis=-1)
 
-        weights = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
-            1 / ((self.dk) ** 0.5)
-        )
+        def scaledDotProd(q, k, v, mask):
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
+                    1 / ((self.dk) ** 0.5)
+            )
 
-        if train == True:
-            size = weights.shape[-1]
-            mask = jnp.tril(jnp.ones((B, self.n_heads, size, size)))
-            weights = jnp.where(mask == 0, -9e15, weights)
-            weights = jnp.where(
-                attention_mask == 0, -9e15, weights
-            )  # add attention mask in case we need to pad
+            w = jnp.where(mask==0, -9e15, w)
+            w = nn.softmax(w, axis=-1)
+            
+            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
 
-        weights = nn.softmax(weights, axis=-1)
+            return output
 
-        output = jnp.einsum("B n T t, B n t d -> B n T d", weights, v)
+        if self.grad_checkpoint:
+            scaledDotProd = jax.remat(scaledDotProd)
+
+        mask = jnp.ones((B, self.n_heads, T, T))
+        if train:
+            mask = jnp.tril(mask)
+
+        output = scaledDotProd(q,k,v, mask)
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
+
         output = self.output(output)
 
         return output, (cKV_cache, kRT_cache)
@@ -213,6 +227,7 @@ class MoE(nn.Module):
     k: int
     dropout: float
     model_dtype: jnp.dtype
+    grad_checkpoint: bool
 
     def setup(self):
 
@@ -225,6 +240,7 @@ class MoE(nn.Module):
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
+                grad_checkpoint=self.grad_checkpoint
             )
             for i in range(self.n_experts)
         ]
@@ -275,6 +291,7 @@ class MoE(nn.Module):
             out_axes=(0),
         )
 
+
         res_route = gscore_parallel(g_route, i_route, x_route)
         res_route = jnp.reshape(res_route, (B, T, C))
 
@@ -302,20 +319,43 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
-class FeedForward(nn.Module):
+class FFBody(nn.Module):
+
     model_dimension: int
     ff_dim: int
     dropout: float
     model_dtype: jnp.dtype
 
     @nn.compact
-    def __call__(self, x, train: bool = True):
+    def __call__(self, x):
         x = nn.Dense(features=self.ff_dim, dtype=self.model_dtype)(x)
         x = nn.relu(x)
-        x = nn.Dropout(rate=self.dropout, deterministic=not train)(x)
         x = nn.Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
-
+         
         return x
+
+class FeedForward(nn.Module):
+    model_dimension: int
+    ff_dim: int
+    dropout: float
+    model_dtype: jnp.dtype
+    grad_checkpoint: bool
+
+    @nn.compact
+    def __call__(self, x, train: bool = True):
+        ff = FFBody
+        if self.grad_checkpoint:
+            ff = nn.remat(FFBody)
+
+        ff = ff(
+            model_dimension=self.model_dimension,
+            ff_dim=4 * self.model_dimension,
+            dropout=self.dropout,
+            model_dtype=self.model_dtype
+        )
+        x_ff = nn.Dropout(rate=self.dropout,deterministic=not train)(ff(x))
+
+        return x_ff
 
 
 class Block(nn.Module):
@@ -330,28 +370,32 @@ class Block(nn.Module):
     n_experts: int = 0
     k: int = 0
     moe: bool = False
+    grad_checkpoint: bool = False
 
     @nn.compact
     def __call__(self, x, cache=(None, None), train=True):
-        x_up = LayerNorm(
-            model_dimension=self.model_dimension,
-            model_dtype=self.model_dtype,
-        )(x)
-
-        x_up, cache = MLA(
-            model_dim=self.model_dimension,
-            n_heads=self.n_heads,
-            T=self.T,
-            latent_dim=self.latent_dim,
-            dhR=self.dhR,
-            model_dtype=self.model_dtype,
-        )(x_up, *cache, train=train)
-
-        x = x + x_up
+        
         x_norm = LayerNorm(
             model_dimension=self.model_dimension,
             model_dtype=self.model_dtype,
         )(x)
+        
+        x_up, cache = MLA(
+                model_dim=self.model_dimension,
+                n_heads=self.n_heads,
+                T=self.T,
+                latent_dim=self.latent_dim,
+                dhR=self.dhR,
+                model_dtype=self.model_dtype,
+                grad_checkpoint=self.grad_checkpoint
+            )(x_norm, *cache,attention_mask=None, train=train)
+
+        x = x + x_up
+        
+        x_norm =  LayerNorm(
+                    model_dimension=self.model_dimension
+                    model_dtype=self.model_dtype,
+                  )(x)
 
         load = None
         if self.moe == True:
@@ -362,14 +406,17 @@ class Block(nn.Module):
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
                 n_shared=self.n_shared,
+                grad_checkpoint=self.grad_checkpoint
             )(x_norm, train=train)
+
         else:
             x_ff = FeedForward(
                 model_dimension=self.model_dimension,
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
-            )(x_norm, train=train)
+                grad_checkpoint=self.grad_checkpoint
+            )(x_norm, train=train) 
 
         x = x + x_ff
 
@@ -390,14 +437,15 @@ class Decoder(nn.Module):
     k: int
     moe: bool
     latent_dim: int
-    model_type: jnp.dtype
+    model_dtype: jnp.dtype
+    grad_checkpoint: bool
 
     @nn.compact
     def __call__(self, x, cache=None, train=True):
         embed = Embeddings(
             model_dimension=self.model_dimension,
             vocab_size=self.vocab_size,
-            model_type=self.model_type,
+            model_dtype=self.model_type,
         )
         x = embed(x)
 
