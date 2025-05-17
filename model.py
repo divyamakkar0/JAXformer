@@ -60,6 +60,7 @@ class MLA(nn.Module):
     latent_dim: int
     dhR: int
     model_dtype: jnp.dtype
+    grad_checkpoint: bool 
 
     def setup(self):
         self.W_down = nn.Dense(features=2*self.latent_dim, dtype=self.model_dtype)
@@ -67,7 +68,11 @@ class MLA(nn.Module):
         self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
-        self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+        
+        if self.grad_checkpoint: 
+            self.output = nn.remat(nn.Dense)(features=self.model_dim, dtype=self.model_dtype)
+        else:
+            self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.rope = None
 
@@ -128,21 +133,44 @@ class MLA(nn.Module):
         if self.rope:
             q = jnp.concatenate([q, qRt], axis=-1)
         
-        weights = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
-                1 / ((self.dk) ** 0.5)
-        )
-        
-        if train == True:
-            size = weights.shape[-1]
-            mask = jnp.tril(jnp.ones((B, self.n_heads, size, size)))
-            weights = jnp.where(mask == 0, -9e15, weights)
-            weights = jnp.where(attention_mask == 0, -9e15, weights) # add attention mask in case we need to pad
+        def scaledDotProd(q, k, v):
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
+                    1 / ((self.dk) ** 0.5)
+            )
 
-        weights = nn.softmax(weights, axis=-1)
+            # if mask is not None: #model is in train mode
+            #     weights = weights * mask
 
-        output = jnp.einsum("B n T t, B n t d -> B n T d", weights, v)
+            w = nn.softmax(w, axis=-1)
+            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
+
+            return output
+
+        if self.grad_checkpoint:
+            scaledDotProd = jax.remat(scaledDotProd)
+
+        # mask = jnp.ones((B, self.n_heads, T, T))
+        # if train:
+        #     mask = jnp.tril(mask)
+        #     mask = jnp.where(mask == 0, -9e15, )
+
+        output = scaledDotProd(q,k,v)
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
+
         output = self.output(output)
+
+        
+        # if train == True:
+        #     size = weights.shape[-1]
+        #     mask = jnp.tril(jnp.ones((B, self.n_heads, size, size)))
+        #     weights = jnp.where(mask == 0, -9e15, weights)
+        #     weights = jnp.where(attention_mask == 0, -9e15, weights) # add attention mask in case we need to pad
+
+        # weights = nn.softmax(weights, axis=-1)
+
+        # output = jnp.einsum("B n T t, B n t d -> B n T d", weights, v)
+        # output = rearrange(output, "B nh T dk -> B T (nh dk)")
+        # output = self.output(output)
 
         return output, (cKV_cache, kRT_cache)
 
@@ -301,13 +329,14 @@ class Block(nn.Module):
         # if self.grad_checkpoint: 
         #     attn = nn.checkpoint(attn, prevent_cse=False, static_argnums=(1,2,3,4))
         
-        x_up, cache = attn(
+        x_up, cache = MLA(
                 model_dim=self.model_dimension,
                 n_heads=self.n_heads,
                 T=self.T,
                 latent_dim=self.latent_dim,
                 dhR=self.dhR,
-                model_dtype=self.model_dtype
+                model_dtype=self.model_dtype,
+                grad_checkpoint=self.grad_checkpoint
             )(x, *cache,attention_mask=None, train=train)
 
         x = LayerNorm(model_dimension=self.model_dimension)(x + x_up)
