@@ -102,7 +102,11 @@ def main(config: config):
     )
 
     #optax adam optimizer
-    tx = optax.inject_hyperparams(optax.adam)(lr_scheduler)
+    tx = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip_norm),
+        optax.inject_hyperparams(optax.adam)(learning_rate=lr_scheduler),
+    )
+
     state = train_state.TrainState.create(
         apply_fn=model.apply,
         params=params,

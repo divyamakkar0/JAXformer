@@ -54,6 +54,7 @@ class config:
     inference_batch: int = 1
     seed: int = 0
     wandb: bool = True
+    grad_clip_norm: float = 1.0
 
     def __repr__(self):
         return f"""Configuration:
@@ -75,7 +76,6 @@ class config:
 
 
 def parse_args():
-
     parser = argparse.ArgumentParser(description="model training")
     parser.add_argument("--model_dimension", type=int, default=24)
     parser.add_argument("--n_heads", type=int, default=8)
@@ -112,6 +112,7 @@ def parse_args():
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--inference_batch", type=int, default=1)
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
+    parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 
     args = parser.parse_args()
 
@@ -160,6 +161,7 @@ def parse_args():
         grad_step=args.grad_step,
         inference_batch=args.inference_batch,
         wandb=args.wandb,
+        grad_clip_norm=args.grad_clip_norm,
     )
 
     return cfg
