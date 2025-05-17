@@ -37,7 +37,6 @@ class RoPE:
         self.model_dtype = model_dtype
         assert model_dim % 2 == 0, "model_dim must be even"
 
-
         freq = jnp.arange(self.T, dtype=jnp.float32)[:, None]
         pos = (
             jnp.arange(self.model_dim // 2, dtype=jnp.float32)[:, None]
@@ -69,7 +68,7 @@ class MLA(nn.Module):
     latent_dim: int
     dhR: int
     model_dtype: jnp.dtype
-    grad_checkpoint: bool 
+    grad_checkpoint: bool
 
     def setup(self):
         self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
@@ -77,9 +76,11 @@ class MLA(nn.Module):
         self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
-        
-        if self.grad_checkpoint: 
-            self.output = nn.remat(nn.Dense)(features=self.model_dim, dtype=self.model_dtype)
+
+        if self.grad_checkpoint:
+            self.output = nn.remat(nn.Dense)(
+                features=self.model_dim, dtype=self.model_dtype
+            )
         else:
             self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
@@ -147,12 +148,12 @@ class MLA(nn.Module):
 
         def scaledDotProd(q, k, v, mask):
             w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
-                    1 / ((self.dk) ** 0.5)
+                1 / ((self.dk) ** 0.5)
             )
 
-            w = jnp.where(mask==0, -9e15, w)
+            w = jnp.where(mask == 0, -9e15, w)
             w = nn.softmax(w, axis=-1)
-            
+
             output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
 
             return output
@@ -164,7 +165,7 @@ class MLA(nn.Module):
         if train:
             mask = jnp.tril(mask)
 
-        output = scaledDotProd(q,k,v, mask)
+        output = scaledDotProd(q, k, v, mask)
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
         output = self.output(output)
@@ -205,7 +206,7 @@ class NoisyKGate(nn.Module):
     def top(self, x):
         assert x.shape[0] == self.n_experts, "x must be of shape (n_experts, )"
         g_i, i = jax.lax.top_k(x, self.k)
-        g = jnp.zeros((x.shape[0], ), dtype=x.dtype)
+        g = jnp.zeros((x.shape[0],), dtype=x.dtype)
         g = g.at[i].set(g_i)
         g = g / jnp.sum(g, axis=-1)
         g = g[i]
@@ -230,9 +231,8 @@ class MoE(nn.Module):
     grad_checkpoint: bool
 
     def setup(self):
-
         self.shared = nn.Dense(
-            features= self.model_dimension * self.n_shared,
+            features=self.model_dimension * self.n_shared,
         )
         self.experts = [
             FeedForward(
@@ -240,7 +240,7 @@ class MoE(nn.Module):
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
-                grad_checkpoint=self.grad_checkpoint
+                grad_checkpoint=self.grad_checkpoint,
             )
             for i in range(self.n_experts)
         ]
@@ -270,8 +270,7 @@ class MoE(nn.Module):
         return gScore
 
     def __call__(self, x, train=True):
-
-        B,T,C = x.shape
+        B, T, C = x.shape
 
         res_shared = self.shared(x)
         res_shared = rearrange(
@@ -291,13 +290,10 @@ class MoE(nn.Module):
             out_axes=(0),
         )
 
-
         res_route = gscore_parallel(g_route, i_route, x_route)
         res_route = jnp.reshape(res_route, (B, T, C))
 
         res = x + res_shared + res_route
-
-
 
         f = jnp.zeros((B, self.n_experts), dtype=jnp.float32)
         p = jnp.zeros((B, self.n_experts), dtype=jnp.float32)
@@ -319,8 +315,8 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
-class FFBody(nn.Module):
 
+class FFBody(nn.Module):
     model_dimension: int
     ff_dim: int
     dropout: float
@@ -331,8 +327,9 @@ class FFBody(nn.Module):
         x = nn.Dense(features=self.ff_dim, dtype=self.model_dtype)(x)
         x = nn.relu(x)
         x = nn.Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
-         
+
         return x
+
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -351,9 +348,9 @@ class FeedForward(nn.Module):
             model_dimension=self.model_dimension,
             ff_dim=4 * self.model_dimension,
             dropout=self.dropout,
-            model_dtype=self.model_dtype
+            model_dtype=self.model_dtype,
         )
-        x_ff = nn.Dropout(rate=self.dropout,deterministic=not train)(ff(x))
+        x_ff = nn.Dropout(rate=self.dropout, deterministic=not train)(ff(x))
 
         return x_ff
 
@@ -374,28 +371,27 @@ class Block(nn.Module):
 
     @nn.compact
     def __call__(self, x, cache=(None, None), train=True):
-        
         x_norm = LayerNorm(
             model_dimension=self.model_dimension,
             model_dtype=self.model_dtype,
         )(x)
-        
+
         x_up, cache = MLA(
-                model_dim=self.model_dimension,
-                n_heads=self.n_heads,
-                T=self.T,
-                latent_dim=self.latent_dim,
-                dhR=self.dhR,
-                model_dtype=self.model_dtype,
-                grad_checkpoint=self.grad_checkpoint
-            )(x_norm, *cache,attention_mask=None, train=train)
+            model_dim=self.model_dimension,
+            n_heads=self.n_heads,
+            T=self.T,
+            latent_dim=self.latent_dim,
+            dhR=self.dhR,
+            model_dtype=self.model_dtype,
+            grad_checkpoint=self.grad_checkpoint,
+        )(x_norm, *cache, attention_mask=None, train=train)
 
         x = x + x_up
-        
-        x_norm =  LayerNorm(
-                    model_dimension=self.model_dimension
-                    model_dtype=self.model_dtype,
-                  )(x)
+
+        x_norm = LayerNorm(
+            model_dimension=self.model_dimension,
+            model_dtype=self.model_dtype,
+        )(x)
 
         load = None
         if self.moe == True:
@@ -406,7 +402,7 @@ class Block(nn.Module):
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
                 n_shared=self.n_shared,
-                grad_checkpoint=self.grad_checkpoint
+                grad_checkpoint=self.grad_checkpoint,
             )(x_norm, train=train)
 
         else:
@@ -415,8 +411,8 @@ class Block(nn.Module):
                 ff_dim=4 * self.model_dimension,
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
-                grad_checkpoint=self.grad_checkpoint
-            )(x_norm, train=train) 
+                grad_checkpoint=self.grad_checkpoint,
+            )(x_norm, train=train)
 
         x = x + x_ff
 
@@ -458,25 +454,28 @@ class Decoder(nn.Module):
                 layer_cache = cache[i]
 
             x, (current_cache, current_load) = Block(
-                        model_dimension=self.model_dimension,
-                        n_heads=self.n_heads,
-                        dropout=self.dropout,
-                        T=self.T,
-                        latent_dim=self.latent_dim,
-                        dhR=0
-                        if (self.rope_ratio == 0 or i % self.rope_ratio == 0)
-                        else self.dhR,
-                        moe=self.moe,
-                        n_experts=self.n_experts,
-                        n_shared=self.n_shared,
-                        k=self.k,
-                        model_dtype=self.model_type,
-                    )(x, cache=layer_cache, train=train)
+                model_dimension=self.model_dimension,
+                n_heads=self.n_heads,
+                dropout=self.dropout,
+                T=self.T,
+                latent_dim=self.latent_dim,
+                dhR=0
+                if (self.rope_ratio == 0 or i % self.rope_ratio == 0)
+                else self.dhR,
+                moe=self.moe,
+                n_experts=self.n_experts,
+                n_shared=self.n_shared,
+                k=self.k,
+                model_dtype=self.model_type,
+            )(x, cache=layer_cache, train=train)
             if load is None:
                 load = current_load
             else:
-                add_tree = lambda x,y: jax.tree.map(lambda a, b: a + b, x, y)
-                load = (add_tree(load[0], current_load[0]), add_tree(load[1], current_load[1]))
+                add_tree = lambda x, y: jax.tree.map(lambda a, b: a + b, x, y)
+                load = (
+                    add_tree(load[0], current_load[0]),
+                    add_tree(load[1], current_load[1]),
+                )
 
             out_cache.append(current_cache)
 

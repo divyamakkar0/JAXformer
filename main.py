@@ -42,12 +42,14 @@ class KeyState:
 
 def loss(model, alpha, params, key, x, y, train=True):
     B, T = x.shape
-    pred, (cache, load)= model.apply({"params": params}, x, train=train, rngs={"dropout": key})
+    pred, (cache, load) = model.apply(
+        {"params": params}, x, train=train, rngs={"dropout": key}
+    )
     log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
     y = y.reshape(B * T)
     loss_cross = -jnp.mean(log_prob[jnp.arange(B * T), y])
     if load is not None:
-        loss_balance =  model.n_experts / (model.k * T ** 2) * load.sum(axis=0)
+        loss_balance = model.n_experts / (model.k * T**2) * load.sum(axis=0)
     else:
         loss_balance = 0.0
 
@@ -55,10 +57,14 @@ def loss(model, alpha, params, key, x, y, train=True):
 
     return loss, (pred, cache, load, loss_cross, loss_balance)
 
+
 def train_step(loss_fn, params, key, *args, **kwargs):
     loss = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
     val, grads = loss(params, key, *args, **kwargs, train=True)
-    loss, pred, _, load, loss_cross, loss_balance = val[0], *val[1]  # don't need cache in training
+    loss, pred, _, load, loss_cross, loss_balance = (
+        val[0],
+        *val[1],
+    )  # don't need cache in training
 
     metrics = {
         "loss": loss,
@@ -72,7 +78,9 @@ def train_step(loss_fn, params, key, *args, **kwargs):
 
 
 def eval_step(loss_fn, params, key, *args, **kwargs):
-    loss, (pred, cache, load, load_cross, loss_balance) = loss_fn(params, key, *args, **kwargs, train=False)
+    loss, (pred, cache, load, load_cross, loss_balance) = loss_fn(
+        params, key, *args, **kwargs, train=False
+    )
     pred = jax.nn.softmax(pred, axis=-1)
     metrics = {
         "loss": loss,

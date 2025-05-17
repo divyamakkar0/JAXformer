@@ -25,6 +25,7 @@ class modelConfig:
     model_dtype: str = "bfloat16"
     grad_checkpoint: bool = False
 
+
 @dataclass
 class dataConfig:
     dataset_path: str = "./tokens.npy"
@@ -120,8 +121,8 @@ def parse_args():
         "--checkpoint_manager", type=str, default="./checkpoints/manager/"
     )
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--wandb", action='store_true')
-    parser.add_argument("--grad_checkpoint", action='store_true')
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--grad_checkpoint", action="store_true")
 
     parser.add_argument("--training_steps", type=int, default=1000)
     parser.add_argument("--grad_step", type=int, default=1)
@@ -146,7 +147,7 @@ def parse_args():
         moe=args.moe,
         latent_dim=args.latent_dim,
         model_dtype=args.model_dtype,
-        grad_checkpoint=args.grad_checkpoint
+        grad_checkpoint=args.grad_checkpoint,
     )
 
     data_cfg = dataConfig(
@@ -179,7 +180,6 @@ def parse_args():
         alpha=args.alpha,
         wandb=args.wandb,
         grad_clip_norm=args.grad_clip_norm,
-
     )
 
     return cfg
