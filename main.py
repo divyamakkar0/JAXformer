@@ -211,7 +211,7 @@ def main(config: config):
             if use_wandb:
                 wandb_log["val_loss"] = val_loss
             print(
-                f"step: {current_step} | val_loss: {val_loss:.4f} | train_loss: {train_loss / cfg.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s"
+                f"step: {current_step} | val_loss: {val_loss:.4f} | train_loss: {train_loss / config.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s"
             )
 
             save_checkpoint(current_step)
