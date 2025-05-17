@@ -46,8 +46,8 @@ class RoPE:
         )
 
         theta = 10000 ** (-2 * pos / self.model_dim)
-        self.cos = jnp.cos(freq * theta, dtype=self.model_dtype)
-        self.sin = jnp.sin(freq * theta, dtype=self.model_dtype)
+        self.cos = jnp.cos(freq * theta).astype(self.model_dtype)
+        self.sin = jnp.sin(freq * theta).astype(self.model_dtype)
 
     def __call__(self, x, t_start, t_end):
         B, nh, T, C = x.shape
