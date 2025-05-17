@@ -441,7 +441,7 @@ class Decoder(nn.Module):
         embed = Embeddings(
             model_dimension=self.model_dimension,
             vocab_size=self.vocab_size,
-            model_dtype=self.model_type,
+            model_dtype=self.model_dtype,
         )
         x = embed(x)
 
@@ -466,7 +466,7 @@ class Decoder(nn.Module):
                 n_experts=self.n_experts,
                 n_shared=self.n_shared,
                 k=self.k,
-                model_dtype=self.model_type,
+                model_dtype=self.model_dtype,
             )(x, cache=layer_cache, train=train)
             if load is None:
                 load = current_load
@@ -505,9 +505,10 @@ class Decoder(nn.Module):
             moe=model_config.moe,
             latent_dim=model_config.latent_dim,
             n_shared=model_config.n_shared,
-            model_type=jnp.bfloat16
+            model_dtype=jnp.bfloat16
             if (model_config.model_dtype == "bfloat16")
             else jnp.float32,
+            grad_checkpoint=model_config.grad_checkpoint,
         )
 
         params = model.init(
@@ -546,8 +547,7 @@ class Decoder(nn.Module):
             out = jnp.concatenate([out, out_next], axis=-1)
 
         tokens = jax.device_get(out[:, 1:])
-        decode_fn = lambda x: enc.decode(x)
-        outputs = list(map(decode_fn, tokens))
+        outputs = list(map(lambda x: enc.decode(x), tokens))
 
         return outputs
 

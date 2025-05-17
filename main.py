@@ -29,8 +29,6 @@ import orbax.checkpoint as ocp
 import wandb
 from dataclasses import asdict
 
-
-# key gen
 class KeyState:
     def __init__(self, base_key: jax.random.key):
         self.key = jax.random.key(base_key)

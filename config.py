@@ -78,13 +78,14 @@ class config:
         grad_step: {self.grad_step}
         alpha: {self.alpha}
         seed: {self.seed}
+        wandb: {self.wandb}
+        grad_clip_norm: {self.grad_clip_norm}
       Checkpointing:
         checkpoint_steps: {self.checkpoint_steps}
         checkpoint_manager: {self.checkpoint_manager}
       Output:
         output_dir: {self.output_dir}
     """
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
