@@ -1,7 +1,7 @@
 import os
-os.environ['XLA_FLAGS'] = (
-    '--xla_gpu_triton_gemm_any=True '
-    '--xla_gpu_enable_latency_hiding_scheduler=true '
+
+os.environ["XLA_FLAGS"] = (
+    "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true "
 )
 
 import jax
@@ -10,7 +10,9 @@ import jax.numpy as jnp
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
-jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
+jax.config.update(
+    "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
+)
 
 import flax
 from flax.training import train_state
@@ -27,7 +29,8 @@ import orbax.checkpoint as ocp
 import wandb
 from dataclasses import asdict
 
-#key gen
+
+# key gen
 class KeyState:
     def __init__(self, base_key: jax.random.key):
         self.key = jax.random.key(base_key)
@@ -36,53 +39,60 @@ class KeyState:
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
 
-def cross_entropy_loss(model, params, key, x, y, train=True):
 
+def loss(model, alpha, params, key, x, y, train=True):
     B, T = x.shape
-    pred, cache = model.apply({'params': params}, x, train=train, rngs={'dropout': key})
+    pred, (cache, load)= model.apply({"params": params}, x, train=train, rngs={"dropout": key})
     log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
     y = y.reshape(B * T)
-    loss = -jnp.mean(log_prob[jnp.arange(B * T), y])
-    return loss, (pred, cache)
+    loss_cross = -jnp.mean(log_prob[jnp.arange(B * T), y])
+    if load is not None:
+        loss_balance =  model.n_experts / (model.k * T ** 2) * load.sum(axis=0)
+    else:
+        loss_balance = 0.0
 
-#MoE Loss
+    loss = loss_cross + alpha * loss_balance
+
+    return loss, (pred, cache, load, loss_cross, loss_balance)
 
 def train_step(loss_fn, params, key, *args, **kwargs):
-    loss = jax.value_and_grad(
-        loss_fn,
-        argnums=0,
-        has_aux=True
-    )
+    loss = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
     val, grads = loss(params, key, *args, **kwargs, train=True)
-    loss, pred, _ = val[0], *val[1] # don't need cache in training
+    loss, pred, _, load, loss_cross, loss_balance = val[0], *val[1]  # don't need cache in training
 
     metrics = {
-        'loss': loss,
-        'pred': pred,
+        "loss": loss,
+        "pred": pred,
+        "load": load,
+        "loss_cross": loss_cross,
+        "loss_balance": loss_balance,
     }
 
     return grads, metrics
 
+
 def eval_step(loss_fn, params, key, *args, **kwargs):
-    loss, (pred, cache) = loss_fn(params, key, *args, **kwargs, train=False)
+    loss, (pred, cache, load, load_cross, loss_balance) = loss_fn(params, key, *args, **kwargs, train=False)
     pred = jax.nn.softmax(pred, axis=-1)
     metrics = {
-        'loss': loss,
-        'pred': pred,
-        'cache': cache,
+        "loss": loss,
+        "pred": pred,
+        "cache": cache,
+        "load": load,
+        "loss_cross": load_cross,
+        "loss_balance": loss_balance,
     }
     return metrics
 
+
 def main(config: config):
-    """
-    main function
-    """
-
-
-    key = KeyState(config.seed) #fix this line
+    key = KeyState(config.seed)
 
     print("setting up dataset")
-    train_dataset, val_dataset, = Dataset.getDataset(cfg.data, key())
+    (
+        train_dataset,
+        val_dataset,
+    ) = Dataset.getDataset(cfg.data, key())
     print(len(train_dataset), len(val_dataset))
 
     print("setting up model")
@@ -92,7 +102,6 @@ def main(config: config):
     print(f"Model parameter count: {param_count:,d} ")
     total_steps = config.training_steps
 
-    #cosine scheduler
     lr_scheduler = optax.warmup_cosine_decay_schedule(
         init_value=config.lr.min_lr,
         peak_value=config.lr.max_lr,
@@ -101,7 +110,6 @@ def main(config: config):
         end_value=config.lr.end_lr,
     )
 
-    #optax adam optimizer
     tx = optax.inject_hyperparams(optax.adam)(lr_scheduler)
     state = train_state.TrainState.create(
         apply_fn=model.apply,
@@ -111,13 +119,17 @@ def main(config: config):
 
     print("starting training")
 
-    loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
+    loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
     train_step_jit = jax.jit(
-        lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
-        )
-    eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
+        lambda key, params, x, y: train_step(loss_fn, params, key, x, y),
+    )
+    eval_step_jit = jax.jit(
+        lambda key, params, x, y: eval_step(loss_fn, params, key, x, y)
+    )
 
-    checkpoint_dir = os.path.join(os.path.abspath(config.output_dir), config.name, "checkpoints")
+    checkpoint_dir = os.path.join(
+        os.path.abspath(config.output_dir), config.name, "checkpoints"
+    )
     load = os.path.exists(checkpoint_dir)
     checkpointer = ocp.PyTreeCheckpointer()
     options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
@@ -125,12 +137,12 @@ def main(config: config):
 
     def save_checkpoint(step):
         save_tree = {
-                'state': flax.serialization.to_state_dict(state),
-                'key': key.key,
-                'train_idx': train_dataset.idx,
-                'val_idx': val_dataset.idx,
-                'step': step,
-            }
+            "state": flax.serialization.to_state_dict(state),
+            "key": key.key,
+            "train_idx": train_dataset.idx,
+            "val_idx": val_dataset.idx,
+            "step": step,
+        }
         checkpoint_manager.save(step, save_tree)
 
     init_step = 0
@@ -138,15 +150,14 @@ def main(config: config):
     if load:
         print("loading checkpoint")
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
-        key.key = tree_state['key']
-        state = flax.serialization.from_state_dict(state, tree_state['state'])
-        train_dataset.idx = tree_state['train_idx']
-        val_dataset.idx = tree_state['val_idx']
-        init_step = tree_state['step']
+        key.key = tree_state["key"]
+        state = flax.serialization.from_state_dict(state, tree_state["state"])
+        train_dataset.idx = tree_state["train_idx"]
+        val_dataset.idx = tree_state["val_idx"]
+        init_step = tree_state["step"]
     else:
         print("No checkpoint found, starting from scratch")
         save_checkpoint(0)
-
 
     use_wandb = config.wandb is True
     if use_wandb:
@@ -167,14 +178,16 @@ def main(config: config):
         grad_loss = 0.0
         for i in range(config.grad_step):
             grads_step, metrics = train_step_jit(key(), state.params, *train_dataset())
-            grads = grads_step if grads is None else jax.tree.map(
-                lambda x, y: x + y, grads, grads_step
+            grads = (
+                grads_step
+                if grads is None
+                else jax.tree.map(lambda x, y: x + y, grads, grads_step)
             )
-            grad_loss += metrics['loss']
+            grad_loss += metrics["loss"]
 
         grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         state = state.apply_gradients(grads=grads)
-        train_loss += (grad_loss/config.grad_step)
+        train_loss += grad_loss / config.grad_step
         if use_wandb:
             wandb_log = {
                 "step": current_step,
@@ -185,15 +198,17 @@ def main(config: config):
         if current_step > 0 and current_step % config.checkpoint_steps == 0:
             end = time.time()
             total_time = end - start
-            tokens_per_second = (config.data.batch_size * config.grad_step)/ total_time
+            tokens_per_second = (config.data.batch_size * config.grad_step) / total_time
             val_loss = 0.0
             for i in range(config.checkpoint_steps):
                 metrics = eval_step_jit(key(), state.params, *val_dataset())
-                val_loss += metrics['loss']
+                val_loss += metrics["loss"]
             val_loss /= config.checkpoint_steps
             if use_wandb:
-                wandb_log['val_loss'] = val_loss
-            print(f"step: {current_step} | val_loss: {val_loss:.4f} | train_loss: {train_loss / cfg.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s")
+                wandb_log["val_loss"] = val_loss
+            print(
+                f"step: {current_step} | val_loss: {val_loss:.4f} | train_loss: {train_loss / cfg.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s"
+            )
 
             save_checkpoint(current_step)
 
@@ -207,20 +222,28 @@ def main(config: config):
                 temperature=1,
             )
             print("tokens: ", tokens)
-            with open(os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"), "a") as f:
+            with open(
+                os.path.join(
+                    os.path.abspath(config.output_dir), config.name, "tokens.txt"
+                ),
+                "a",
+            ) as f:
                 f.write(f"{current_step} | {tokens}\n")
 
             start = time.time()
             train_loss = 0.0
 
         if use_wandb:
-                    wandb.log(wandb_log)
+            wandb.log(wandb_log)
 
     if use_wandb:
-        table = wandb.Table(columns=[f"tokens_{i}" for i in range(config.inference_batch)])
+        table = wandb.Table(
+            columns=[f"tokens_{i}" for i in range(config.inference_batch)]
+        )
         wandb.Table.MAX_ROWS = total_steps // config.checkpoint_steps
         with open(
-            os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"), "r"
+            os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"),
+            "r",
         ) as f:
             lines = f.readlines()
         for line in lines:
@@ -230,6 +253,7 @@ def main(config: config):
 
         wandb.log({"inference_tokens": table})
         wandb.finish()
+
 
 if __name__ == "__main__":
     cfg = parse_args()
