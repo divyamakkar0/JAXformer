@@ -188,7 +188,7 @@ class NoisyKGate(nn.Module):
     def setup(self):
         self.rng = jax.random.PRNGKey(42)
         self.Wg = nn.Dense(features=self.n_experts, dtype=self.model_dtype)
-        self.Wnoise = nn.Dense(features=self.n_experts, dtype=self.model_dimension)
+        self.Wnoise = nn.Dense(features=self.n_experts, dtype=self.model_dtype)
 
     def top(self, x):
         k = self.k
@@ -232,7 +232,7 @@ class MoE(nn.Module):
 
     def get_gScores(self, scores, indices, x, train=True):
         expert_lambda = [
-            lambda mdl, x: mdl.experts[i](x) for i in range(self.n_experts)
+            lambda mdl, x: mdl.experts[i](x, train=train) for i in range(self.n_experts)
         ]
 
         if self.is_mutable_collection("params"):
