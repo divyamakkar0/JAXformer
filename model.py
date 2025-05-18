@@ -463,10 +463,6 @@ class Decoder(nn.Module):
             out = jnp.concatenate([out, out_next], axis=-1)
 
         tokens = jax.device_get(out[:, 1:])
-        decode_fn = lambda x: enc.decode(x)
-        outputs = list(map(decode_fn, tokens))
-
-        return outputs
 
 if __name__ == "__main__":
     model = Decoder(
