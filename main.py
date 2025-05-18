@@ -24,7 +24,7 @@ from config import parse_args, config
 from model import Decoder
 from dataset import Dataset
 
-from typing import Tuple, Any
+from typing import Tuple, Any, Optional
 import orbax.checkpoint as ocp
 import wandb
 from dataclasses import asdict
@@ -37,6 +37,58 @@ class KeyState:
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
 
+class Metrics:
+
+    def __init__(self, moe: Optional[int] = None):
+
+
+        if moe is not None:
+            assert isinstance(moe, int), "moe must be an integer"
+            assert moe > 0, "moe must be greater than 0"
+        self.moe = moe
+        metrics = {
+            "loss": 0.0,
+            "loss_cross": 0.0,
+        }
+        if moe:
+            metrics["loss_load"] = 0.0
+            for h in range(moe):
+                metrics[f"load/head_{h}"] = 0.0
+        self.moe = moe
+        self.metrics = metrics
+
+    def reset(self):
+        metrics = {
+            "loss": 0.0,
+            "loss_cross": 0.0,
+        }
+        if self.moe:
+            metrics["loss_load"] = 0.0
+            for h in range(self.moe):
+                metrics[f"load/head_{h}"] = 0.0
+        self.metrics = metrics
+
+        return self
+
+    def __getitem__(self, key):
+        if key not in self.metrics:
+            raise KeyError(f"Key {key} not found in metrics")
+        return self.metrics[key]
+
+    def __add__(self, other):
+        self.metrics["loss"] += other["loss"]
+        self.metrics["loss_cross"] += other["loss_cross"]
+
+        if self.moe:
+            self.metrics["loss_load"] += other["loss_load"]
+            for h in range(self.moe):
+                self.metrics[f"load/head_{h}"] += other["load"][h]
+
+        return self
+
+    def __truediv__(self, num):
+        self.metrics = {k: self.metrics[k] / num for k in self.metrics}
+        return self
 
 def loss(model, alpha, params, key, x, y, train=True):
     B, T = x.shape
@@ -69,7 +121,7 @@ def train_step(loss_fn, params, key, *args, **kwargs):
         "pred": pred,
         "load": load,
         "loss_cross": loss_cross,
-        "loss_balance": loss_balance,
+        "loss_load": loss_balance,
     }
 
     return grads, metrics
@@ -86,7 +138,7 @@ def eval_step(loss_fn, params, key, *args, **kwargs):
         "cache": cache,
         "load": load,
         "loss_cross": load_cross,
-        "loss_balance": loss_balance,
+        "loss_load": loss_balance,
     }
     return metrics
 
@@ -180,12 +232,16 @@ def main(config: config):
             config=asdict(config),
         )
 
+
+    metrics_step = Metrics(config.model.n_experts if config.model.moe else None)
+    metrics_val = Metrics(config.model.n_experts if config.model.moe else None)
     start = time.time()
     train_loss = 0.0
 
     for current_step in range(init_step, total_steps):
         grads = None
-        grad_loss = 0.0
+        metrics_step = metrics_step.reset()
+
         for i in range(config.grad_step):
             grads_step, metrics = train_step_jit(key(), state.params, *train_dataset())
             grads = (
@@ -193,31 +249,39 @@ def main(config: config):
                 if grads is None
                 else jax.tree.map(lambda x, y: x + y, grads, grads_step)
             )
-            grad_loss += metrics["loss"]
+            metrics_step = metrics_step + metrics
 
         grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         state = state.apply_gradients(grads=grads)
-        train_loss += grad_loss / config.grad_step
+        metrics_step = metrics_step / config.grad_step
+
+        train_loss += metrics_step["loss"]
+
         if use_wandb:
             wandb_log = {
                 "step": current_step,
-                "train_loss": grad_loss,
-                "lr": state.opt_state.hyperparams["learning_rate"],
+                "loss/train_loss": metrics_step["loss"],
+                "loss/cross_entropy_loss": metrics_step["loss_cross"],
+                "lr": state.opt_state[1].hyperparams["learning_rate"],
             }
+            if config.model.moe:
+                wandb_log["loss/load_loss"] = metrics_step["loss_load"]
+                for h in range(config.model.n_experts):
+                    wandb_log[f"load/head_{h}"] = metrics_step[f"load/head_{h}"]
 
         if current_step > 0 and current_step % config.checkpoint_steps == 0:
             end = time.time()
             total_time = end - start
             tokens_per_second = (config.data.batch_size * config.grad_step) / total_time
-            val_loss = 0.0
+            metrics_val = metrics_val.reset()
             for i in range(config.checkpoint_steps):
                 metrics = eval_step_jit(key(), state.params, *val_dataset())
-                val_loss += metrics["loss"]
-            val_loss /= config.checkpoint_steps
+                metrics_val = metrics_val + metrics
+            metrics_val = metrics_val / config.checkpoint_steps
             if use_wandb:
-                wandb_log["val_loss"] = val_loss
+                wandb_log["val_loss"] = metrics_val["loss"]
             print(
-                f"step: {current_step} | val_loss: {val_loss:.4f} | train_loss: {train_loss / config.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s"
+                f"step: {current_step} | val_loss: {metrics_val["loss"]:.4f} | train_loss: {train_loss / config.checkpoint_steps:.4f} | tokens/s: {tokens_per_second:.2f} | time: {end - start:.2f}s"
             )
 
             save_checkpoint(current_step)

@@ -244,6 +244,7 @@ class MoE(nn.Module):
             )
             for i in range(self.n_experts)
         ]
+        
         self.gate = NoisyKGate(
             model_dimension=self.model_dimension,
             n_experts=self.n_experts,
