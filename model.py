@@ -244,7 +244,7 @@ class MoE(nn.Module):
             )
             for i in range(self.n_experts)
         ]
-        
+
         self.gate = NoisyKGate(
             model_dimension=self.model_dimension,
             n_experts=self.n_experts,
@@ -551,7 +551,6 @@ class Decoder(nn.Module):
         outputs = list(map(lambda x: enc.decode(x), tokens))
 
         return outputs
-
 
 if __name__ == "__main__":
     model = Decoder(
