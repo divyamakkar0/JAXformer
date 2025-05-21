@@ -111,7 +111,15 @@ def main(config: config):
     total_steps = config.training_steps
 
     #init_dp 
-    def init_device(model, config, params):
+    def init_device(params, local_model, config):
+        #cosine scheduler
+        lr_scheduler = optax.warmup_cosine_decay_schedule(
+            init_value=config.lr.min_lr,
+            peak_value=config.lr.max_lr,
+            warmup_steps=config.lr.warmup_steps,
+            decay_steps=config.lr.end_steps,
+            end_value=config.lr.end_lr,
+        )
         tx = optax.chain(
             optax.clip_by_global_norm(config.grad_clip_norm),
             optax.inject_hyperparams(optax.adam)(learning_rate=lr_scheduler),
@@ -125,23 +133,16 @@ def main(config: config):
     
     sharded_init = jax.jit(
         shard_map(
-            functools.partial(init_device, model=model, config=model.config),
+            functools.partial(init_device, local_model=model, config=config),
             mesh,
-            in_specs=(P(None)),
-            out_specs=(P(None)),
+            in_specs=(P()),
+            out_specs=(P()),
         )
     )
     state_initialized = sharded_init()
 
 
-    #cosine scheduler
-    lr_scheduler = optax.warmup_cosine_decay_schedule(
-        init_value=config.lr.min_lr,
-        peak_value=config.lr.max_lr,
-        warmup_steps=config.lr.warmup_steps,
-        decay_steps=config.lr.end_steps,
-        end_value=config.lr.end_lr,
-    )
+    
 
     #optax adam optimizer
    
