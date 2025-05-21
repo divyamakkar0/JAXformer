@@ -17,6 +17,7 @@ from flax.training import train_state
 import time
 import ast
 import optax
+import functools
 
 from config import parse_args, config
 from model import Decoder
@@ -26,11 +27,12 @@ from typing import Tuple, Any
 import orbax.checkpoint as ocp
 import wandb
 from dataclasses import asdict
-import functools
 from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from ml_collections import ConfigDict
+import numpy as np
+
 
 #key gen
 class KeyState:
@@ -83,45 +85,54 @@ def main(config: config):
     main function
     """
 
-
-    key = KeyState(config.seed) #fix this line
-
+    #dataset setup
+    key = KeyState(config.seed)
     print("setting up dataset")
     train_dataset, val_dataset, = Dataset.getDataset(cfg.data, key())
     print(len(train_dataset), len(val_dataset))
 
+
+    #model and dp setup
     print("setting up model")
+    # def get_model_or_params(model_config, init_key, model=True):
+    #     model, params = Decoder.get_model(model_config=config.model, init_key=key())
+    #     if model:
+    #         return model
+    #     else:
+    #         return params
+    model, global_params = Decoder.get_model(model_config=config.model, init_key=key())
+    # model = get_model_or_params(model_config=config.model, init_key=key(), model=True)
+    # global_params = get_model_or_params(model_config=config.model, init_key=key(), model=False)
+    device_array = np.array(jax.devices())
+    mesh = Mesh(device_array, ("x",))
 
-    device_array = jnp.array(jax.devices())
-    mesh = Mesh(device_array, (config.data_axis_name,))
+    param_count = sum(x.size for x in jax.tree.leaves(global_params))
+    print(f"Model parameter count: {param_count:,d} ")
+    total_steps = config.training_steps
 
-    # (model_config=config.model, init_key=key()) 
-    model, params = Decoder.get_model(model_config=model_config, init_key=init_key)
-
-    def initializer(init_key):
+    #init_dp 
+    def init_device(model, config, params):
+        tx = optax.chain(
+            optax.clip_by_global_norm(config.grad_clip_norm),
+            optax.inject_hyperparams(optax.adam)(learning_rate=lr_scheduler),
+        )
         state = train_state.TrainState.create(
             apply_fn=model.apply,
             params=params,
             tx=tx,
-            rn=init_key,
         )
         return state
-
-    initializer_dp = jax.jit(
+    
+    sharded_init = jax.jit(
         shard_map(
-            initializer,
+            functools.partial(init_device, model=model, config=model.config),
             mesh,
-            in_specs=P(),
-            out_specs=P(),
-            check_rep=False,
+            in_specs=(P(None)),
+            out_specs=(P(None)),
         )
     )
+    state_initialized = sharded_init()
 
-    state_dp = initializer_dp(key())
-
-    param_count = sum(x.size for x in jax.tree.leaves(params))
-    print(f"Model parameter count: {param_count:,d} ")
-    total_steps = config.training_steps
 
     #cosine scheduler
     lr_scheduler = optax.warmup_cosine_decay_schedule(
@@ -133,28 +144,17 @@ def main(config: config):
     )
 
     #optax adam optimizer
-    tx = optax.chain(
-        optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.inject_hyperparams(optax.adam)(learning_rate=lr_scheduler),
-    )
+   
 
-    
+    state = train_state.TrainState.create(
+        apply_fn=model.apply,
+        params=global_params,
+        tx=tx,
+    )
 
     print("starting training")
+
     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
-    loss_dp = jax.jit(
-        shard_map(
-            functools.partial(loss_fn, model=model),
-            mesh,
-            in_specs=P(),
-            out_specs=P(),
-            check_rep=False
-        )
-    )
-    
-
-
-
     train_step_jit = jax.jit(
         lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
         )
