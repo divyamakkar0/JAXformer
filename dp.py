@@ -141,63 +141,58 @@ def main(config: config):
         }
         return grads, metrics
 
-    # def accumulate_grads():
-    #     print("starting training")
-    #     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
-    #     train_step_jit = jax.jit(
-    #     lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
-    #     )
-    #     eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
-    #     checkpoint_dir = os.path.join(os.path.abspath(config.output_dir), config.name, "checkpoints")
-    #     load = os.path.exists(checkpoint_dir) 
-    #     checkpointer = ocp.PyTreeCheckpointer()
-    #     options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
-    #     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
+    def accumulate_grads():
+        print("starting training")
+        loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
+        train_step_jit = jax.jit(
+        lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
+        )
+        eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
 
-    #     def save_checkpoint(step):
-    #         save_tree = {
-    #                 'state': flax.serialization.to_state_dict(state),
-    #                 'key': key.key,
-    #                 'train_idx': train_dataset.idx,
-    #                 'val_idx': val_dataset.idx,
-    #                 'step': step,
-    #             }
-    #         checkpoint_manager.save(step, save_tree)
+        start = time.time()
+        train_loss = 0.0
+
+        for current_step in range(init_step, total_steps):
+            grads = None
+            acc_metrics = None
+            for i in range(config.grad_step):
+                grads_step, metrics = train_step_jit(key(), state.params, *train_dataset())
+                grads = grads_step if grads is None else jax.tree.map(
+                    lambda x, y: x + y, grads, grads_step
+                )
+                acc_metrics = metrics if acc_metrics is None else jax.tree.map(jnp.add, acc_metrics, metrics)
+                
+
+            grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         
-    #     init_step = 0
-
-    #     if load:
-    #         print("loading checkpoint")
-    #         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
-    #         key.key = tree_state['key']
-    #         state = flax.serialization.from_state_dict(state, tree_state['state'])
-    #         train_dataset.idx = tree_state['train_idx']
-    #         val_dataset.idx = tree_state['val_idx']
-    #         init_step = tree_state['step']
-    #     else:
-    #         print("No checkpoint found, starting from scratch")
-    #         save_checkpoint(0)
-    #     use_wandb = config.wandb is True
-    #     if use_wandb:
-    #         wandb.init(
-    #             entity="waterloo2",
-    #             project="jaxformer",
-    #             name=config.name,
-    #             id=config.name,
-    #             resume="allow",
-    #             config=asdict(config),
-    #         )
-
-    #     start = time.time()
-    #     train_loss = 0.0
+        return grads, acc_metrics
+                
 
     #train_step 
     def train_step_device(state, metrics, x, y):
         key, step_key = jax.random.split(state.rng)
-        grads, metrics = accumulate
+        grads, step_metrics = accumulate_grads()
+        with jax.named_scope("sync grads"):
+            grads = jax.tree.map(lambda g: jax.lax.pmean(g, axis_name="x"), grads)
+        new_state = state.apply_gradients(grads=grads, rng=key)
+        with jax.named_scope("sync metrics"):
+            step_metrics = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="x"), step_metrics)
         
+        metrics = step_metrics if metrics is None else jax.tree.map(jnp.add, metrics, step_metrics)
 
+        return new_state, metrics
 
+    train_step_dp_fn = jax.jit(
+        shard_map(
+            train_step_device,
+            mesh,
+            in_specs=(P(), P(), P("x",), P("x",)),
+            out_specs=(P(), P()),
+        ),
+        donate_argnames=("state", "metrics"),
+    )
+
+#### old code###
 
     print("starting training")
     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
