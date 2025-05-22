@@ -165,7 +165,6 @@ class MLA(nn.Module):
         if train:
             mask = jnp.tril(mask)
 
-
         output = scaledDotProd(q, k, v, mask)
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
@@ -359,6 +358,7 @@ class FeedForward(nn.Module):
 
         return x_ff
 
+
 class Block(nn.Module):
     model_dimension: int
     n_heads: int
@@ -530,12 +530,15 @@ class Decoder(nn.Module):
             logits /= temperature
 
             key, sample_key = jax.random.split(key)
-            out_next_idx = jax.random.categorical(sample_key, logits, axis=-1, shape=(B,))
+            out_next_idx = jax.random.categorical(
+                sample_key, logits, axis=-1, shape=(B,)
+            )
             out_next = idx[jnp.arange(B, dtype=jnp.int32), out_next_idx][:, None]
 
             return out_next, cache
 
         import time
+
         start = time.time()
         for _ in range(max_tokens):
             inp = out[:, -self.T :]
@@ -546,12 +549,10 @@ class Decoder(nn.Module):
         end = time.time()
         print("Time taken for generation:", end - start)
 
-
         tokens = jax.device_get(out[:, 1:])
         outputs = list(map(lambda x: enc.decode(x), tokens))
 
         return outputs
-
 
     @classmethod
     def get_model(cls, model_config, init_key: jax.random.key):
@@ -590,7 +591,7 @@ class Decoder(nn.Module):
             B=1,
             k=model_config.vocab_size,
             temperature=1,
-            max_tokens=10
+            max_tokens=10,
         )
 
         return model, params

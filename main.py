@@ -140,6 +140,7 @@ def eval_step(loss_fn, params, key, *args, **kwargs):
     }
     return metrics
 
+
 def main(config: config):
     key = KeyState(config.seed)
 
@@ -147,13 +148,12 @@ def main(config: config):
     (
         train_dataset,
         val_dataset,
-    ) = Dataset.getDataset(cfg.data, key())
-    print(len(train_dataset), len(val_dataset))
+    ) = Dataset.getDataset(cfg.data)
 
+    print(f'train steps: {len(train_dataset)} | val steps: {len(val_dataset)}')
     print("setting up model")
-    model, params = Decoder.get_model(
-        model_config=config.model, init_key=key()
-    )
+
+    model, params = Decoder.get_model(model_config=config.model, init_key=key())
 
     param_count = sum(x.size for x in jax.tree.leaves(params))
     print(f"Model parameter count: {param_count:,d} ")
@@ -169,7 +169,7 @@ def main(config: config):
 
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.inject_hyperparams(optax.adamw)(lr_scheduler)
+        optax.inject_hyperparams(optax.adamw)(lr_scheduler),
     )
 
     state = train_state.TrainState.create(
@@ -198,8 +198,10 @@ def main(config: config):
         save_tree = {
             "state": flax.serialization.to_state_dict(state),
             "key": key.key,
-            "train_idx": train_dataset.idx,
-            "val_idx": val_dataset.idx,
+            "train_step_idx": train_dataset.step_idx,
+            "train_shard_idx": (train_dataset.shard_idx - 1) % len(train_dataset.data_path),
+            "val_step_idx": val_dataset.step_idx,
+            "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data_path),
             "step": step,
             "wandb_id": wandb_id,
         }
@@ -210,12 +212,19 @@ def main(config: config):
     use_wandb = config.wandb is True
     wandb_id = None
     if load:
-
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
+
         key.key = tree_state["key"]
         state = flax.serialization.from_state_dict(state, tree_state["state"])
-        train_dataset.idx = tree_state["train_idx"]
-        val_dataset.idx = tree_state["val_idx"]
+
+        train_dataset.step_idx = tree_state["train_step_idx"]
+        train_dataset.shard_idx = tree_state["train_shard_idx"]
+        train_dataset.load_next_shard()
+
+        val_dataset.step_idx = tree_state["val_step_idx"]
+        val_dataset.shard_idx = tree_state["val_shard_idx"]
+        val_dataset.load_next_shard()
+
         init_step = tree_state["step"]
         wandb_id = tree_state["wandb_id"]
         if use_wandb:
@@ -285,7 +294,10 @@ def main(config: config):
             end = time.time()
             total_time = end - start
             tokens_per_second = (
-                config.data.batch_size * config.grad_step * config.model.T * config.checkpoint_steps
+                config.data.batch_size
+                * config.grad_step
+                * config.model.T
+                * config.checkpoint_steps
             ) / total_time
             train_loss = (
                 (train_loss / config.checkpoint_steps)
@@ -328,7 +340,6 @@ def main(config: config):
                 "a",
             ) as f:
                 f.write(f"{current_step} | {tokens}\n")
-
 
             save_checkpoint(current_step, wandb_id)
             start = time.time()

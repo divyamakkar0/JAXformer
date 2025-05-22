@@ -26,12 +26,14 @@ class modelConfig:
     model_dtype: str = "bfloat16"
     grad_checkpoint: bool = False
 
+
 @dataclass
 class dataConfig:
     train_dataset_path: str = "./trainSetShards"
     val_dataset_path: str = "./valSetShards"
     T: int = 6
     batch_size: int = 3
+
 
 @dataclass
 class LRConfig:
@@ -42,6 +44,7 @@ class LRConfig:
     end_lr: float = 4e-4
     warmup_steps: int = 1000
     end_steps: int = 6000
+
 
 @dataclass
 class config:
@@ -58,14 +61,16 @@ class config:
     checkpoint_steps: int = 10
     checkpoint_manager: str = "./checkpoints/manager/"
     inference_batch: int = 1
+    eval_steps: int = 25
     seed: int = 0
     wandb: bool = True
     grad_clip_norm: float = 1.0
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
     parser.add_argument("--model_dimension", type=int, default=768)
-    parser.add_argument("--n_heads", type=int, default=6)
+    parser.add_argument("--n_heads", type=int, default=12)
     parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--vocab_size", type=int, default=50257)
     parser.add_argument("--blocks", type=int, default=12)
@@ -101,6 +106,7 @@ def parse_args():
 
     parser.add_argument("--training_steps", type=int, default=10000)
     parser.add_argument("--grad_step", type=int, default=1)
+    parser.add_argument("--eval_steps", type=int, default=25)
     parser.add_argument("--inference_batch", type=int, default=1)
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
@@ -152,6 +158,7 @@ def parse_args():
         training_steps=args.training_steps,
         grad_step=args.grad_step,
         inference_batch=args.inference_batch,
+        eval_steps=args.eval_steps,
         alpha=args.alpha,
         wandb=args.wandb,
         grad_clip_norm=args.grad_clip_norm,

@@ -12,29 +12,28 @@ class Dataset:
         data_path: str | List[str],
         T: int,
         batch_size: int,
-        key: jax.random.key = jax.random.key(0),
     ):
-
         self.T = T
         self.batch_size = batch_size
-        self.key = key
         assert len(data_path) > 0, "data should not be empty"
         if isinstance(data_path, str):
             data_path = [data_path]
         self.data_path = data_path
 
-        self.load_shared(self.data_path[0], display=True)
+        self.shard_idx = 0
+        self.step_idx = 0
 
-        self.steps = len(self)
-        self.idx = 0
+        self.load_next_shard(display=True)
 
-    def load_shared(self, shard: str, display: bool = False):
-
-        data = jnp.load(shard)
+    def load_next_shard(self, display: bool = False):
+        data = jnp.load(self.data_path[self.shard_idx])
         self.dataset = data[: -self.T]
         self.labels = data[1 : -self.T + 1]
         if display:
-            print(f"Loaded shard {shard} with {self.dataset.shape[0]} tokens")
+            print(
+                f"Loaded shard {self.data_path[self.shard_idx]} with {self.dataset.shape[0]} tokens"
+            )
+        self.shard_idx = (self.shard_idx + 1) % len(self.data_path)
 
     def __len__(self):
         return int(
@@ -42,31 +41,38 @@ class Dataset:
         )
 
     def __call__(self):
-        self.key, sample_key = jax.random.split(self.key)
-        idx = jax.random.permutation(sample_key, self.dataset.shape[0] - self.T)[
-            : self.batch_size
-        ]
 
-        stack_data = lambda dataset:  jax.vmap(
-            lambda i: jax.lax.dynamic_slice(dataset, (i,), (self.T,)), in_axes=(0)
-        )(idx)
+        if self.step_idx + self.batch_size * self.T <= self.dataset.shape[0]:
+            x = self.dataset[
+                self.step_idx : self.step_idx + self.batch_size * self.T
+            ].reshape(self.batch_size, self.T)
 
-        x = stack_data(self.dataset)
-        y = stack_data(self.labels)
+            y = self.labels[
+                self.step_idx : self.step_idx + self.batch_size * self.T
+            ].reshape(self.batch_size, self.T)
+            self.step_idx += self.batch_size * self.T
 
-        self.idx += 1
+        else:
+            x_current_shard = self.dataset[self.step_idx :]
+            y_current_shard = self.labels[self.step_idx :]
 
-        if self.idx >= self.steps:
+            self.step_idx = 0
+            self.load_next_shard(display=True)
 
-            self.idx = 0
-            dp = self.data_path.pop(0)
-            self.load_shared(dp, display=True)
-            self.data_path.append(dp)
+            self.step_idx = self.batch_size * self.T - x_current_shard.shape[0]
+            x_next_shard = self.dataset[: self.step_idx]
+            y_next_shard = self.labels[: self.step_idx]
+            x = jnp.concatenate([x_current_shard, x_next_shard], axis=0).reshape(
+                self.batch_size, self.T
+            )
+            y = jnp.concatenate([y_current_shard, y_next_shard], axis=0).reshape(
+                self.batch_size, self.T
+            )
 
         return x, y
 
     @classmethod
-    def getDataset(cls, cfg: dataConfig, key: jax.random.key):
+    def getDataset(cls, cfg: dataConfig) -> Tuple["Dataset", "Dataset"]:
         train_dataset_path = os.path.abspath(cfg.train_dataset_path)
         if os.path.isdir(train_dataset_path):
             train_dataset_path = [
@@ -83,8 +89,8 @@ class Dataset:
                 if f.endswith(".npy")
             ]
 
-        train_dataset = cls(train_dataset_path, cfg.T, cfg.batch_size, key=key)
-        val_dataset = cls(val_dataset_path, cfg.T, cfg.batch_size, key=key)
+        train_dataset = cls(train_dataset_path, cfg.T, cfg.batch_size)
+        val_dataset = cls(val_dataset_path, cfg.T, cfg.batch_size)
 
         return train_dataset, val_dataset
 
@@ -94,7 +100,7 @@ if __name__ == "__main__":
         train_dataset_path="./trainSetShards",
         val_dataset_path="./valSetShards",
         T=1024,
-        batch_size=64,
+        batch_size=16,
     )
 
     import time
