@@ -83,7 +83,7 @@ def main(config: config):
 
     #init_dp 
     class TrainStateWithRNG(train_state.TrainState):
-        ng: Any
+        rng: Any
 
     def init_device(params, key, local_model, config):
         #cosine scheduler
@@ -106,14 +106,13 @@ def main(config: config):
         )
         return state
     
-    sharded_init = jax.jit(
-        shard_map(
+    sharded_init = shard_map(
             functools.partial(init_device, key=key(), local_model=model, config=config),
             mesh,
             in_specs=(P()),
             out_specs=(P()),
         )
-    )
+    
     state_initialized = sharded_init(global_params)
 
     #loss dp
@@ -141,56 +140,45 @@ def main(config: config):
         }
         return grads, metrics
 
-    def accumulate_grads():
+    def accumulate_grads(key, x, y, state):
         print("starting training")
         loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
-        train_step_jit = jax.jit(
-        lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
-        )
-        eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
-
+        train_step_jit = lambda key, params, x, y : train_step(loss_fn, params, key, x, y)
+   
         start = time.time()
         train_loss = 0.0
 
-        for current_step in range(init_step, total_steps):
-            grads = None
-            acc_metrics = None
-            for i in range(config.grad_step):
-                grads_step, metrics = train_step_jit(key(), state.params, *train_dataset())
-                grads = grads_step if grads is None else jax.tree.map(
-                    lambda x, y: x + y, grads, grads_step
-                )
-                acc_metrics = metrics if acc_metrics is None else jax.tree.map(jnp.add, acc_metrics, metrics)
-                
+        grads = None
+        acc_metrics = None
+        for i in range(config.grad_step):
+            grads_step, metrics = train_step_jit(key, state.params, x, y)
+            grads = grads_step if grads is None else jax.tree.map(
+                lambda x, y: x + y, grads, grads_step
+            )
+            acc_metrics = metrics if acc_metrics is None else jax.tree.map(jnp.add, acc_metrics, metrics)
 
-            grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
+        grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         
         return grads, acc_metrics
                 
 
     #train_step 
-    def train_step_device(state, metrics, x, y):
-        key, step_key = jax.random.split(state.rng)
-        grads, step_metrics = accumulate_grads()
-        with jax.named_scope("sync grads"):
-            grads = jax.tree.map(lambda g: jax.lax.pmean(g, axis_name="x"), grads)
-        new_state = state.apply_gradients(grads=grads, rng=key)
-        with jax.named_scope("sync metrics"):
-            step_metrics = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="x"), step_metrics)
-        
-        metrics = step_metrics if metrics is None else jax.tree.map(jnp.add, metrics, step_metrics)
+    def train_step_device(state, x, y):
+        state.rng, step_key = jax.random.split(state.rng)
+        grads, step_metrics = accumulate_grads(step_key, x, y)
+        grads = jax.tree.map(lambda g: jax.lax.pmean(g, axis_name="x"), grads)
+        new_state = state.apply_gradients(grads=grads)
+        step_metrics = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="x"), step_metrics)
 
-        return new_state, metrics
+        return new_state, step_metrics
 
-    train_step_dp_fn = jax.jit(
-        shard_map(
+    train_step_dp_fn =  shard_map(
             train_step_device,
             mesh,
             in_specs=(P(), P(), P("x",), P("x",)),
             out_specs=(P(), P()),
-        ),
-        donate_argnames=("state", "metrics"),
-    )
+        )
+    
 
 #### old code###
 
