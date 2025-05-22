@@ -139,22 +139,10 @@ def main(config: config):
             out_specs=(P()),
         )
     )
-    state_initialized = sharded_init()
+    state_initialized = sharded_init(global_params)
 
-
-    
-
-    #optax adam optimizer
-   
-
-    state = train_state.TrainState.create(
-        apply_fn=model.apply,
-        params=global_params,
-        tx=tx,
-    )
 
     print("starting training")
-
     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
     train_step_jit = jax.jit(
         lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
