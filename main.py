@@ -31,9 +31,6 @@ import wandb
 from dataclasses import asdict
 
 
-from testModel import GPTLanguageModel
-
-
 class KeyState:
     def __init__(self, base_key: jax.random.key):
         self.key = jax.random.key(base_key)
@@ -253,19 +250,6 @@ def main(config: config):
     start = time.time()
     train_loss = 0.0
     sample_key = key()
-
-    tokens = model.generate(
-            state.params,
-                sample_key,
-                "",
-                B=config.inference_batch,
-                k=10000,
-                max_tokens=30,
-                temperature=1,
-    )
-    print("tokens: ", tokens)
-
-    import sys; sys.exit(0)
 
     for current_step in range(init_step, total_steps):
         grads = None

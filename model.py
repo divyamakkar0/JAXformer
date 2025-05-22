@@ -537,10 +537,10 @@ class Decoder(nn.Module):
 
         import time
         start = time.time()
-        for i in range(max_tokens):
+        for _ in range(max_tokens):
             inp = out[:, -self.T :]
             key, sample_key = jax.random.split(key)
-            out_next, cache = sample(key, params, inp, cache, B, k, temperature)
+            out_next, cache = sample(sample_key, params, inp, cache, B, k, temperature)
             out = jnp.concatenate([out, out_next], axis=-1)
 
         end = time.time()
@@ -582,6 +582,16 @@ class Decoder(nn.Module):
             x,
             train=False,
         )["params"]
+
+        _ = model.generate(
+            params,
+            init_key,
+            x="",
+            B=1,
+            k=model_config.vocab_size,
+            temperature=1,
+            max_tokens=10
+        )
 
         return model, params
 
