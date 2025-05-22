@@ -335,7 +335,10 @@ def main(config: config):
             train_loss = 0.0
 
         if use_wandb:
-            wandb.log(wandb_log)
+            wandb.log(
+                data=wandb_log,
+                step=current_step,
+            )
 
     if use_wandb:
         table = wandb.Table(
