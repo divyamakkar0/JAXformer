@@ -5,9 +5,27 @@ import os
 import time
 import asyncio
 
-enc = tiktoken.get_encoding("cl100k_base")
+enc = tiktoken.get_encoding("gpt2")
 print(enc.n_vocab)
 eot = enc._special_tokens["<|endoftext|>"]
+
+
+def tokenize(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+     text = f.read()
+    tokens = [eot]
+    tokens.extend(enc.encode(text))
+    tokens_np = np.array(tokens, dtype=np.uint32)
+    split_idx = int(len(tokens_np) * 0.9)
+    train_tokens = tokens_np[:split_idx]
+    val_tokens = tokens_np[split_idx:]
+    np.save("./train_tokens", train_tokens)
+    np.save("./val_tokens", val_tokens)
+
+
+if __name__ == "__main__":
+    tokenize("./dataset.txt")
+
 
 # async version
 

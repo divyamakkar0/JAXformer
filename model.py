@@ -10,6 +10,7 @@ import tiktoken
 
 from jax.numpy import dtype
 from config import parse_args
+from functools import partial
 
 
 class Embeddings(nn.Module):
@@ -69,6 +70,7 @@ class MLA(nn.Module):
     dhR: int
     model_dtype: jnp.dtype
     grad_checkpoint: bool
+    dropout: float = 0.0
 
     def setup(self):
         self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
@@ -83,9 +85,9 @@ class MLA(nn.Module):
             )
         else:
             self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+        self.out_dropout = nn.Dropout(rate=self.dropout)
 
         self.rope = None
-
         if self.dhR != 0:
             self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
             self.Wqr = nn.Dense(
@@ -147,10 +149,8 @@ class MLA(nn.Module):
             q = jnp.concatenate([q, qRt], axis=-1)
 
         def scaledDotProd(q, k, v, mask):
-            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
-                1 / ((self.dk) ** 0.5)
-            )
-
+            dk = q.shape[-1]
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / ((dk) ** 0.5))
             w = jnp.where(mask == 0, -9e15, w)
             w = nn.softmax(w, axis=-1)
 
@@ -165,23 +165,27 @@ class MLA(nn.Module):
         if train:
             mask = jnp.tril(mask)
 
+
         output = scaledDotProd(q, k, v, mask)
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
         output = self.output(output)
-
+        output = self.out_dropout(output, deterministic=not train)
         return output, (cKV_cache, kRT_cache)
 
 
 class LayerNorm(nn.Module):
     model_dimension: int
     model_dtype: jnp.dtype
-    gamma_init: Callable = nn.initializers.lecun_normal()
-    beta_init: Callable = nn.initializers.lecun_normal()
 
     def setup(self):
-        self.gamma = self.param("gamma", self.gamma_init, (1, 1, self.model_dimension))
-        self.beta = self.param("beta", self.beta_init, (1, 1, self.model_dimension))
+        init = nn.initializers.constant
+        self.gamma = self.param(
+            "gamma", init(1), (1, 1, self.model_dimension), jnp.float32
+        )
+        self.beta = self.param(
+            "beta", init(0), (1, 1, self.model_dimension), jnp.float32
+        )
         self.eps = 1e-05
 
     def __call__(self, x):
@@ -326,7 +330,7 @@ class FFBody(nn.Module):
     @nn.compact
     def __call__(self, x):
         x = nn.Dense(features=self.ff_dim, dtype=self.model_dtype)(x)
-        x = nn.relu(x)
+        x = nn.gelu(x)
         x = nn.Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
 
         return x
@@ -351,10 +355,9 @@ class FeedForward(nn.Module):
             dropout=self.dropout,
             model_dtype=self.model_dtype,
         )
-        x_ff = nn.Dropout(rate=self.dropout, deterministic=not train)(ff(x))
+        x_ff = nn.Dropout(rate=self.dropout)(ff(x), deterministic=not train)
 
         return x_ff
-
 
 class Block(nn.Module):
     model_dimension: int
@@ -384,9 +387,9 @@ class Block(nn.Module):
             latent_dim=self.latent_dim,
             dhR=self.dhR,
             model_dtype=self.model_dtype,
+            dropout=self.dropout,
             grad_checkpoint=self.grad_checkpoint,
-        )(x_norm, *cache, attention_mask=None, train=train)
-
+        )(x_norm, *cache, train=train)
         x = x + x_up
 
         x_norm = LayerNorm(
@@ -439,12 +442,19 @@ class Decoder(nn.Module):
 
     @nn.compact
     def __call__(self, x, cache=None, train=True):
+        B, T = x.shape
         embed = Embeddings(
             model_dimension=self.model_dimension,
             vocab_size=self.vocab_size,
             model_dtype=self.model_dtype,
         )
         x = embed(x)
+
+        pos_emb = nn.Embed(
+            num_embeddings=self.T,
+            features=self.model_dimension,
+            dtype=self.model_dtype,
+        )(jnp.arange(T, dtype=jnp.int32))
 
         out_cache = []
         load = None
@@ -461,7 +471,7 @@ class Decoder(nn.Module):
                 T=self.T,
                 latent_dim=self.latent_dim,
                 dhR=0
-                if (self.rope_ratio == 0 or i % self.rope_ratio == 0)
+                if (self.rope_ratio == 0 or (i % self.rope_ratio == 0 and i > 0))
                 else self.dhR,
                 moe=self.moe,
                 n_experts=self.n_experts,
@@ -480,6 +490,10 @@ class Decoder(nn.Module):
 
             out_cache.append(current_cache)
 
+        x = LayerNorm(
+            model_dimension=self.model_dimension,
+            model_dtype=self.model_dtype,
+        )(x)
         x = x @ embed.embedding.embedding.T
         x = jnp.asarray(x, dtype=jnp.float32)
 
@@ -487,6 +501,57 @@ class Decoder(nn.Module):
             load = (load[0] * load[1]).mean(axis=0)
 
         return x, (out_cache, load)
+
+    def get_empty_cache(self):
+        cache = []
+        for i in range(self.blocks):
+            if self.rope_ratio == 0 or (i % self.rope_ratio == 0 and i > 0):
+                cache.append((jnp.array([]), None))
+            else:
+                cache.append((jnp.array([]), jnp.array([])))
+        return cache
+
+    def generate(
+        self, params, key, x: str = "", *, B=1, k=10000, temperature=1, max_tokens=100
+    ):
+        enc = tiktoken.get_encoding("gpt2")
+        cache = None
+
+        out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
+        if x != "":
+            x_encode = jnp.array(enc.encode(x), dtype=jnp.int32)
+            out = jnp.concatenate([out, x_encode], axis=-1)
+
+        out = jnp.repeat(out[None, :], B, axis=0)
+
+        def sample(key, params, inp, cache, B, k, temperature):
+            logits, (cache, _) = self.apply({"params": params}, inp, cache, train=False)
+            logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
+            logits /= temperature
+
+            key, sample_key = jax.random.split(key)
+            out_next_idx = jax.random.categorical(sample_key, logits, axis=-1, shape=(B,))
+            out_next = idx[jnp.arange(B, dtype=jnp.int32), out_next_idx][:, None]
+
+            return out_next, cache
+
+        import time
+        start = time.time()
+        for i in range(max_tokens):
+            inp = out[:, -self.T :]
+            key, sample_key = jax.random.split(key)
+            out_next, cache = sample(key, params, inp, cache, B, k, temperature)
+            out = jnp.concatenate([out, out_next], axis=-1)
+
+        end = time.time()
+        print("Time taken for generation:", end - start)
+
+
+        tokens = jax.device_get(out[:, 1:])
+        outputs = list(map(lambda x: enc.decode(x), tokens))
+
+        return outputs
+
 
     @classmethod
     def get_model(cls, model_config, init_key: jax.random.key):
@@ -520,37 +585,6 @@ class Decoder(nn.Module):
 
         return model, params
 
-    def generate(
-        self, params, key, x: str = "", B=1, k=10000, temperature=1, max_tokens=100
-    ):
-        enc = tiktoken.get_encoding("cl100k_base")
-        cache = None
-
-        start_of_text = jnp.array(
-            [enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32
-        )
-        x_encoded = jnp.array(enc.encode(x), dtype=jnp.int32)
-        x = jnp.concatenate([start_of_text, x_encoded], axis=-1)
-        x = jnp.repeat(x[None, :], B, axis=0)
-
-        out = x
-
-        for i in range(max_tokens):
-            x = out[:, -self.T :]
-            logits, (cache, _) = self.apply({"params": params}, x, cache, train=False)
-
-            logits = logits[:, -1, :] / temperature
-            k_scores, _ = jax.lax.top_k(logits, k)
-            probs = nn.softmax(k_scores, axis=-1)
-
-            key, sample_key = jax.random.split(key)
-            out_next = jax.random.categorical(sample_key, probs, axis=-1)[:, None]
-            out = jnp.concatenate([out, out_next], axis=-1)
-
-        tokens = jax.device_get(out[:, 1:])
-        outputs = list(map(lambda x: enc.decode(x), tokens))
-
-        return outputs
 
 if __name__ == "__main__":
     model = Decoder(

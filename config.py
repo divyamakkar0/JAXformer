@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 import jax.numpy as jnp
 from jax.numpy import dtype
+import json
 
 
 @dataclass
@@ -25,15 +26,12 @@ class modelConfig:
     model_dtype: str = "bfloat16"
     grad_checkpoint: bool = False
 
-
 @dataclass
 class dataConfig:
-    dataset_path: str = "./tokens.npy"
-    val_spilt: float = 0.1
+    train_dataset_path: str = "./train_tokens.npy"
+    val_dataset_path: str = "./val_tokens.npy"
     T: int = 6
     batch_size: int = 3
-    shuffle: bool = True
-
 
 @dataclass
 class LRConfig:
@@ -44,7 +42,6 @@ class LRConfig:
     end_lr: float = 4e-4
     warmup_steps: int = 1000
     end_steps: int = 6000
-
 
 @dataclass
 class config:
@@ -65,48 +62,25 @@ class config:
     wandb: bool = True
     grad_clip_norm: float = 1.0
 
-    def __repr__(self):
-        return f"""Configuration:
-      Model:
-        {self.model}
-      Data:
-        {self.data}
-      Learning Rate:
-        {self.lr}
-      Training:
-        training_steps: {self.training_steps}
-        grad_step: {self.grad_step}
-        alpha: {self.alpha}
-        seed: {self.seed}
-        wandb: {self.wandb}
-        grad_clip_norm: {self.grad_clip_norm}
-      Checkpointing:
-        checkpoint_steps: {self.checkpoint_steps}
-        checkpoint_manager: {self.checkpoint_manager}
-      Output:
-        output_dir: {self.output_dir}
-    """
-
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
-    parser.add_argument("--model_dimension", type=int, default=16)
-    parser.add_argument("--n_heads", type=int, default=2)
-    parser.add_argument("--T", type=int, default=16)
-    parser.add_argument("--dhR", type=int, default=64)
-    parser.add_argument("--rope_ratio", type=int, default=10)
-    parser.add_argument("--vocab_size", type=int, default=100277)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--model_dimension", type=int, default=384)
+    parser.add_argument("--n_heads", type=int, default=6)
+    parser.add_argument("--T", type=int, default=256)
+    parser.add_argument("--vocab_size", type=int, default=50257)
     parser.add_argument("--blocks", type=int, default=6)
+    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dhR", type=int, default=128)
+    parser.add_argument("--rope_ratio", type=int, default=4)
     parser.add_argument("--moe", action="store_true")
     parser.add_argument("--n_experts", type=int, default=4)
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument("--dataset", type=str, default="./tokens.npy")
-    parser.add_argument("--idx", type=int, default=0)
-    parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--val_spilt", type=float, default=0.1)
+    parser.add_argument("--train_dataset", type=str, default="./train_tokens.npy")
+    parser.add_argument("--val_dataset", type=str, default="./val_tokens.npy")
+    parser.add_argument("--batch_size", type=int, default=64)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)
     parser.add_argument("--min_lr", type=float, default=0)
@@ -117,7 +91,7 @@ def parse_args():
     parser.add_argument("--alpha", type=float, default=0.0001)
     parser.add_argument("--name", type=str, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="./results/")
-    parser.add_argument("--checkpoint_steps", type=int, default=25)
+    parser.add_argument("--checkpoint_steps", type=int, default=100)
     parser.add_argument(
         "--checkpoint_manager", type=str, default="./checkpoints/manager/"
     )
@@ -125,7 +99,7 @@ def parse_args():
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--grad_checkpoint", action="store_true")
 
-    parser.add_argument("--training_steps", type=int, default=1000)
+    parser.add_argument("--training_steps", type=int, default=10000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--inference_batch", type=int, default=1)
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
@@ -152,10 +126,10 @@ def parse_args():
     )
 
     data_cfg = dataConfig(
-        dataset_path=args.dataset,
+        train_dataset_path=args.train_dataset,
+        val_dataset_path=args.val_dataset,
         T=args.T,
         batch_size=args.batch_size,
-        val_spilt=args.val_spilt,
     )
 
     lr_cfg = LRConfig(
@@ -188,4 +162,4 @@ def parse_args():
 
 if __name__ == "__main__":
     cfg = parse_args()
-    print(cfg)
+    print(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
