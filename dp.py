@@ -33,7 +33,6 @@ from jax.sharding import PartitionSpec as P
 from ml_collections import ConfigDict
 import numpy as np
 
-
 #key gen
 class KeyState:
     def __init__(self, base_key: jax.random.key):
@@ -44,22 +43,6 @@ class KeyState:
         return rng
 
 #MoE Loss
-
-def train_step(loss_fn, params, key, *args, **kwargs):
-    loss = jax.value_and_grad(
-        loss_fn,
-        argnums=0,
-        has_aux=True
-    )
-    val, grads = loss(params, key, *args, **kwargs, train=True)
-    loss, pred, _ = val[0], *val[1] # don't need cache in training
-
-    metrics = {
-        'loss': loss,
-        'pred': pred,
-    }
-
-    return grads, metrics
 
 def eval_step(loss_fn, params, key, *args, **kwargs):
     loss, (pred, cache) = loss_fn(params, key, *args, **kwargs, train=False)
@@ -99,7 +82,10 @@ def main(config: config):
         return jax.random.fold_in(key, axis_index)
 
     #init_dp 
-    def init_device(params, local_model, config):
+    class TrainStateWithRNG(train_state.TrainState):
+        ng: Any
+
+    def init_device(params, key, local_model, config):
         #cosine scheduler
         lr_scheduler = optax.warmup_cosine_decay_schedule(
             init_value=config.lr.min_lr,
@@ -112,16 +98,17 @@ def main(config: config):
             optax.clip_by_global_norm(config.grad_clip_norm),
             optax.inject_hyperparams(optax.adam)(learning_rate=lr_scheduler),
         )
-        state = train_state.TrainState.create(
+        state = TrainStateWithRNG.create(
             apply_fn=model.apply,
             params=params,
             tx=tx,
+            rng=key,
         )
         return state
     
     sharded_init = jax.jit(
         shard_map(
-            functools.partial(init_device, local_model=model, config=config),
+            functools.partial(init_device, key=key(), local_model=model, config=config),
             mesh,
             in_specs=(P()),
             out_specs=(P()),
@@ -139,23 +126,77 @@ def main(config: config):
         loss = -jnp.mean(log_prob[jnp.arange(B * T), y])
         return loss, (pred, cache)
     
-    def loss_distributed(params, x, y, model, key, train=True):
-        loss = cross_entropy_loss(model=model, params=params, key=key, x=x, y=y, train=train)
-        with jax.named_scope("sync_loss"):
-            loss = jax.tree_map(lambda g: jax.lax.pmean(g, axis_name="x"), loss)
-        
-        return loss
-
-    loss_sharded = jax.jit(
-        shard_map(
-            functools.partial(loss_distributed, model=model, key=key()),
-            mesh,
-            in_specs=(P(), P("x",), P("x",)),
-            out_specs=(P()),
+    def train_step(loss_fn, params, key, *args, **kwargs):
+        loss = jax.value_and_grad(
+            loss_fn,
+            argnums=0,
+            has_aux=True
         )
-    )
+        val, grads = loss(params, key, *args, **kwargs, train=True)
+        loss, pred, _ = val[0], *val[1] # don't need cache in training
 
-    loss_acc = loss_sharded(global_params, train_dataset, val_dataset)
+        metrics = {
+            'loss': loss,
+            'pred': pred,
+        }
+        return grads, metrics
+
+    # def accumulate_grads():
+    #     print("starting training")
+    #     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
+    #     train_step_jit = jax.jit(
+    #     lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
+    #     )
+    #     eval_step_jit = jax.jit(lambda key, params, x, y : eval_step( loss_fn, params, key, x, y))
+    #     checkpoint_dir = os.path.join(os.path.abspath(config.output_dir), config.name, "checkpoints")
+    #     load = os.path.exists(checkpoint_dir) 
+    #     checkpointer = ocp.PyTreeCheckpointer()
+    #     options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+    #     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
+
+    #     def save_checkpoint(step):
+    #         save_tree = {
+    #                 'state': flax.serialization.to_state_dict(state),
+    #                 'key': key.key,
+    #                 'train_idx': train_dataset.idx,
+    #                 'val_idx': val_dataset.idx,
+    #                 'step': step,
+    #             }
+    #         checkpoint_manager.save(step, save_tree)
+        
+    #     init_step = 0
+
+    #     if load:
+    #         print("loading checkpoint")
+    #         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
+    #         key.key = tree_state['key']
+    #         state = flax.serialization.from_state_dict(state, tree_state['state'])
+    #         train_dataset.idx = tree_state['train_idx']
+    #         val_dataset.idx = tree_state['val_idx']
+    #         init_step = tree_state['step']
+    #     else:
+    #         print("No checkpoint found, starting from scratch")
+    #         save_checkpoint(0)
+    #     use_wandb = config.wandb is True
+    #     if use_wandb:
+    #         wandb.init(
+    #             entity="waterloo2",
+    #             project="jaxformer",
+    #             name=config.name,
+    #             id=config.name,
+    #             resume="allow",
+    #             config=asdict(config),
+    #         )
+
+    #     start = time.time()
+    #     train_loss = 0.0
+
+    #train_step 
+    def train_step_device(state, metrics, x, y):
+        key, step_key = jax.random.split(state.rng)
+        grads, metrics = accumulate
+        
+
 
 
     print("starting training")
