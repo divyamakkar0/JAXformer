@@ -28,8 +28,8 @@ class modelConfig:
 
 @dataclass
 class dataConfig:
-    train_dataset_path: str = "./train_tokens.npy"
-    val_dataset_path: str = "./val_tokens.npy"
+    train_dataset_path: str = "./trainSetShards"
+    val_dataset_path: str = "./valSetShards"
     T: int = 6
     batch_size: int = 3
 
@@ -64,11 +64,11 @@ class config:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
-    parser.add_argument("--model_dimension", type=int, default=384)
+    parser.add_argument("--model_dimension", type=int, default=768)
     parser.add_argument("--n_heads", type=int, default=6)
-    parser.add_argument("--T", type=int, default=256)
+    parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--vocab_size", type=int, default=50257)
-    parser.add_argument("--blocks", type=int, default=6)
+    parser.add_argument("--blocks", type=int, default=12)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--dhR", type=int, default=128)
     parser.add_argument("--rope_ratio", type=int, default=4)
@@ -78,8 +78,8 @@ def parse_args():
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument("--train_dataset", type=str, default="./train_tokens.npy")
-    parser.add_argument("--val_dataset", type=str, default="./val_tokens.npy")
+    parser.add_argument("--train_dataset", type=str, default="./trainSetShards")
+    parser.add_argument("--val_dataset", type=str, default="./valSetShards")
     parser.add_argument("--batch_size", type=int, default=64)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)

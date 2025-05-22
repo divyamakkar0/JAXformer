@@ -14,13 +14,6 @@ class Dataset:
         batch_size: int,
         key: jax.random.key = jax.random.key(0),
     ):
-        """
-        data_path: where to load the shard from
-        T: the max tokens in a sequence
-        batch_size: the batch size
-        idx: Tuple of the start and end index of the shard
-        key: jax PRNG key to manage random
-        """
 
         self.T = T
         self.batch_size = batch_size
@@ -67,14 +60,14 @@ class Dataset:
 
             self.idx = 0
             dp = self.data_path.pop(0)
-            self.load_shared(dp)
+            self.load_shared(dp, display=True)
             self.data_path.append(dp)
 
         return x, y
 
     @classmethod
     def getDataset(cls, cfg: dataConfig, key: jax.random.key):
-        train_dataset_path = cfg.train_dataset_path
+        train_dataset_path = os.path.abspath(cfg.train_dataset_path)
         if os.path.isdir(train_dataset_path):
             train_dataset_path = [
                 os.path.join(train_dataset_path, f)
@@ -82,7 +75,7 @@ class Dataset:
                 if f.endswith(".npy")
             ]
 
-        val_dataset_path = cfg.val_dataset_path
+        val_dataset_path = os.path.abspath(cfg.val_dataset_path)
         if os.path.isdir(val_dataset_path):
             val_dataset_path = [
                 os.path.join(val_dataset_path, f)
@@ -98,8 +91,8 @@ class Dataset:
 
 if __name__ == "__main__":
     test_cfg = dataConfig(
-        train_dataset_path="./train_tokens.npy",
-        val_dataset_path="./val_tokens.npy",
+        train_dataset_path="./trainSetShards",
+        val_dataset_path="./valSetShards",
         T=1024,
         batch_size=64,
     )
