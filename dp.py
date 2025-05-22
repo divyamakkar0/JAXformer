@@ -43,15 +43,6 @@ class KeyState:
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
 
-def cross_entropy_loss(model, params, key, x, y, train=True):
-
-    B, T = x.shape
-    pred, cache = model.apply({'params': params}, x, train=train, rngs={'dropout': key})
-    log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
-    y = y.reshape(B * T)
-    loss = -jnp.mean(log_prob[jnp.arange(B * T), y])
-    return loss, (pred, cache)
-
 #MoE Loss
 
 def train_step(loss_fn, params, key, *args, **kwargs):
@@ -94,21 +85,18 @@ def main(config: config):
 
     #model and dp setup
     print("setting up model")
-    # def get_model_or_params(model_config, init_key, model=True):
-    #     model, params = Decoder.get_model(model_config=config.model, init_key=key())
-    #     if model:
-    #         return model
-    #     else:
-    #         return params
     model, global_params = Decoder.get_model(model_config=config.model, init_key=key())
-    # model = get_model_or_params(model_config=config.model, init_key=key(), model=True)
-    # global_params = get_model_or_params(model_config=config.model, init_key=key(), model=False)
     device_array = np.array(jax.devices())
     mesh = Mesh(device_array, ("x",))
 
     param_count = sum(x.size for x in jax.tree.leaves(global_params))
     print(f"Model parameter count: {param_count:,d} ")
     total_steps = config.training_steps
+
+    #fold_key 
+    def fold_key(key, axis):
+        axis_index = jax.lax.axis_index(axis)
+        return jax.random.fold_in(key, axis_index)
 
     #init_dp 
     def init_device(params, local_model, config):
@@ -141,9 +129,38 @@ def main(config: config):
     )
     state_initialized = sharded_init(global_params)
 
+    #loss dp
+    def cross_entropy_loss(model, params, key, x, y, train=True):
+        dropout_key = fold_key(key, "x")
+        B, T = x.shape
+        pred, cache = model.apply({'params': params}, x, train=train, rngs={'dropout': key})
+        log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
+        y = y.reshape(B * T)
+        loss = -jnp.mean(log_prob[jnp.arange(B * T), y])
+        return loss, (pred, cache)
+    
+    def loss_distributed(params, x, y, model, key, train=True):
+        loss = cross_entropy_loss(model=model, params=params, key=key, x=x, y=y, train=train)
+        with jax.named_scope("sync_loss"):
+            loss = jax.tree_map(lambda g: jax.lax.pmean(g, axis_name="x"), loss)
+        
+        return loss
+
+    loss_sharded = jax.jit(
+        shard_map(
+            functools.partial(loss_distributed, model=model, key=key()),
+            mesh,
+            in_specs=(P(), P("x",), P("x",)),
+            out_specs=(P()),
+        )
+    )
+
+    loss_acc = loss_sharded(global_params, train_dataset, val_dataset)
+
 
     print("starting training")
     loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
+
     train_step_jit = jax.jit(
         lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
         )
