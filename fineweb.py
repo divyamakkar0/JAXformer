@@ -1,7 +1,9 @@
 import datasets
 import os
 import numpy as np
+import tiktoken
 
+tokenizer = tiktoken.get_encoding("gpt2")
 fw = datasets.load_dataset(
     "HuggingFaceFW/fineweb-edu",
     name="sample-10BT",
@@ -18,10 +20,12 @@ length = fw['num_rows']
 val_tokens = int(length * 0.05)
 idx = np.random.choice(length, val_tokens, replace=False)
 
+NUM_THREADS = 16
 
-for i, 
 
 
+for i in idx:
+  fw[i]['text']
 
 for i, batch in enumerate(fw):
   batch['text']

@@ -1,14 +1,12 @@
 #!/bin/bash
 
-pip install datasets
-python3 <<EOF
-import datasets
-fw = datasets.load_dataset(
-    "HuggingFaceFW/fineweb-edu",
-    name="sample-10BT",
-    split=None,
-    streaming=False,
-    num_proc=4
-)
-EOF
-pip uninstall -y datasets
+# script to get the fineweb-edu-10bt-for-gpt2 dataset off kaggle
+
+script_dir=$(dirname "$(realpath "$0")")
+
+curl -L -o "$script_dir/fineweb-edu-10bt-for-gpt2.zip"\
+    https://www.kaggle.com/api/v1/datasets/download/minhthiennguyen/fineweb-edu-10bt-for-gpt2
+
+unzip "$script_dir/fineweb-edu-10bt-for-gpt2.zip" -d "$script_dir/fineweb-edu-10bt-for-gpt2"
+
+rm "$script_dir/fineweb-edu-10bt-for-gpt2.zip"

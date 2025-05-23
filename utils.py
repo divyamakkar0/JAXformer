@@ -132,8 +132,8 @@ def parse_args():
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument("--train_dataset", type=str, default="./trainSetShards")
-    parser.add_argument("--val_dataset", type=str, default="./valSetShards")
+    parser.add_argument("--train_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/train")
+    parser.add_argument("--val_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/test")
     parser.add_argument("--batch_size", type=int, default=64)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)

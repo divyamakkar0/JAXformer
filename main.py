@@ -259,7 +259,7 @@ def main(config: config):
             for i in range(config.eval_steps):
                 metrics = eval_step_jit(key(), state.params, *val_dataset())
                 metrics_val = metrics_val + metrics
-            metrics_val = metrics_val / config.checkpoint_steps
+            metrics_val = metrics_val / config.eval_steps
             if use_wandb:
                 wandb_log["val_loss"] = metrics_val["loss"]
 
