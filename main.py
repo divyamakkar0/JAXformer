@@ -3,6 +3,7 @@ import os
 os.environ["XLA_FLAGS"] = (
     "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_autotune_level=3"
 )
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import jax
 import jax.numpy as jnp
@@ -21,7 +22,7 @@ import ast
 import json
 import optax
 
-from config import parse_args, config
+from utils import parse_args, config, Metrics
 from model import Decoder
 from dataset import Dataset
 
@@ -38,57 +39,6 @@ class KeyState:
     def __call__(self, num: int = 2):
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
-
-
-class Metrics:
-    def __init__(self, moe: Optional[int] = None):
-        if moe is not None:
-            assert isinstance(moe, int), "moe must be an integer"
-            assert moe > 0, "moe must be greater than 0"
-        self.moe = moe
-        metrics = {
-            "loss": 0.0,
-            "loss_cross": 0.0,
-        }
-        if moe:
-            metrics["loss_load"] = 0.0
-            for h in range(moe):
-                metrics[f"load/head_{h}"] = 0.0
-        self.moe = moe
-        self.metrics = metrics
-
-    def reset(self):
-        metrics = {
-            "loss": 0.0,
-            "loss_cross": 0.0,
-        }
-        if self.moe:
-            metrics["loss_load"] = 0.0
-            for h in range(self.moe):
-                metrics[f"load/head_{h}"] = 0.0
-        self.metrics = metrics
-
-        return self
-
-    def __getitem__(self, key):
-        if key not in self.metrics:
-            raise KeyError(f"Key {key} not found in metrics")
-        return self.metrics[key]
-
-    def __add__(self, other):
-        self.metrics["loss"] += other["loss"]
-        self.metrics["loss_cross"] += other["loss_cross"]
-
-        if self.moe:
-            self.metrics["loss_load"] += other["loss_load"]
-            for h in range(self.moe):
-                self.metrics[f"load/head_{h}"] += other["load"][h]
-
-        return self
-
-    def __truediv__(self, num):
-        self.metrics = {k: self.metrics[k] / num for k in self.metrics}
-        return self
 
 
 def loss(model, alpha, params, key, x, y, train=True):
@@ -262,7 +212,7 @@ def main(config: config):
 
     for current_step in range(init_step, total_steps):
         grads = None
-        metrics_step = metrics_step.reset()
+        metrics_step.reset()
         for i in range(config.grad_step):
             grads_step, metrics = train_step_jit(key(), state.params, *train_dataset())
             grads = (
@@ -281,14 +231,14 @@ def main(config: config):
         if use_wandb:
             wandb_log = {
                 "step": current_step,
-                "loss/train_loss": metrics_step["loss"],
-                "loss/cross_entropy_loss": metrics_step["loss_cross"],
+                "loss/val__loss": metrics_step["loss"],
+                "loss/val_cross_entropy_loss": metrics_step["loss_cross"],
                 "lr": state.opt_state[1].hyperparams["learning_rate"],
             }
             if config.model.moe:
-                wandb_log["loss/load_loss"] = metrics_step["loss_load"]
+                wandb_log["loss/val_load_loss"] = metrics_step["loss_load"]
                 for h in range(config.model.n_experts):
-                    wandb_log[f"load/head_{h}"] = metrics_step[f"load/head_{h}"]
+                    wandb_log[f"load/val_head_{h}"] = metrics_step[f"load/head_{h}"]
 
         if current_step % config.checkpoint_steps == 0:
             end = time.time()
@@ -306,7 +256,7 @@ def main(config: config):
             )
 
             metrics_val = metrics_val.reset()
-            for i in range(config.checkpoint_steps):
+            for i in range(config.eval_steps):
                 metrics = eval_step_jit(key(), state.params, *val_dataset())
                 metrics_val = metrics_val + metrics
             metrics_val = metrics_val / config.checkpoint_steps

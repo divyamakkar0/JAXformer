@@ -9,7 +9,7 @@ from flax import linen as nn
 import tiktoken
 
 from jax.numpy import dtype
-from config import parse_args
+from utils import parse_args
 from functools import partial
 
 

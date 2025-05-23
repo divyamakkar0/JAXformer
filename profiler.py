@@ -20,7 +20,7 @@ import time
 import ast
 import optax
 
-from config import parse_args, modelConfig
+from utils import parse_args, modelConfig
 from model import Decoder
 
 from typing import Tuple, Any

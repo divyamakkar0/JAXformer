@@ -2,7 +2,7 @@ import os
 import jax
 import jax.numpy as jnp
 from typing import Optional, Tuple, List
-from config import dataConfig
+from utils import dataConfig
 import math
 
 
