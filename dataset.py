@@ -41,7 +41,6 @@ class Dataset:
         )
 
     def __call__(self):
-
         if self.step_idx + self.batch_size * self.T <= self.dataset.shape[0]:
             x = self.dataset[
                 self.step_idx : self.step_idx + self.batch_size * self.T
