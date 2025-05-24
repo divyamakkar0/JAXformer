@@ -498,7 +498,7 @@ class Decoder(nn.Module):
         x = jnp.asarray(x, dtype=jnp.float32)
 
         if load is not None:
-            load = (load[0] * load[1]).mean(axis=0)
+            load = (load[0] * load[1])
 
         return x, (out_cache, load)
 

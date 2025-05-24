@@ -3,7 +3,7 @@ import os
 os.environ["XLA_FLAGS"] = (
     "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_autotune_level=3"
 )
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import jax
 import jax.numpy as jnp
@@ -23,7 +23,7 @@ import ast
 import json
 import optax
 
-from utils import parse_args, config, Metrics
+from utils import parse_args, config
 from model import Decoder
 from dataset import Dataset
 
@@ -40,7 +40,7 @@ import numpy as np
 
 
 def setup_dp():
-    devices = np.array(jax.devices())[:2]
+    devices = np.array(jax.devices())
     print(f"Devices: {devices}")
     mesh = Mesh(devices, axis_names=("data"))
     count = devices.shape[0]
@@ -48,7 +48,6 @@ def setup_dp():
 
 
 def init_state(mesh, config, model, params):
-    
     @jax.jit
     @partial(jax.shard_map, mesh=mesh, in_specs=(P()), out_specs=(P()))
     def state_fn(params):
@@ -119,12 +118,17 @@ def step_fn(loss_fn, params, *args, train=True, **kwargs):
         grads = None
 
     loss, (load, loss_cross, loss_balance) = val
+
     metrics = {
         "loss": loss,
-        "load": load,
         "loss_cross": loss_cross,
-        "loss_load": loss_balance,
     }
+    if load is not None:
+        load = load.mean(axis=0)
+        metrics["loss_load"] = loss_balance
+        for h in range(load.shape[0]):
+            metrics[f"load/head_{h}"] = load[h]
+
     metrics = jax.tree.map(
         lambda x: jax.lax.pmean(x, axis_name="data"),
         metrics,  # all reduce
@@ -248,9 +252,6 @@ def main(config: config):
             wandb_id = wandb.run.id
         save_checkpoint(0, wandb_id)
 
-    metrics_step = Metrics(config.model.n_experts if config.model.moe else None)
-    metrics_val = Metrics(config.model.n_experts if config.model.moe else None)
-
     print("start training")
 
     start = time.time()
@@ -259,40 +260,42 @@ def main(config: config):
 
     for current_step in range(init_step, total_steps):
         grads = None
-        metrics_step.reset()
+        metrics_step = None
         for i in range(config.grad_step):
             keys = jax.device_put(
-                key(count), NamedSharding(mesh, P("data"))
+                jnp.array([key(count)]), NamedSharding(mesh, P("data"))
             )
-            x,y = train_dataset()
-            grads_step, metrics = train_step(keys, state.params, x,y)
+            x, y = train_dataset()
+            grads_step, metrics = train_step(keys, state.params, x, y)
             grads = (
                 grads_step
                 if grads is None
                 else jax.tree.map(lambda x, y: x + y, grads, grads_step)
             )
 
-            metrics_step = metrics_step + metrics
+            metrics_step = (
+                metrics
+                if metrics_step is None
+                else jax.tree.map(lambda x, y: x + y, metrics_step, metrics)
+            )
 
-        # import sys; sys.exit(0)
         grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         state = state.apply_gradients(grads=grads)
-        metrics_step = metrics_step / config.grad_step
-
+        metrics_step = jax.tree.map(lambda x: x / config.grad_step, metrics_step)
 
         train_loss += metrics_step["loss"]
 
         if use_wandb:
             wandb_log = {
                 "step": current_step,
-                "loss/val__loss": metrics_step["loss"],
-                "loss/val_cross_entropy_loss": metrics_step["loss_cross"],
+                "loss/train_loss": metrics_step["loss"],
+                "loss/train_cross_entropy_loss": metrics_step["loss_cross"],
                 "lr": state.opt_state[1].hyperparams["learning_rate"],
             }
             if config.model.moe:
-                wandb_log["loss/val_load_loss"] = metrics_step["loss_load"]
+                wandb_log["loss/load_loss"] = metrics_step["loss_load"]
                 for h in range(config.model.n_experts):
-                    wandb_log[f"load/val_head_{h}"] = metrics_step[f"load/head_{h}"]
+                    wandb_log[f"load/head_{h}"] = metrics_step[f"load/head_{h}"]
 
         if current_step % config.checkpoint_steps == 0:
             end = time.time()
@@ -310,17 +313,30 @@ def main(config: config):
                 else train_loss
             )
 
-            metrics_val = metrics_val.reset()
+            metrics_val = None
             for i in range(config.eval_steps):
                 keys = jax.device_put(
-                    key(jax.device_count()), NamedSharding(mesh, P("data"))
+                    jnp.array([key(count)]), NamedSharding(mesh, P("data"))
                 )
-                x, y  = val_dataset()
-                _,metrics = eval_step(keys, state.params, x,y)
-                metrics_val = metrics_val + metrics
-            metrics_val = metrics_val / config.eval_steps
+                x, y = val_dataset()
+                _, metrics = eval_step(keys, state.params, x, y)
+                metrics_val = (
+                    metrics
+                    if metrics_val is None
+                    else jax.tree.map(lambda x, y: x + y, metrics_val, metrics)
+                )
+
+            metrics_val = jax.tree.map(
+                lambda x: x / config.eval_steps, metrics_val
+            )
+
             if use_wandb:
-                wandb_log["val_loss"] = metrics_val["loss"]
+                wandb_log["loss/val_loss"] = metrics_val["loss"]
+                wandb_log["loss/val_cross_entropy_loss"] = metrics_val["loss_cross"]
+                if config.model.moe:
+                    wandb_log["loss/val_load_loss"] = metrics_val["loss_load"]
+                    for h in range(config.model.n_experts):
+                        wandb_log[f"load/head_{h}"] = metrics_val[f"load/head_{h}"]
 
             log_string = (
                 f"step: {current_step} "

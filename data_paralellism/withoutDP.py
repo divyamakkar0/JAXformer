@@ -44,6 +44,7 @@ from flax.training.train_state import TrainState
 PyTree = Any
 Metrics = Dict[str, Tuple[jax.Array, ...]]
 
+
 class DPClassifier(nn.Module):
     config: ConfigDict
 
@@ -63,7 +64,8 @@ class DPClassifier(nn.Module):
         )(x)
         x = x.astype(jnp.float32)
         return x
-    
+
+
 data_config = ConfigDict(
     dict(
         batch_size=16,
@@ -96,6 +98,7 @@ config = ConfigDict(
     )
 )
 
+
 class KeyState:
     def __init__(self, base_key: jax.random.key):
         self.key = jax.random.key(base_key)
@@ -104,6 +107,7 @@ class KeyState:
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
 
+
 model = DPClassifier(config=config.model)
 optimizer = optax.adamw(
     learning_rate=1e-3,
@@ -111,48 +115,45 @@ optimizer = optax.adamw(
 
 key = KeyState(config.seed)
 
-x=jax.random.normal(key(), (config.data.batch_size, config.data.input_size))
+x = jax.random.normal(key(), (config.data.batch_size, config.data.input_size))
 y = jax.random.randint(key(), (config.data.batch_size,), 0, config.data.num_classes)
 
-params = model.init(key(), x, False)['params']
+params = model.init(key(), x, False)["params"]
 
 tx = optax.chain(
     optax.clip_by_global_norm(1),
     optax.inject_hyperparams(optax.adam)(learning_rate=1e-3),
 )
 
-state = TrainState.create(
-    apply_fn=model.apply,
-    params=params,
-    tx=tx
-)
+state = TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
 
 def cross_entropy_loss(model, params, key, x, y, train=True):
-        key, dropout_key = jax.random.split(key)
-        B, T = x.shape
-        pred = model.apply({'params': params}, x, train=train, rngs={'dropout': dropout_key})
-        log_prob = jax.nn.log_softmax(pred, axis=-1)
-        loss = -jnp.mean(log_prob[jnp.arange(B), y])
-        return loss
+    key, dropout_key = jax.random.split(key)
+    B, T = x.shape
+    pred = model.apply(
+        {"params": params}, x, train=train, rngs={"dropout": dropout_key}
+    )
+    log_prob = jax.nn.log_softmax(pred, axis=-1)
+    loss = -jnp.mean(log_prob[jnp.arange(B), y])
+    return loss
+
 
 def train_step(loss_fn, params, key, *args, **kwargs):
-        loss_grad = jax.value_and_grad(
-            loss_fn,
-            argnums=0,
-            has_aux=False
-        )
-        loss, grads = loss_grad(params, key, *args, **kwargs, train=True)
-        # don't need cache in training
+    loss_grad = jax.value_and_grad(loss_fn, argnums=0, has_aux=False)
+    loss, grads = loss_grad(params, key, *args, **kwargs, train=True)
+    # don't need cache in training
 
-        metrics = {
-            'loss': loss,
-        }
-        return grads, metrics
+    metrics = {
+        "loss": loss,
+    }
+    return grads, metrics
+
 
 loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
 train_step_jit = jax.jit(
-        lambda key, params, x, y : train_step(loss_fn, params, key, x, y),
-    )
+    lambda key, params, x, y: train_step(loss_fn, params, key, x, y),
+)
 
 train_loss = 0.0
 for _ in range(100):
@@ -160,9 +161,10 @@ for _ in range(100):
     grad_loss = 0.0
     grads_step, metrics = train_step_jit(key(), state.params, x, y)
     print(metrics)
-    grads = grads_step if grads is None else jax.tree.map(
-                lambda x, y: x + y, grads, grads_step
-            )
+    grads = (
+        grads_step
+        if grads is None
+        else jax.tree.map(lambda x, y: x + y, grads, grads_step)
+    )
     state = state.apply_gradients(grads=grads)
-    train_loss += (grad_loss)
-
+    train_loss += grad_loss

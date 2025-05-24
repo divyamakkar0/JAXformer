@@ -8,6 +8,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
+
 from typing import Any, Callable, Dict, Tuple
 
 import jax
@@ -110,7 +111,10 @@ def accumulate_gradients_scan(
         """Determine gradients and metrics for a single minibatch."""
         minibatch = jax.tree.map(
             lambda x: jax.lax.dynamic_slice_in_dim(  # Slicing with variable index (jax.Array).
-                x, start_index=minibatch_idx * minibatch_size, slice_size=minibatch_size, axis=0
+                x,
+                start_index=minibatch_idx * minibatch_size,
+                slice_size=minibatch_size,
+                axis=0,
             ),
             batch,
         )
@@ -133,7 +137,10 @@ def accumulate_gradients_scan(
     metrics = jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype), metrics_shape)
     # Loop over minibatches to determine gradients and metrics.
     (grads, metrics), _ = jax.lax.scan(
-        _scan_step, init=(grads, metrics), xs=jnp.arange(num_minibatches), length=num_minibatches
+        _scan_step,
+        init=(grads, metrics),
+        xs=jnp.arange(num_minibatches),
+        length=num_minibatches,
     )
     # Average gradients over minibatches.
     grads = jax.tree.map(lambda g: g / num_minibatches, grads)
@@ -165,11 +172,19 @@ def accumulate_gradients(
     """
     if use_scan:
         return accumulate_gradients_scan(
-            state=state, batch=batch, rng=rng, num_minibatches=num_minibatches, loss_fn=loss_fn
+            state=state,
+            batch=batch,
+            rng=rng,
+            num_minibatches=num_minibatches,
+            loss_fn=loss_fn,
         )
     else:
         return accumulate_gradients_loop(
-            state=state, batch=batch, rng=rng, num_minibatches=num_minibatches, loss_fn=loss_fn
+            state=state,
+            batch=batch,
+            rng=rng,
+            num_minibatches=num_minibatches,
+            loss_fn=loss_fn,
         )
 
 

@@ -5,58 +5,6 @@ import jax.numpy as jnp
 from jax.numpy import dtype
 import json
 
-
-class Metrics:
-    def __init__(self, moe: Optional[int] = None):
-        if moe is not None:
-            assert isinstance(moe, int), "moe must be an integer"
-            assert moe > 0, "moe must be greater than 0"
-        self.moe = moe
-        metrics = {
-            "loss": 0.0,
-            "loss_cross": 0.0,
-        }
-        if moe:
-            metrics["loss_load"] = 0.0
-            for h in range(moe):
-                metrics[f"load/head_{h}"] = 0.0
-        self.moe = moe
-        self.metrics = metrics
-
-    def reset(self):
-        metrics = {
-            "loss": 0.0,
-            "loss_cross": 0.0,
-        }
-        if self.moe:
-            metrics["loss_load"] = 0.0
-            for h in range(self.moe):
-                metrics[f"load/head_{h}"] = 0.0
-        self.metrics = metrics
-
-        return self
-
-    def __getitem__(self, key):
-        if key not in self.metrics:
-            raise KeyError(f"Key {key} not found in metrics")
-        return self.metrics[key]
-
-    def __add__(self, other):
-        self.metrics["loss"] += other["loss"]
-        self.metrics["loss_cross"] += other["loss_cross"]
-
-        if self.moe:
-            self.metrics["loss_load"] += other["loss_load"]
-            for h in range(self.moe):
-                self.metrics[f"load/head_{h}"] += other["load"][h]
-
-        return self
-
-    def __truediv__(self, num):
-        self.metrics = {k: self.metrics[k] / num for k in self.metrics}
-        return self
-
-
 @dataclass
 class modelConfig:
     """model config class"""
@@ -134,12 +82,8 @@ def parse_args():
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument(
-        "--train_dataset", type=str, default="./train.npy"
-    )
-    parser.add_argument(
-        "--val_dataset", type=str, default="./test.npy"
-    )
+    parser.add_argument("--train_dataset", type=str, default="./train.npy")
+    parser.add_argument("--val_dataset", type=str, default="./test.npy")
     parser.add_argument("--batch_size", type=int, default=64)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)

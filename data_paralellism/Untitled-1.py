@@ -48,6 +48,7 @@ import time
 PyTree = Any
 Metrics = Dict[str, Tuple[jax.Array, ...]]
 
+
 # %%
 class DPClassifier(nn.Module):
     config: ConfigDict
@@ -68,6 +69,7 @@ class DPClassifier(nn.Module):
         )(x)
         x = x.astype(jnp.float32)
         return x
+
 
 # %%
 data_config = ConfigDict(
@@ -102,6 +104,7 @@ config = ConfigDict(
     )
 )
 
+
 # %%
 class KeyState:
     def __init__(self, base_key: jax.random.key):
@@ -111,120 +114,146 @@ class KeyState:
         self.key, rng = jax.random.split(self.key, num=num)
         return rng
 
+
 # %%
 model = DPClassifier(config=config.model)
 optimizer = optax.adamw(
     learning_rate=config.optimizer.learning_rate,
 )
+
+
 class TrainStateWithRNG(train_state.TrainState):
-        rng: Any
+    rng: Any
+
 
 # %%
 key = KeyState(config.seed)
-x=jax.random.normal(key(), (config.data.batch_size, config.data.input_size))
+x = jax.random.normal(key(), (config.data.batch_size, config.data.input_size))
 y = jax.random.randint(key(), (config.data.batch_size,), 0, config.data.num_classes)
 variables = model.init({"params": key()}, x, train=False)
 params = variables.pop("params")
 device_array = np.array(jax.devices())
 mesh = Mesh(device_array, ("x",))
-print(jax.tree.reduce(lambda acc, current: acc + current.size, jax.tree.leaves(params), 0))
+print(
+    jax.tree.reduce(lambda acc, current: acc + current.size, jax.tree.leaves(params), 0)
+)
 
 
 # %%
 def init_device(params, rng, local_model, config):
-        tx = optax.chain(
-            optax.clip_by_global_norm(1),
-            optax.inject_hyperparams(optax.adam)(learning_rate=1e-3),
-        )
-        state = TrainStateWithRNG.create(
-            apply_fn=local_model.apply,
-            params=params,
-            tx=tx,
-            rng=rng,
-        )
-        return state
+    tx = optax.chain(
+        optax.clip_by_global_norm(1),
+        optax.inject_hyperparams(optax.adam)(learning_rate=1e-3),
+    )
+    state = TrainStateWithRNG.create(
+        apply_fn=local_model.apply,
+        params=params,
+        tx=tx,
+        rng=rng,
+    )
+    return state
+
 
 # %%
 sharded_init = shard_map(
-            functools.partial(init_device, rng=key(), local_model=model, config=model_config),
-            mesh,
-            in_specs=(P()),
-            out_specs=(P()),
-        )
+    functools.partial(init_device, rng=key(), local_model=model, config=model_config),
+    mesh,
+    in_specs=(P()),
+    out_specs=(P()),
+)
 
 state_initialized = sharded_init(params)
 
+
 # %%
 def fold_key(key, axis):
-        axis_index = jax.lax.axis_index(axis)
-        return jax.random.fold_in(key, axis_index)
+    axis_index = jax.lax.axis_index(axis)
+    return jax.random.fold_in(key, axis_index)
+
 
 # %%
 def cross_entropy_loss(model, params, key, x, y, train=True):
-        dropout_key = fold_key(key, "x")
-        B, T = x.shape
-        pred = model.apply({'params': params}, x, train=train, rngs={'dropout': dropout_key})
-        log_prob = jax.nn.log_softmax(pred, axis=-1)
-        loss = -jnp.mean(log_prob[jnp.arange(B), y])
-        loss = jax.lax.pmean(loss, axis_name="x")  
-        return loss
-#loss = cross_entropy_loss(model, params, key(), x, y)
+    dropout_key = fold_key(key, "x")
+    B, T = x.shape
+    pred = model.apply(
+        {"params": params}, x, train=train, rngs={"dropout": dropout_key}
+    )
+    log_prob = jax.nn.log_softmax(pred, axis=-1)
+    loss = -jnp.mean(log_prob[jnp.arange(B), y])
+    loss = jax.lax.pmean(loss, axis_name="x")
+    return loss
+
+
+# loss = cross_entropy_loss(model, params, key(), x, y)
+
 
 # %%
 def train_step(loss_fn, params, key, *args, **kwargs):
-        loss_grad = jax.value_and_grad(
-            loss_fn,
-            argnums=0,
-            has_aux=False
-        )
-        loss, grads = loss_grad(params, key, *args, **kwargs, train=True)
-        # don't need cache in training
+    loss_grad = jax.value_and_grad(loss_fn, argnums=0, has_aux=False)
+    loss, grads = loss_grad(params, key, *args, **kwargs, train=True)
+    # don't need cache in training
 
-        metrics = {
-            'loss': loss,
-        }
-        return grads, metrics
+    metrics = {
+        "loss": loss,
+    }
+    return grads, metrics
+
 
 # %%
 def accumulate_grads(key, x, y, state):
-        print("starting training")
-        loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
-        train_step_jit = lambda key, params, x, y : train_step(loss_fn, params, key, x, y)
-   
-        start = time.time()
-        train_loss = 0.0
+    print("starting training")
+    loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
+    train_step_jit = lambda key, params, x, y: train_step(loss_fn, params, key, x, y)
 
-        grads = None
-        acc_metrics = None
-        for i in range(2):
-            grads_step, metrics = train_step_jit(key, state.params, x, y)
-            grads = grads_step if grads is None else jax.tree.map(
-                lambda x, y: x + y, grads, grads_step
-            )
-            acc_metrics = metrics if acc_metrics is None else jax.tree.map(jnp.add, acc_metrics, metrics)
+    start = time.time()
+    train_loss = 0.0
 
-        grads = jax.tree.map(lambda x: x / 2, grads)
-        
-        return grads, acc_metrics
+    grads = None
+    acc_metrics = None
+    for i in range(2):
+        grads_step, metrics = train_step_jit(key, state.params, x, y)
+        grads = (
+            grads_step
+            if grads is None
+            else jax.tree.map(lambda x, y: x + y, grads, grads_step)
+        )
+        acc_metrics = (
+            metrics
+            if acc_metrics is None
+            else jax.tree.map(jnp.add, acc_metrics, metrics)
+        )
+
+    grads = jax.tree.map(lambda x: x / 2, grads)
+
+    return grads, acc_metrics
+
 
 # %%
 def train_step_device(state, x, y):
-        key, step_key = jax.random.split(state.rng)
-        grads, step_metrics = accumulate_grads(step_key, x, y, state)
-        grads = jax.tree.map(lambda g: jax.lax.pmean(g, axis_name="x"), grads)
-        new_state = state.apply_gradients(grads=grads, rng=key)
-        step_metrics = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="x"), step_metrics)
+    key, step_key = jax.random.split(state.rng)
+    grads, step_metrics = accumulate_grads(step_key, x, y, state)
+    grads = jax.tree.map(lambda g: jax.lax.pmean(g, axis_name="x"), grads)
+    new_state = state.apply_gradients(grads=grads, rng=key)
+    step_metrics = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="x"), step_metrics)
 
-        return new_state, step_metrics
+    return new_state, step_metrics
 
 
 # %%
-train_step_dp_fn =  shard_map(
-            train_step_device,
-            mesh,
-            in_specs=(P(), P("x",), P("x",)),
-            out_specs=(P(), P()),
-        )
+train_step_dp_fn = shard_map(
+    train_step_device,
+    mesh,
+    in_specs=(
+        P(),
+        P(
+            "x",
+        ),
+        P(
+            "x",
+        ),
+    ),
+    out_specs=(P(), P()),
+)
 
 # %%
 # state, metrics = train_step_dp_fn(state_initialized, x, y)
