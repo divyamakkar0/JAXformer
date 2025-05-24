@@ -120,25 +120,25 @@ class config:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
-    parser.add_argument("--model_dimension", type=int, default=8)
-    parser.add_argument("--n_heads", type=int, default=1)
-    parser.add_argument("--T", type=int, default=4)
+    parser.add_argument("--model_dimension", type=int, default=256)
+    parser.add_argument("--n_heads", type=int, default=8)
+    parser.add_argument("--T", type=int, default=512)
     parser.add_argument("--vocab_size", type=int, default=50257)
-    parser.add_argument("--blocks", type=int, default=1)
+    parser.add_argument("--blocks", type=int, default=6)
     parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--dhR", type=int, default=2)
+    parser.add_argument("--dhR", type=int, default=64)
     parser.add_argument("--rope_ratio", type=int, default=4)
     parser.add_argument("--moe", action="store_true")
     parser.add_argument("--n_experts", type=int, default=4)
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--n_shared", type=int, default=2)
-    parser.add_argument("--latent_dim", type=int, default=2)
+    parser.add_argument("--latent_dim", type=int, default=64)
 
     parser.add_argument(
-        "--train_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/train"
+        "--train_dataset", type=str, default="./train.npy"
     )
     parser.add_argument(
-        "--val_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/test"
+        "--val_dataset", type=str, default="./test.npy"
     )
     parser.add_argument("--batch_size", type=int, default=64)
 

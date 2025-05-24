@@ -40,15 +40,16 @@ import numpy as np
 
 
 def setup_dp():
-    devices = np.array(jax.devices())
+    devices = np.array(jax.devices())[:2]
     print(f"Devices: {devices}")
     mesh = Mesh(devices, axis_names=("data"))
-    return mesh
+    count = devices.shape[0]
+    return mesh, count
 
 
-def init_state(config, model, params):
-    mesh = setup_dp()
-
+def init_state(mesh, config, model, params):
+    
+    @jax.jit
     @partial(jax.shard_map, mesh=mesh, in_specs=(P()), out_specs=(P()))
     def state_fn(params):
         lr_scheduler = optax.warmup_cosine_decay_schedule(
@@ -72,8 +73,8 @@ def init_state(config, model, params):
 
         return state
 
-    state_init = jax.jit(state_fn)(params)
-    return state_init, mesh
+    state_init = state_fn(params)
+    return state_init
 
 
 class KeyState:
@@ -93,9 +94,6 @@ def loss(model, alpha, params, key, x, y, train):
     pred, (_, load) = model.apply(
         {"params": params}, x, train=train, rngs={"dropout": key}
     )
-
-    # jax.debug.print("device {x} pred: {y}", x=jax.lax.axis_index('data'), y=pred)
-    # jax.debug.print("device {x} x: {y}", x=jax.lax.axis_index('data'), y=x)
     log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
     loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
     y = y.reshape(B * T)
@@ -106,15 +104,6 @@ def loss(model, alpha, params, key, x, y, train):
         loss_balance = model.n_experts / (model.k * T**2) * load.sum(axis=0)
 
     loss = loss_cross + alpha * loss_balance
-
-    jax.debug.print(
-        "device {x} loss: {y} x: {z} target: {w} pred: {v}",
-        x=jax.lax.axis_index("data"),
-        y=loss,
-        z=x,
-        w=y,
-        v=pred,
-    )
 
     return loss, (load, loss_cross, loss_balance)
 
@@ -136,12 +125,10 @@ def step_fn(loss_fn, params, *args, train=True, **kwargs):
         "loss_cross": loss_cross,
         "loss_load": loss_balance,
     }
-    jax.debug.print("device {x} {y}", x=jax.lax.axis_index('data'), y=metrics["loss"])
     metrics = jax.tree.map(
         lambda x: jax.lax.pmean(x, axis_name="data"),
         metrics,  # all reduce
     )
-    jax.debug.print("device {x} {y}", x=jax.lax.axis_index('data'), y=metrics["loss"])
 
     return grads, metrics
 
@@ -158,9 +145,10 @@ def main(config: config):
     total_steps = config.training_steps
 
     print("setting up state & devices")
-    state, mesh = init_state(config, model, global_params)
+    mesh, count = setup_dp()
+    state = init_state(mesh, config, model, global_params)
 
-    config.data.batch_size *= jax.device_count()
+    config.data.batch_size *= count
     print("setting up dataset")
     (
         train_dataset,
@@ -274,12 +262,9 @@ def main(config: config):
         metrics_step.reset()
         for i in range(config.grad_step):
             keys = jax.device_put(
-                key(jax.device_count()), NamedSharding(mesh, P("data"))
+                key(count), NamedSharding(mesh, P("data"))
             )
             x,y = train_dataset()
-            # x = jax.device_put(x, NamedSharding(mesh, P("data")))
-            # y = jax.device_put(y, NamedSharding(mesh, P("data")))
-            print(f"step: {current_step} | x: {x} | y: {y}")
             grads_step, metrics = train_step(keys, state.params, x,y)
             grads = (
                 grads_step
@@ -317,6 +302,7 @@ def main(config: config):
                 * config.grad_step
                 * config.model.T
                 * config.checkpoint_steps
+                * count
             ) / total_time
             train_loss = (
                 (train_loss / config.checkpoint_steps)
@@ -330,8 +316,6 @@ def main(config: config):
                     key(jax.device_count()), NamedSharding(mesh, P("data"))
                 )
                 x, y  = val_dataset()
-                # x = jax.device_put(x, NamedSharding(mesh, P("data")))
-                # y = jax.device_put(y, NamedSharding(mesh, P("data")))
                 _,metrics = eval_step(keys, state.params, x,y)
                 metrics_val = metrics_val + metrics
             metrics_val = metrics_val / config.eval_steps
