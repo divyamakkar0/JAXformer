@@ -5,7 +5,7 @@ os.environ['XLA_FLAGS'] = (
     '--xla_gpu_enable_latency_hiding_scheduler=true '
 )
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import jax
 import jax.numpy as jnp
@@ -155,15 +155,12 @@ def step(loss_fn, grad_steps, params, key, x,y, train=True):
             lambda x: jnp.zeros_like(x), params
         )
 
-    for i in range(grad_steps):
-        grads, metrics = step_fn(grads, (x[i], y[i], key[i]))
-
-    # grads, metrics = jax.lax.scan(
-    #     step_fn,
-    #     init=grads,
-    #     xs=(x, y, key),
-    #     unroll=1
-    # )
+    grads, metrics = jax.lax.scan(
+        step_fn,
+        init=grads,
+        xs=(x, y, key),
+        unroll=1
+    )
 
     if grads is not None:
         grads = jax.tree.map(
@@ -304,8 +301,12 @@ def main(config: config):
 
     for current_step in range(init_step, total_steps):
 
-        keys =  jnp.array([key(count * config.grad_step)])
+
         with jax.named_scope("train_step"):
+            if count * config.grad_step == 1:
+                keys =  jnp.array([key()])
+            else:
+                keys = key(count * config.grad_step)
             grads, metrics = train_step(
                 keys,
                 state.params,
@@ -342,7 +343,11 @@ def main(config: config):
             )
 
             with jax.named_scope("eval_step"):
-                 metrics_val = eval_step(
+                if count * config.grad_step == 1:
+                    keys =  jnp.array([key()])
+                else:
+                    keys = key(count * config.grad_step)
+                metrics_val = eval_step(
                     key(count * config.eval_steps),
                     state.params,
                     *val_dataset(),
