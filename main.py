@@ -1,8 +1,10 @@
 import os
 
-os.environ["XLA_FLAGS"] = (
-    "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_autotune_level=3"
+os.environ['XLA_FLAGS'] = (
+    '--xla_gpu_triton_gemm_any=True '
+    '--xla_gpu_enable_latency_hiding_scheduler=true '
 )
+
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import jax
@@ -15,6 +17,7 @@ jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
 jax.config.update("jax_debug_nans", True)
+jax.config.update("jax_disable_jit", False)
 
 import flax
 from flax.training import train_state
@@ -152,12 +155,15 @@ def step(loss_fn, grad_steps, params, key, x,y, train=True):
             lambda x: jnp.zeros_like(x), params
         )
 
-    grads, metrics = jax.lax.scan(
-            step_fn,
-            init=grads,
-            xs=(x, y, key),
-            unroll=3
-        )
+    for i in range(grad_steps):
+        grads, metrics = step_fn(grads, (x[i], y[i], key[i]))
+
+    # grads, metrics = jax.lax.scan(
+    #     step_fn,
+    #     init=grads,
+    #     xs=(x, y, key),
+    #     unroll=1
+    # )
 
     if grads is not None:
         grads = jax.tree.map(
@@ -216,10 +222,10 @@ def main(config: config):
         jax.shard_map(
             lambda key, params, x, y: step(
                 loss_fn, config.eval_steps, params, key, x, y, train=False
-            ),
+            )[1],
             mesh=mesh,
             in_specs=(P("data"), P(), P("data"), P("data")),
-            out_specs=(P(), P()),
+            out_specs=(P()),
         )
     )
 
@@ -299,11 +305,12 @@ def main(config: config):
     for current_step in range(init_step, total_steps):
 
         keys =  jnp.array([key(count * config.grad_step)])
-        grads, metrics = train_step(
-            keys,
-            state.params,
-            *train_dataset(),
-        )
+        with jax.named_scope("train_step"):
+            grads, metrics = train_step(
+                keys,
+                state.params,
+                *train_dataset(),
+            )
 
         state = state.apply_gradients(grads=grads)
         train_loss += metrics["loss"]
@@ -325,10 +332,8 @@ def main(config: config):
             total_time = end - start
             tokens_per_second = (
                 config.data.train_batch_size
-                * config.grad_step
                 * config.model.T
                 * config.checkpoint_steps
-                * count
             ) / total_time
             train_loss = (
                 (train_loss / config.checkpoint_steps)
@@ -336,12 +341,12 @@ def main(config: config):
                 else train_loss
             )
 
-            _, metrics_val = eval_step(
-                key(count * config.eval_steps),
-                state.params,
-                *val_dataset(),
-            )
-
+            with jax.named_scope("eval_step"):
+                 metrics_val = eval_step(
+                    key(count * config.eval_steps),
+                    state.params,
+                    *val_dataset(),
+                )
 
             if use_wandb:
                 wandb_log["loss/val_loss"] = metrics_val["loss"]
@@ -361,23 +366,24 @@ def main(config: config):
 
             print(log_string)
 
-            # tokens = model.generate(
-            #     state.params,
-            #     sample_key,
-            #     "",
-            #     B=config.inference_batch,
-            #     k=10000,
-            #     max_tokens=30,
-            #     temperature=1,
-            # )
-            # print("tokens: ", tokens)
-            # with open(
-            #     os.path.join(
-            #         os.path.abspath(config.output_dir), config.name, "tokens.txt"
-            #     ),
-            #     "a",
-            # ) as f:
-            #     f.write(f"{current_step} | {tokens}\n")
+            tokens = model.generate(
+                jax.device_put(jax.device_get(state.params), mesh.devices[0]),
+                sample_key,
+                "",
+                B=config.inference_batch,
+                k=10000,
+                max_tokens=30,
+                temperature=1,
+            )
+
+            print("tokens: ", tokens)
+            with open(
+                os.path.join(
+                    os.path.abspath(config.output_dir), config.name, "tokens.txt"
+                ),
+                "a",
+            ) as f:
+                f.write(f"{current_step} | {tokens}\n")
 
             save_checkpoint(current_step, wandb_id)
             start = time.time()
