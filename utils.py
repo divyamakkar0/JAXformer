@@ -31,7 +31,8 @@ class dataConfig:
     train_dataset_path: str = "./trainSetShards"
     val_dataset_path: str = "./valSetShards"
     T: int = 6
-    batch_size: int = 3
+    train_batch_size: int = 3
+    val_batch_size: int = 3
 
 
 @dataclass
@@ -82,9 +83,10 @@ def parse_args():
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument("--train_dataset", type=str, default="./train.npy")
-    parser.add_argument("--val_dataset", type=str, default="./test.npy")
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--train_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/train")
+    parser.add_argument("--val_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/test")
+    parser.add_argument("--train_batch_size", type=int, default=64)
+    parser.add_argument("--val_batch_size", type=int, default=64)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)
     parser.add_argument("--min_lr", type=float, default=0)
@@ -134,7 +136,8 @@ def parse_args():
         train_dataset_path=args.train_dataset,
         val_dataset_path=args.val_dataset,
         T=args.T,
-        batch_size=args.batch_size,
+        train_batch_size=args.train_batch_size,
+        val_batch_size=args.val_batch_size,
     )
 
     lr_cfg = LRConfig(

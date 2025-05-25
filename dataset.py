@@ -73,6 +73,7 @@ class Dataset:
     @classmethod
     def getDataset(cls, cfg: dataConfig) -> Tuple["Dataset", "Dataset"]:
         train_dataset_path = os.path.abspath(cfg.train_dataset_path)
+        
         if os.path.isdir(train_dataset_path):
             train_dataset_path = [
                 os.path.join(train_dataset_path, f)
@@ -88,8 +89,8 @@ class Dataset:
                 if f.endswith(".npy")
             ]
 
-        train_dataset = cls(train_dataset_path, cfg.T, cfg.batch_size)
-        val_dataset = cls(val_dataset_path, cfg.T, cfg.batch_size)
+        train_dataset = cls(train_dataset_path, cfg.T, cfg.train_batch_size)
+        val_dataset = cls(val_dataset_path, cfg.T, cfg.val_batch_size)
 
         return train_dataset, val_dataset
 

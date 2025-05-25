@@ -106,33 +106,70 @@ def loss(model, alpha, params, key, x, y, train):
 
     return loss, (load, loss_cross, loss_balance)
 
+def step(loss_fn, grad_steps, params, key, x,y, train=True):
 
-def step_fn(loss_fn, params, *args, train=True, **kwargs):
     if train:
         loss_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
-    val = loss_fn(params, *args, train=train, **kwargs)
+
+    def step_fn(grads, batch):
+
+        *data, key = batch
+        val = loss_fn(params, key, *data, train=train)
+
+        if train:
+            val, grads_new = val
+            grads = jax.tree.map(
+                lambda x, y: x + y,
+                grads,
+                grads_new,
+            )
+        else:
+            grads = None
+
+        loss, (load, loss_cross, loss_balance) = val
+
+        metrics = {
+            "loss": loss,
+            "loss_cross": loss_cross,
+        }
+
+        if load is not None:
+            load = load.mean(axis=0)
+            metrics["loss_load"] = loss_balance
+            for h in range(load.shape[0]):
+                metrics[f"load/head_{h}"] = load[h]
+
+        return grads, metrics
+
+    B,T = x.shape
+
+    x = x.reshape(grad_steps, B // grad_steps, T)
+    y = y.reshape(grad_steps, B // grad_steps, T)
+
+    grads = None
     if train:
-        val, grads = val
-        grads = jax.lax.pmean(grads, axis_name="data")  # all reduce
-    else:
-        grads = None
+        grads = jax.tree.map(
+            lambda x: jnp.zeros_like(x), params
+        )
 
-    loss, (load, loss_cross, loss_balance) = val
+    grads, metrics = jax.lax.scan(
+            step_fn,
+            init=grads,
+            xs=(x, y, key),
+            unroll=3
+        )
 
-    metrics = {
-        "loss": loss,
-        "loss_cross": loss_cross,
-    }
-    if load is not None:
-        load = load.mean(axis=0)
-        metrics["loss_load"] = loss_balance
-        for h in range(load.shape[0]):
-            metrics[f"load/head_{h}"] = load[h]
+    if grads is not None:
+        grads = jax.tree.map(
+            lambda x: x / grad_steps, grads
+        )
+        grads = jax.lax.pmean(grads, axis_name="data")
 
     metrics = jax.tree.map(
-        lambda x: jax.lax.pmean(x, axis_name="data"),
-        metrics,  # all reduce
+        lambda x: x.mean(),
+        metrics
     )
+    metrics = jax.lax.pmean(metrics, axis_name="data")
 
     return grads, metrics
 
@@ -152,7 +189,8 @@ def main(config: config):
     mesh, count = setup_dp()
     state = init_state(mesh, config, model, global_params)
 
-    config.data.batch_size *= count
+    config.data.train_batch_size *= (count * config.grad_step)
+    config.data.val_batch_size *= (count * config.eval_steps)
     print("setting up dataset")
     (
         train_dataset,
@@ -165,8 +203,8 @@ def main(config: config):
 
     train_step = jax.jit(
         jax.shard_map(
-            lambda key, params, x, y: step_fn(
-                loss_fn, params, key[0], x, y, train=True
+            lambda key, params, x, y: step(
+                loss_fn, config.grad_step, params, key,  x, y, train=True
             ),
             mesh=mesh,
             in_specs=(P("data"), P(), P("data"), P("data")),
@@ -176,8 +214,8 @@ def main(config: config):
 
     eval_step = jax.jit(
         jax.shard_map(
-            lambda key, params, x, y: step_fn(
-                loss_fn, params, key[0], x, y, train=False
+            lambda key, params, x, y: step(
+                loss_fn, config.eval_steps, params, key, x, y, train=False
             ),
             mesh=mesh,
             in_specs=(P("data"), P(), P("data"), P("data")),
@@ -259,49 +297,34 @@ def main(config: config):
     sample_key = key()
 
     for current_step in range(init_step, total_steps):
-        grads = None
-        metrics_step = None
-        for i in range(config.grad_step):
-            keys = jax.device_put(
-                jnp.array([key(count)]), NamedSharding(mesh, P("data"))
-            )
-            x, y = train_dataset()
-            grads_step, metrics = train_step(keys, state.params, x, y)
-            grads = (
-                grads_step
-                if grads is None
-                else jax.tree.map(lambda x, y: x + y, grads, grads_step)
-            )
 
-            metrics_step = (
-                metrics
-                if metrics_step is None
-                else jax.tree.map(lambda x, y: x + y, metrics_step, metrics)
-            )
+        keys =  jnp.array([key(count * config.grad_step)])
+        grads, metrics = train_step(
+            keys,
+            state.params,
+            *train_dataset(),
+        )
 
-        grads = jax.tree_util.tree_map(lambda x: x / config.grad_step, grads)
         state = state.apply_gradients(grads=grads)
-        metrics_step = jax.tree.map(lambda x: x / config.grad_step, metrics_step)
-
-        train_loss += metrics_step["loss"]
+        train_loss += metrics["loss"]
 
         if use_wandb:
             wandb_log = {
                 "step": current_step,
-                "loss/train_loss": metrics_step["loss"],
-                "loss/train_cross_entropy_loss": metrics_step["loss_cross"],
+                "loss/train_loss": metrics["loss"],
+                "loss/train_cross_entropy_loss": metrics["loss_cross"],
                 "lr": state.opt_state[1].hyperparams["learning_rate"],
             }
             if config.model.moe:
-                wandb_log["loss/load_loss"] = metrics_step["loss_load"]
+                wandb_log["loss/load_loss"] = metrics["loss_load"]
                 for h in range(config.model.n_experts):
-                    wandb_log[f"load/head_{h}"] = metrics_step[f"load/head_{h}"]
+                    wandb_log[f"load/head_{h}"] = metrics[f"load/head_{h}"]
 
         if current_step % config.checkpoint_steps == 0:
             end = time.time()
             total_time = end - start
             tokens_per_second = (
-                config.data.batch_size
+                config.data.train_batch_size
                 * config.grad_step
                 * config.model.T
                 * config.checkpoint_steps
@@ -313,22 +336,12 @@ def main(config: config):
                 else train_loss
             )
 
-            metrics_val = None
-            for i in range(config.eval_steps):
-                keys = jax.device_put(
-                    jnp.array([key(count)]), NamedSharding(mesh, P("data"))
-                )
-                x, y = val_dataset()
-                _, metrics = eval_step(keys, state.params, x, y)
-                metrics_val = (
-                    metrics
-                    if metrics_val is None
-                    else jax.tree.map(lambda x, y: x + y, metrics_val, metrics)
-                )
-
-            metrics_val = jax.tree.map(
-                lambda x: x / config.eval_steps, metrics_val
+            _, metrics_val = eval_step(
+                key(count * config.eval_steps),
+                state.params,
+                *val_dataset(),
             )
+
 
             if use_wandb:
                 wandb_log["loss/val_loss"] = metrics_val["loss"]
