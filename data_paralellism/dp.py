@@ -84,6 +84,7 @@ config = ConfigDict(
     )
 )
 
+
 class KeyState:
     def __init__(self, base_key: jax.random.key):
         self.key = jax.random.key(base_key)
@@ -125,11 +126,31 @@ def init_device(params, rng, local_model, config):
 sharded_init = shard_map(
             functools.partial(init_device, rng=key(), local_model=model, config=model_config),
             mesh,
-            in_specs=(P()),
-            out_specs=(P()),
+            in_specs=(P("x",)),
+            out_specs=(P("x")),
         )
 
 state_initialized = sharded_init(params)
+
+def gather_array(x):
+    axis_size = jax.lax.psum(1, "x")
+
+    @jax.custom_gradient
+    def f(x):
+        def grad_fn(element):
+            return (jax.lax.psum_scatter(element, "x", scatter_dimension=0, tiled=True) / axis_size)
+            
+        return jax.lax.all_gather(x, "x", axis=0, tiled=True), grad_fn
+    
+    return f(x)
+
+#gather params
+jax.tree.map(
+    lambda x: gather_array(x, axis=0, axis_name="x"),
+    params
+)
+
+    
 
 def fold_key(key, axis):
         axis_index = jax.lax.axis_index(axis)
@@ -202,4 +223,4 @@ state, metrics = train_step_dp_fn(state_initialized, x, y)
 state
 
 print("DP Parameters")
-breakpoint()
+# breakpoint()
