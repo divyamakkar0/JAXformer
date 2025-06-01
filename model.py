@@ -479,6 +479,7 @@ class Decoder(nn.Module):
                 k=self.k,
                 model_dtype=self.model_dtype,
             )(x, cache=layer_cache, train=train)
+
             if load is None:
                 load = current_load
             else:
