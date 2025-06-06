@@ -4,6 +4,7 @@ from jax import random
 import math
 from typing import Callable
 from einops import rearrange
+from jaxtyping import Array
 import flax
 from flax import linen as nn
 import tiktoken
@@ -422,12 +423,76 @@ class Block(nn.Module):
 
         return x, (cache, load)
 
+class EncoderBlock(nn.Module):
+    model_dimension: int
+    n_heads: int
+    dropout: float
+    T: int
+    latent_dim: int
+    model_dtype: jnp.dtype
+    dhR: int
+    dhR_blocks: int = 4
+    n_shared: int = 0
+    n_experts: int = 0
+    k: int = 0
+    moe: bool = False
+    grad_checkpoint: bool = False
+
+    @nn.compact
+    def __call__(self, x, cache, train=True ):
+
+        out_cache = []
+        load = None
+        for i in range(self.dhR_blocks):
+            layer_cache = (None, None) if cache is None else cache[i]
+            x, (current_cache, current_load) = Block(
+                model_dimension=self.model_dimension,
+                n_heads=self.n_heads,
+                dropout=self.dropout,
+                T=self.T,
+                latent_dim=self.latent_dim,
+                dhR=self.dhR if (i < self.dhR_blocks - 1)else 0,
+                moe=self.moe,
+                n_experts=self.n_experts,
+                n_shared=self.n_shared,
+                k=self.k,
+                model_dtype=self.model_dtype,
+            )(x, cache=layer_cache, train=train)
+            if load is None:
+                load = current_load
+            else:
+                add_tree = lambda x, y: jax.tree.map(lambda a, b: a + b, x, y)
+                load = (
+                    add_tree(load[0], current_load[0]),
+                    add_tree(load[1], current_load[1]),
+                )
+
+            out_cache.append(current_cache)
+
+        return x, (out_cache, load)
+
+class OutHead(nn.Module):
+    model_dimension: int
+    model_dtype: jnp.dtype
+    out_dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x, embedding_matrix: Array):
+
+        x = LayerNorm(
+            model_dimension=self.model_dimension,
+            model_dtype=self.model_dtype,
+        )(x)
+        x = x @ embedding_matrix.T
+        x = jnp.asarray(x, dtype=self.out_dtype)
+
+        return x
 
 class Decoder(nn.Module):
     model_dimension: int
     n_heads: int
     dhR: int
-    rope_ratio: int
+    dhR_blocks: int
     T: int
     vocab_size: int
     dropout: float
@@ -450,29 +515,18 @@ class Decoder(nn.Module):
         )
         x = embed(x)
 
-        pos_emb = nn.Embed(
-            num_embeddings=self.T,
-            features=self.model_dimension,
-            dtype=self.model_dtype,
-        )(jnp.arange(T, dtype=jnp.int32))
-
         out_cache = []
         load = None
         for i in range(self.blocks):
-            if cache is None:
-                layer_cache = (None, None)
-            else:
-                layer_cache = cache[i]
-
-            x, (current_cache, current_load) = Block(
+            layer_cache = None if cache is None else cache[i]
+            x, (current_cache, current_load) = EncoderBlock(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
                 dropout=self.dropout,
                 T=self.T,
                 latent_dim=self.latent_dim,
-                dhR=0
-                if (self.rope_ratio == 0 or (i % self.rope_ratio == 0 and i > 0))
-                else self.dhR,
+                dhR=self.dhR,
+                dhR_blocks=self.dhR_blocks,
                 moe=self.moe,
                 n_experts=self.n_experts,
                 n_shared=self.n_shared,
@@ -491,26 +545,16 @@ class Decoder(nn.Module):
 
             out_cache.append(current_cache)
 
-        x = LayerNorm(
+        x = OutHead(
             model_dimension=self.model_dimension,
             model_dtype=self.model_dtype,
-        )(x)
-        x = x @ embed.embedding.embedding.T
-        x = jnp.asarray(x, dtype=jnp.float32)
+        )(x, embed.embedding.embedding)
 
         if load is not None:
             load = (load[0] * load[1])
 
         return x, (out_cache, load)
 
-    def get_empty_cache(self):
-        cache = []
-        for i in range(self.blocks):
-            if self.rope_ratio == 0 or (i % self.rope_ratio == 0 and i > 0):
-                cache.append((jnp.array([]), None))
-            else:
-                cache.append((jnp.array([]), jnp.array([])))
-        return cache
 
     def generate(
         self, params, key, x: str = "", *, B=1, k=10000, temperature=1, max_tokens=100
@@ -538,17 +582,11 @@ class Decoder(nn.Module):
 
             return out_next, cache
 
-        import time
-
-        start = time.time()
         for _ in range(max_tokens):
             inp = out[:, -self.T :]
             key, sample_key = jax.random.split(key)
             out_next, cache = sample(sample_key, params, inp, cache, B, k, temperature)
             out = jnp.concatenate([out, out_next], axis=-1)
-
-        end = time.time()
-        print("Time taken for generation:", end - start)
 
         tokens = jax.device_get(out[:, 1:])
         outputs = list(map(lambda x: enc.decode(x), tokens))
@@ -597,13 +635,97 @@ class Decoder(nn.Module):
 
         return model, params
 
+class shardedModel():
+
+    def forward():
+        pass
+
+    def generate():
+        pass
+
+    @staticmethod
+    def get_model(cfg, key: jax.random.key):
+        dtype = jnp.bfloat16 if (cfg.model_dtype == "bfloat16") else jnp.float32
+
+
+        x = jnp.ones((1, cfg.T), dtype=jnp.int32)
+
+        embedding_layer = Embeddings(
+            model_dimension=cfg.model_dimension,
+            vocab_size=cfg.vocab_size,
+            model_dtype=dtype,
+        )
+
+        key, init_key = jax.random.split(key)
+        embedding_params = embedding_layer.init(
+            init_key,
+            x,
+            train=False
+        )['params']
+
+        layer = EncoderBlock(
+            model_dimension=cfg.model_dimension,
+            n_heads=cfg.n_heads,
+            dropout=cfg.dropout,
+            T=cfg.T,
+            latent_dim=cfg.latent_dim,
+            dhR=cfg.dhR,
+            dhR_blocks=cfg.dhR_blocks,
+            moe=cfg.moe,
+            n_experts=cfg.n_experts,
+            n_shared=cfg.n_shared,
+            k=cfg.k,
+            model_dtype=cfg.model_dtype,
+        )
+
+        layer_params = []
+        for l in range(cfg.blocks):
+            key, init_key = jax.random.split(key)
+            layer_params.append(
+                layer(
+                    init_key,
+                    x,
+                    train=False
+                )['params']
+            )
+
+        layer_params = jax.tree.map(
+            lambda *x: jnp.concat(x, axis=0),
+            *layer_params
+        )
+
+        end_layer = OutHead(
+            model_dimension=cfg.model_dimension,
+            model_dtype=cfg.model_dtype,
+        )
+
+        key, init_key = jax.random.split(key)
+        out_params = end_layer.init(
+            init_key,
+            x,
+            embedding_params.embedding.embedding
+        )
+
+        params = (
+            embedding_params,
+            layer_params,
+            out_params
+        )
+        model = (
+            embedding_layer,
+            layer,
+            end_layer
+        )
+
+        return model, params
+
 
 if __name__ == "__main__":
     model = Decoder(
         model_dimension=64,
         n_heads=4,
-        dhR=0,
-        rope_ratio=0,
+        dhR=64,
+        dhR_blocks=1,
         T=32,
         vocab_size=10000,
         dropout=0.1,
@@ -613,6 +735,8 @@ if __name__ == "__main__":
         k=2,
         moe=True,
         latent_dim=16,
+        model_dtype="bfloat16",
+        grad_checkpoint=False
     )
     key = jax.random.key(0)
     key, init_key, dropout_key = jax.random.split(key, 3)
@@ -620,5 +744,6 @@ if __name__ == "__main__":
     x = jax.random.randint(init_key, (16, 32), 0, 32, dtype=jnp.int32)
     params = model.init(init_key, x, train=True)["params"]
     print("Model parameters initialized successfully.")
-    x = model.apply({"params": params}, x, train=True, rngs={"dropout": dropout_key})
+    x, _ = model.apply({"params": params}, x, train=True, rngs={"dropout": dropout_key})
+    breakpoint() 
     print(x.shape)
