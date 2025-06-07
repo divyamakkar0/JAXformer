@@ -47,32 +47,37 @@ def setup_dp():
     return mesh, count
 
 
-def init_state(mesh, config, model, params):
+def init_state(mesh, config, model, params, *, step=0, opt_state = None ):
+
+    lr_scheduler = optax.warmup_cosine_decay_schedule(
+        init_value=config.lr.min_lr,
+        peak_value=config.lr.max_lr,
+        warmup_steps=config.lr.warmup_steps,
+        decay_steps=config.lr.end_steps,
+        end_value=config.lr.end_lr,
+    )
+
+    tx = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip_norm),
+        optax.inject_hyperparams(optax.adamw)(lr_scheduler),
+    )
+
+    if opt_state is None:
+        opt_state = tx.init(params)
+
     @jax.jit
-    @partial(jax.shard_map, mesh=mesh, in_specs=(P()), out_specs=(P()))
-    def state_fn(params):
-        lr_scheduler = optax.warmup_cosine_decay_schedule(
-            init_value=config.lr.min_lr,
-            peak_value=config.lr.max_lr,
-            warmup_steps=config.lr.warmup_steps,
-            decay_steps=config.lr.end_steps,
-            end_value=config.lr.end_lr,
-        )
-
-        tx = optax.chain(
-            optax.clip_by_global_norm(config.grad_clip_norm),
-            optax.inject_hyperparams(optax.adamw)(lr_scheduler),
-        )
-
-        state = train_state.TrainState.create(
+    @partial(jax.shard_map, mesh=mesh, in_specs=(P(), P()), out_specs=(P()))
+    def state_fn(params, opt_state):
+        state = train_state.TrainState(
+            step=step,
             apply_fn=model.apply,
             params=params,
             tx=tx,
+            opt_state=opt_state
         )
-
         return state
 
-    state_init = state_fn(params)
+    state_init = state_fn(params, opt_state)
     return state_init
 
 
@@ -238,10 +243,13 @@ def main(config: config):
     use_wandb = config.wandb is True
     wandb_id = None
     if load:
+
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
 
+        init_step = tree_state["step"]
         key.key = tree_state["key"]
-        state = flax.serialization.from_state_dict(state, tree_state["state"])
+        unsharded_state = flax.serialization.from_state_dict(state, tree_state["state"])
+        state = init_state(mesh, config, model, params=unsharded_state.params, step=init_step,opt_state=unsharded_state.opt_state)
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]
@@ -251,7 +259,7 @@ def main(config: config):
         val_dataset.shard_idx = tree_state["val_shard_idx"]
         val_dataset.load_next_shard()
 
-        init_step = tree_state["step"]
+
         wandb_id = tree_state["wandb_id"]
         if use_wandb:
             assert wandb_id is not None, "wandb_id is None"
@@ -351,9 +359,7 @@ def main(config: config):
 
             print(log_string)
 
-            params_host_device = (
-                jax.device_put(jax.device_get(state.params), mesh.devices[0]),
-            )
+            params_host_device = jax.device_put(jax.device_get(state.params), mesh.devices[0])
             tokens = model.generate(
                 params_host_device,
                 sample_key,
