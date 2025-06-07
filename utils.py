@@ -5,6 +5,7 @@ import jax.numpy as jnp
 from jax.numpy import dtype
 import json
 
+
 @dataclass
 class modelConfig:
     """model config class"""
@@ -13,7 +14,7 @@ class modelConfig:
     n_heads: int
     T: int
     dhR: int
-    rope_ratio: int
+    dhR_blocks: int
     vocab_size: int
     dropout: float
     blocks: int
@@ -73,18 +74,22 @@ def parse_args():
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--vocab_size", type=int, default=50257)
-    parser.add_argument("--blocks", type=int, default=6)
+    parser.add_argument("--blocks", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--dhR", type=int, default=64)
-    parser.add_argument("--rope_ratio", type=int, default=4)
+    parser.add_argument("--dhR_blocks", type=int, default=4)
     parser.add_argument("--moe", action="store_true")
     parser.add_argument("--n_experts", type=int, default=4)
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument("--train_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/train")
-    parser.add_argument("--val_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/test")
+    parser.add_argument(
+        "--train_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/train"
+    )
+    parser.add_argument(
+        "--val_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/test"
+    )
     parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--val_batch_size", type=int, default=16)
 
@@ -119,7 +124,7 @@ def parse_args():
         n_heads=args.n_heads,
         T=args.T,
         dhR=args.dhR,
-        rope_ratio=args.rope_ratio,
+        dhR_blocks=args.dhR_blocks,
         vocab_size=args.vocab_size,
         dropout=args.dropout,
         blocks=args.blocks,

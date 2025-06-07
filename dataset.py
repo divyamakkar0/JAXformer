@@ -73,7 +73,7 @@ class Dataset:
     @classmethod
     def getDataset(cls, cfg: dataConfig) -> Tuple["Dataset", "Dataset"]:
         train_dataset_path = os.path.abspath(cfg.train_dataset_path)
-        
+
         if os.path.isdir(train_dataset_path):
             train_dataset_path = [
                 os.path.join(train_dataset_path, f)

@@ -1,10 +1,8 @@
 import os
-
 os.environ['XLA_FLAGS'] = (
     '--xla_gpu_triton_gemm_any=True '
     '--xla_gpu_enable_latency_hiding_scheduler=true '
 )
-
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import jax
@@ -35,9 +33,8 @@ from dataclasses import asdict
 
 import orbax.checkpoint as ocp
 
-from jax.experimental.shard_map import shard_map
 from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P, NamedSharding
+from jax.sharding import PartitionSpec as P
 from functools import partial
 import numpy as np
 
@@ -109,13 +106,12 @@ def loss(model, alpha, params, key, x, y, train):
 
     return loss, (load, loss_cross, loss_balance)
 
-def step(loss_fn, grad_steps, params, key, x,y, train=True):
 
+def step(loss_fn, grad_steps, params, key, x, y, train=True):
     if train:
         loss_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
 
     def step_fn(grads, batch):
-
         *data, key = batch
         val = loss_fn(params, key, *data, train=train)
 
@@ -144,34 +140,22 @@ def step(loss_fn, grad_steps, params, key, x,y, train=True):
 
         return grads, metrics
 
-    B,T = x.shape
+    B, T = x.shape
 
     x = x.reshape(grad_steps, B // grad_steps, T)
     y = y.reshape(grad_steps, B // grad_steps, T)
 
     grads = None
     if train:
-        grads = jax.tree.map(
-            lambda x: jnp.zeros_like(x), params
-        )
+        grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
 
-    grads, metrics = jax.lax.scan(
-        step_fn,
-        init=grads,
-        xs=(x, y, key),
-        unroll=1
-    )
+    grads, metrics = jax.lax.scan(step_fn, init=grads, xs=(x, y, key), unroll=1)
 
     if grads is not None:
-        grads = jax.tree.map(
-            lambda x: x / grad_steps, grads
-        )
+        grads = jax.tree.map(lambda x: x / grad_steps, grads)
         grads = jax.lax.pmean(grads, axis_name="data")
 
-    metrics = jax.tree.map(
-        lambda x: x.mean(),
-        metrics
-    )
+    metrics = jax.tree.map(lambda x: x.mean(), metrics)
     metrics = jax.lax.pmean(metrics, axis_name="data")
 
     return grads, metrics
@@ -192,8 +176,8 @@ def main(config: config):
     mesh, count = setup_dp()
     state = init_state(mesh, config, model, global_params)
 
-    config.data.train_batch_size *= (count * config.grad_step)
-    config.data.val_batch_size *= (count * config.eval_steps)
+    config.data.train_batch_size *= count * config.grad_step
+    config.data.val_batch_size *= count * config.eval_steps
     print("setting up dataset")
     (
         train_dataset,
@@ -207,7 +191,7 @@ def main(config: config):
     train_step = jax.jit(
         jax.shard_map(
             lambda key, params, x, y: step(
-                loss_fn, config.grad_step, params, key,  x, y, train=True
+                loss_fn, config.grad_step, params, key, x, y, train=True
             ),
             mesh=mesh,
             in_specs=(P("data"), P(), P("data"), P("data")),
@@ -300,11 +284,9 @@ def main(config: config):
     sample_key = key()
 
     for current_step in range(init_step, total_steps):
-
-
         with jax.named_scope("train_step"):
             if count * config.grad_step == 1:
-                keys =  jnp.array([key()])
+                keys = jnp.array([key()])
             else:
                 keys = key(count * config.grad_step)
             grads, metrics = train_step(
@@ -332,9 +314,7 @@ def main(config: config):
             end = time.time()
             total_time = end - start
             tokens_per_second = (
-                config.data.train_batch_size
-                * config.model.T
-                * config.checkpoint_steps
+                config.data.train_batch_size * config.model.T * config.checkpoint_steps
             ) / total_time
             train_loss = (
                 (train_loss / config.checkpoint_steps)
@@ -344,7 +324,7 @@ def main(config: config):
 
             with jax.named_scope("eval_step"):
                 if count * config.grad_step == 1:
-                    keys =  jnp.array([key()])
+                    keys = jnp.array([key()])
                 else:
                     keys = key(count * config.grad_step)
                 metrics_val = eval_step(
@@ -371,8 +351,11 @@ def main(config: config):
 
             print(log_string)
 
-            tokens = model.generate(
+            params_host_device = (
                 jax.device_put(jax.device_get(state.params), mesh.devices[0]),
+            )
+            tokens = model.generate(
+                params_host_device,
                 sample_key,
                 "",
                 B=config.inference_batch,
