@@ -226,7 +226,7 @@ def main(config: config):
 
     def save_checkpoint(step, wandb_id):
         save_tree = {
-            "state": flax.serialization.to_state_dict(state),
+            "state": flax.serialization.to_state_dict(jax.device_get(state)),
             "key": key.key,
             "train_step_idx": train_dataset.step_idx,
             "train_shard_idx": (train_dataset.shard_idx - 1)
@@ -249,6 +249,7 @@ def main(config: config):
         init_step = tree_state["step"]
         key.key = tree_state["key"]
         unsharded_state = flax.serialization.from_state_dict(state, tree_state["state"])
+        breakpoint()
         state = init_state(mesh, config, model, params=unsharded_state.params, step=init_step,opt_state=unsharded_state.opt_state)
 
         train_dataset.step_idx = tree_state["train_step_idx"]
