@@ -7,3 +7,5 @@ valSet/*
 results/*
 *.env
 wandb/*
+
+!tpuReq.txt
