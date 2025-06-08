@@ -18,7 +18,7 @@ for file_name in python_files:
                 "Something went wrong. Please try to download the file directly from the GitHub repository, or contact the author with the full output including the following error:\n",
                 e,
             )
-from utils import simulate_CPU_devices
+from tensor_parallelism.utils import simulate_CPU_devices
 
 simulate_CPU_devices()
 

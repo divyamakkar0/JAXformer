@@ -21,7 +21,7 @@ for file_name in python_files:
             )
 
 # %%
-from utils import simulate_CPU_devices
+from tensor_parallelism.utils import simulate_CPU_devices
 
 simulate_CPU_devices()
 
