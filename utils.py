@@ -48,6 +48,15 @@ class LRConfig:
 
 
 @dataclass
+class deviceConfig:
+    """class for distrbuted config"""
+
+    n_axis: int
+    n_device_axis: List[int]
+    n_device_name: List[str]
+
+
+@dataclass
 class config:
     """class for keeping track of model args"""
 
@@ -56,6 +65,7 @@ class config:
     lr: LRConfig
     training_steps: int
     name: str
+    device_config: deviceConfig
     grad_step: int = 1
     alpha: float = 0.001
     output_dir: str = "./results/"
@@ -117,6 +127,23 @@ def parse_args():
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 
+    parser.add_argument(
+        "--n_axis",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--n_device_axis",
+        type=int,
+        nargs="*",
+        default=[1],
+    )
+    parser.add_argument(
+        "--n_device_name",
+        type=str,
+        nargs="*",
+        default=["data"],
+    )
     args = parser.parse_args()
 
     model_cfg = modelConfig(
@@ -153,12 +180,19 @@ def parse_args():
         end_steps=args.end_steps,
     )
 
+    device_cfg = deviceConfig(
+        n_axis=args.n_axis,
+        n_device_axis=args.n_device_axis,
+        n_device_name=args.n_device_name,
+    )
+
     cfg = config(
         model=model_cfg,
         data=data_cfg,
         lr=lr_cfg,
         name=args.name,
         output_dir=args.output_dir,
+        device_config=device_cfg,
         checkpoint_steps=args.checkpoint_steps,
         checkpoint_manager=args.checkpoint_manager,
         seed=args.seed,

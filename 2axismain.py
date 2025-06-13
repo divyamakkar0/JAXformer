@@ -39,22 +39,39 @@ from functools import partial
 import numpy as np
 
 
-def setup_devices():
+def setup_devices(cfg: config):
+    device_cfg = cfg.device_config
+    assert device_cfg.n_axis == len(device_cfg.n_device_axis)
+    assert device_cfg.n_axis == len(device_cfg.n_device_name)
+
     jax.distributed.initialize()
     devices = np.array(jax.devices())
+    n_devices = devices.shape[0]
 
-    print("Available TPU Devices:")
-    for i, d in enumerate(devices):
-        print(
-            f"  [{i}] ID: {d.id}, Process: {d.process_index}, "
-            f"Coords: {d.coords}, Core: {d.core_on_chip}"
-        )
+    assert n_devices == np.prod(device_cfg.n_device_axis)
 
-    mesh = Mesh(devices, axis_names=("data"))
-    count = devices.shape[0]
+    while devices.ndim < device_cfg.n_axis:
+        devices = devices[..., None]
+    devices = devices.reshape(*device_cfg.n_device_axis)
+
+    platform = jax.devices()[0].platform
+    if platform == "tpu":
+        print("Available TPU Devices:")
+        print(f"Device array shape: {devices.shape}")
+        for idx in np.ndindex(devices.shape):
+            d = devices[idx]
+            print(
+                f"  {idx} ID: {d.id}, Process: {d.process_index}, "
+                f"Coords: {d.coords}, Core: {d.core_on_chip}"
+            )
+
+    mesh = Mesh(devices, axis_names=device_cfg.n_device_name)
+    count = devices.shape
+
     return mesh, count
 
 
+#TODO: init model
 def init_state(mesh, config, model, params, *, step=0, opt_state=None):
     lr_scheduler = optax.warmup_cosine_decay_schedule(
         init_value=config.lr.min_lr,
@@ -76,7 +93,11 @@ def init_state(mesh, config, model, params, *, step=0, opt_state=None):
     @partial(jax.shard_map, mesh=mesh, in_specs=(P(), P()), out_specs=(P()))
     def state_fn(params, opt_state):
         state = train_state.TrainState(
-            step=step, apply_fn=model.apply, params=params, tx=tx, opt_state=opt_state
+            step=step,
+            apply_fn=model.apply,
+            params=params,
+            tx=tx,
+            opt_state=opt_state
         )
         return state
 
@@ -171,7 +192,7 @@ def step(loss_fn, grad_steps, params, key, x, y, train=True):
 
 def main(config: config):
     print("setting up devices")
-    mesh, count = setup_devices()
+    mesh, count = setup_devices(config)
 
     key = KeyState(config.seed)
 
