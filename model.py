@@ -759,5 +759,3 @@ if __name__ == "__main__":
     print(mesh)
     model, params_2 = shardedModel.get_model(model_cfg, mesh, key)
     print_params(params_2)
-
-    breakpoint()
