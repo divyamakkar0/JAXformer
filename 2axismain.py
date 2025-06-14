@@ -40,7 +40,6 @@ import numpy as np
 
 
 def setup_devices(cfg: config):
-
     device_cfg = cfg.device_config
     assert 2 == len(device_cfg.n_device_axis)
 
@@ -61,13 +60,13 @@ def setup_devices(cfg: config):
                 f"Coords: {d.coords}, Core: {d.core_on_chip}"
             )
 
-    mesh = Mesh(devices, axis_names=('data', 'model'))
+    mesh = Mesh(devices, axis_names=("data", "model"))
     count = devices.shape
 
     return mesh, count
 
 
-#TODO: init model
+# TODO: init model
 # Figure out how to do it dynamically like if you have 3 axis shardings what am i suppose to do in that sense?
 def init_state(mesh, config, model, params, *, step=0, opt_state=None):
     lr_scheduler = optax.warmup_cosine_decay_schedule(
@@ -90,11 +89,7 @@ def init_state(mesh, config, model, params, *, step=0, opt_state=None):
     @partial(jax.shard_map, mesh=mesh, in_specs=(P(), P()), out_specs=(P()))
     def state_fn(params, opt_state):
         state = train_state.TrainState(
-            step=step,
-            apply_fn=model.apply,
-            params=params,
-            tx=tx,
-            opt_state=opt_state
+            step=step, apply_fn=model.apply, params=params, tx=tx, opt_state=opt_state
         )
         return state
 

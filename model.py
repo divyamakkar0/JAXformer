@@ -1,13 +1,14 @@
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 from flax import linen as nn
 from einops import rearrange
-import math
 
 import tiktoken
 from utils import modelConfig
 from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
+from functools import partial
 
 
 class Embeddings(nn.Module):
@@ -46,21 +47,27 @@ class RoPE:
         self.cos = jnp.cos(freq * theta)
         self.sin = jnp.sin(freq * theta)
 
-    def __call__(self, x: Array, t_start: int, offset: Optional[int] = None, transpose: bool = False) -> Array:
+    def __call__(
+        self,
+        x: Array,
+        t_start: int,
+        offset: Optional[int] = None,
+        transpose: bool = False,
+    ) -> Array:
         B, T, C = x.shape
-        x_proj = x.astype('float32')
+        x_proj = x.astype("float32")
 
         if offset is None:
             offset = T
 
-        cos_rope = x_proj * self.cos[t_start:t_start + offset, :]
+        cos_rope = x_proj * self.cos[t_start : t_start + offset, :]
 
         x_inter = x_proj.reshape((B, T, C // 2, 2))
         x_inter = jnp.flip(x_inter, axis=-1) * jnp.array([-1, 1])
         x_inter = x_inter.reshape((B, T, C))
         if transpose:
             x_inter *= -1
-        sin_rope = x_inter * self.sin[t_start:t_start + offset, :]
+        sin_rope = x_inter * self.sin[t_start : t_start + offset, :]
 
         x_rope = cos_rope + sin_rope
         x = x_rope.astype(x.dtype)
@@ -78,9 +85,9 @@ class MLA(nn.Module):
     dropout: float = 0.0
 
     def setup(self):
-        self.W_down = nn.Dense(features=2*self.latent_dim, dtype=self.model_dtype)
+        self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
 
-        self.W_uKV = nn.Dense(features=2*self.model_dim, dtype=self.model_dtype)
+        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
         self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
@@ -113,12 +120,9 @@ class MLA(nn.Module):
     ) -> Tuple[Array, Tuple[Array, Array]]:
         B, T, C = x.shape
 
-        cKVt, cqt = jnp.split(
-            self.W_down(x), 2, axis=-1
-        )
+        cKVt, cqt = jnp.split(self.W_down(x), 2, axis=-1)
 
         if self.rope:
-
             t_start = 0
             if cKV_cache is not None:
                 t_start = cKV_cache.shape[1]
@@ -126,9 +130,7 @@ class MLA(nn.Module):
             kRt = self.rope_k(self.Wkr(x), t_start)
 
             qRt = self.rope_q(self.Wqr(x), t_start)
-            qRt = rearrange(
-                qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR
-            )
+            qRt = rearrange(qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR)
 
         if not train:
             if cKV_cache is not None:
@@ -140,7 +142,7 @@ class MLA(nn.Module):
                     kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
                 kRT_cache = kRt
 
-        k,v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
+        k, v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
         q = self.W_uQ(cqt)
 
         k = rearrange(k, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
@@ -149,14 +151,12 @@ class MLA(nn.Module):
 
         if self.rope:
             q = jnp.concatenate([q, qRt], axis=-1)
-            kRt = jnp.repeat(
-                kRt[:, None, :, :], self.n_heads, axis=1
-            )
+            kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
             k = jnp.concatenate([k, kRt], axis=-1)
 
         def scaledDotProd(q, k, v, mask):
-            q = q.astype('float32')
-            k = k.astype('float32')
+            q = q.astype("float32")
+            k = k.astype("float32")
             w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.dk**0.5))
             w = jnp.where(mask == 0, -9e15, w)
             w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
@@ -179,6 +179,7 @@ class MLA(nn.Module):
         output = self.output(output)
         output = self.out_dropout(output, deterministic=not train)
         return output, (cKV_cache, kRT_cache)
+
 
 class NoisyKGate(nn.Module):
     model_dimension: int
@@ -227,6 +228,7 @@ class MoE(nn.Module):
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
                 grad_checkpoint=self.grad_checkpoint,
+                name=f"expert_{i}",
             )
             for i in range(self.n_experts)
         ]
@@ -239,13 +241,19 @@ class MoE(nn.Module):
         )
 
     def get_gScores(self, scores: Array, indices: Array, x: Array, train: bool = True):
+
+        def head_fn(i):
+            return lambda mdl, x: mdl.experts[i](x, train=train)
+
         expert_lambda = [
-            lambda mdl, x: mdl.experts[i](x, train=train) for i in range(self.n_experts)
+            head_fn(i) for i in range(self.n_experts)
         ]
 
         if self.is_mutable_collection("params"):
             for expert_ffn in expert_lambda:
                 _ = expert_ffn(self, x)
+
+            return jnp.zeros_like(x)
 
         expert_fn = lambda j, experts, x: nn.switch(j, expert_lambda, self, x)
         expert_parallel = jax.vmap(fun=expert_fn, in_axes=(0, None, None), out_axes=(0))
@@ -311,9 +319,15 @@ class FFBody(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        x = nn.Dense(features=self.ff_dim, dtype=self.model_dtype)(x)
+        x = nn.Dense(
+            features=self.ff_dim,
+            dtype=self.model_dtype,
+        )(x)
         x = nn.gelu(x)
-        x = nn.Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
+        x = nn.Dense(
+            features=self.model_dimension,
+            dtype=self.model_dtype,
+        )(x)
 
         return x
 
@@ -363,8 +377,6 @@ class Block(nn.Module):
         cache: Optional[Tuple[Array, Optional[Array]]] = (None, None),
         train: bool = True,
     ):
-
-
         x_norm = nn.LayerNorm()(x)
 
         x_up, cache = MLA(
@@ -463,23 +475,6 @@ class EncoderBlock(nn.Module):
             out_cache.append(current_cache)
 
         return x, (out_cache, load)
-
-
-class OutHead(nn.Module):
-    model_dimension: int
-    vocab_size: int
-    model_dtype: jnp.dtype
-    out_dtype: jnp.dtype = jnp.float32
-
-    @nn.compact
-    def __call__(self, x: Array) -> Array:
-        x = nn.LayerNorm()(x)
-        x = nn.Dense(
-            features=self.vocab_size,
-            dtype=self.model_dtype,
-        )(x)
-
-        return x
 
 
 class Decoder(nn.Module):
@@ -660,7 +655,7 @@ class shardedModel:
 
     @staticmethod
     def generate(
-        model: Tuple[Embeddings, EncoderBlock, OutHead],
+        model: Tuple[Embeddings, EncoderBlock],
         params: PyTree,
         key: jax.random.key,
         mesh: jax.sharding.Mesh,
@@ -668,7 +663,7 @@ class shardedModel:
         pass
 
     @staticmethod
-    def get_model(cfg, key: jax.random.key):
+    def get_model(cfg, mesh: jax.sharding.Mesh, key: jax.random.key):
         dtype = jnp.bfloat16 if (cfg.model_dtype == "bfloat16") else jnp.float32
 
         x = jnp.ones((1, cfg.T), dtype=jnp.int32)
@@ -682,8 +677,10 @@ class shardedModel:
         key, init_key = jax.random.split(key)
         embedding_params = embedding_layer.init(init_key, x)["params"]
 
-        # breakpoint()
+        model_devices = mesh.devices.shape[1]
+        assert cfg.blocks // model_devices
 
+        layers_per_device = cfg.blocks // model_devices
         layer = EncoderBlock(
             model_dimension=cfg.model_dimension,
             n_heads=cfg.n_heads,
@@ -699,33 +696,41 @@ class shardedModel:
             model_dtype=cfg.model_dtype,
         )
 
-        x = jnp.ones((1, cfg.T, cfg.model_dimension))
-        layer_params = []
-        for l in range(cfg.blocks):
-            key, init_key = jax.random.split(key)
-            current_params = layer.init(init_key, x, train=False)["params"]
-            layer_params.append(current_params)
-
-        layer_params = jax.tree.map(lambda *x: jnp.concat(x, axis=0), *layer_params)
-
-        end_layer = OutHead(
-            model_dimension=cfg.model_dimension,
-            model_dtype=cfg.model_dtype,
+        @partial(
+            jax.shard_map, mesh=mesh, in_specs=(P("model")), out_specs=(P("model"))
         )
+        def init_pipeline(key):
+            key = key[0]
+            x = jnp.ones((1, cfg.T, cfg.model_dimension))
+            layer_params = []
+            for _ in range(layers_per_device):
+                key, init_key = jax.random.split(key)
+                current_params = layer.init(init_key, x, train=False)["params"]
+                layer_params.append(current_params)
 
-        key, init_key = jax.random.split(key)
+            layer_params = jax.tree.map(lambda *x: jnp.concat(x, axis=0), *layer_params)
 
-        out_params = end_layer.init(
-            init_key, x, embedding_params["embedding"]["embedding"]
-        )
+            return layer_params
 
-        params = (embedding_params, layer_params, out_params)
-        model = (embedding_layer, layer, end_layer)
+        key, *layer_keys = jax.random.split(key, model_devices + 1)
+        layer_keys = jnp.array(layer_keys)
+        print(layer_keys.shape)
+        layer_params = init_pipeline(layer_keys)
+        params = (embedding_params, layer_params)
+        model = (embedding_layer, layer)
 
         return model, params
 
 
 if __name__ == "__main__":
+    import json
+    import numpy as np
+    def print_params(params):
+        def tree_shapes(tree):
+            return jax.tree_util.tree_map(lambda x: tuple(x.shape), tree)
+        shapes = tree_shapes(params)
+        print(json.dumps(shapes, indent=4))
+
     model_cfg = modelConfig(
         model_dimension=64,
         n_heads=4,
@@ -734,7 +739,7 @@ if __name__ == "__main__":
         T=32,
         vocab_size=10000,
         dropout=0.1,
-        blocks=2,
+        blocks=4,
         n_experts=4,
         n_shared=2,
         k=2,
@@ -744,7 +749,15 @@ if __name__ == "__main__":
         grad_checkpoint=False,
     )
 
-    key = jax.random.key(0)
+    key = jax.random.PRNGKey(0)
 
     model, params = Decoder.get_model(model_cfg, key)
-    model, params = shardedModel.get_model(model_cfg, key)
+    print_params(params)
+
+    devices = np.array(jax.devices()).reshape((2, 4))
+    mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
+    print(mesh)
+    model, params_2 = shardedModel.get_model(model_cfg, mesh, key)
+    print_params(params_2)
+
+    breakpoint()
