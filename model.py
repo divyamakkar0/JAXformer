@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from einops import rearrange
+import math
 
 import tiktoken
 from utils import modelConfig
@@ -20,42 +21,50 @@ class Embeddings(nn.Module):
             features=self.model_dimension,
             dtype=self.model_dtype,
         )
+        self.layer_norm = nn.LayerNorm()
 
-    @nn.compact
-    def __call__(self, x: Array) -> Array:
-        x = self.embedding(x) * jnp.sqrt(self.model_dimension)
+    def __call__(self, x: Array, out: bool = False) -> Array:
+        if not out:
+            x = self.embedding(x)
+        else:
+            x = self.layer_norm(x)
+            x = self.embedding.attend(x)
         return x
 
 
 class RoPE:
-    def __init__(self, T: int, model_dim: int, model_dtype: jnp.dtype):
-        self.T = T
-        self.model_dim = model_dim
-        self.model_dtype = model_dtype
+    def __init__(self, T: int, model_dim: int):
         assert model_dim % 2 == 0, "model_dim must be even"
 
-        freq = jnp.arange(self.T, dtype=jnp.float32)[:, None]
-        pos = (
-            jnp.arange(self.model_dim // 2, dtype=jnp.float32)[:, None]
-            .repeat(2, axis=-1)
-            .reshape(1, -1)
-        )
+        freq = jnp.arange(T, dtype=jnp.float32)[:, None] + 1
 
-        theta = 10000 ** (-2 * pos / self.model_dim)
-        self.cos = jnp.cos(freq * theta).astype(self.model_dtype)
-        self.sin = jnp.sin(freq * theta).astype(self.model_dtype)
+        pos = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
+        pos = pos.repeat(2, axis=-1).reshape(1, -1)
+        log_theta_base = jnp.log(10000.0)
+        theta = jnp.exp(-2 * pos / model_dim * log_theta_base)
 
-    def __call__(self, x: Array, t_start: int, t_end: int) -> Array:
-        B, nh, T, C = x.shape
-        assert t_end - t_start == T, "T of x must be the same as T indices"
+        self.cos = jnp.cos(freq * theta)
+        self.sin = jnp.sin(freq * theta)
 
-        cos_rope = x * self.cos[None, None, t_start:t_end, :]
-        x_inter = x.reshape((B, nh, T, C // 2, 2))
+    def __call__(self, x: Array, t_start: int, offset: Optional[int] = None, transpose: bool = False) -> Array:
+        B, T, C = x.shape
+        x_proj = x.astype('float32')
+
+        if offset is None:
+            offset = T
+
+        cos_rope = x_proj * self.cos[t_start:t_start + offset, :]
+
+        x_inter = x_proj.reshape((B, T, C // 2, 2))
         x_inter = jnp.flip(x_inter, axis=-1) * jnp.array([-1, 1])
-        x_inter = x_inter.reshape((B, nh, T, C))
-        x_pos = cos_rope + x_inter * self.sin[None, None, t_start:t_end, :]
+        x_inter = x_inter.reshape((B, T, C))
+        if transpose:
+            x_inter *= -1
+        sin_rope = x_inter * self.sin[t_start:t_start + offset, :]
 
-        return x_pos
+        x_rope = cos_rope + sin_rope
+        x = x_rope.astype(x.dtype)
+        return x
 
 
 class MLA(nn.Module):
@@ -69,8 +78,9 @@ class MLA(nn.Module):
     dropout: float = 0.0
 
     def setup(self):
-        self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
-        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
+        self.W_down = nn.Dense(features=2*self.latent_dim, dtype=self.model_dtype)
+
+        self.W_uKV = nn.Dense(features=2*self.model_dim, dtype=self.model_dtype)
         self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
@@ -83,13 +93,15 @@ class MLA(nn.Module):
             self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
         self.out_dropout = nn.Dropout(rate=self.dropout)
 
-        self.rope = None
+        self.rope = False
         if self.dhR != 0:
+            self.rope = True
             self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
             self.Wqr = nn.Dense(
                 features=(self.dhR * self.n_heads), dtype=self.model_dtype
             )
-            self.rope = RoPE(model_dim=self.dhR, T=self.T, model_dtype=self.model_dtype)
+            self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
+            self.rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
 
     def __call__(
         self,
@@ -100,20 +112,23 @@ class MLA(nn.Module):
         train=True,
     ) -> Tuple[Array, Tuple[Array, Array]]:
         B, T, C = x.shape
-        cKVt, cqt = jnp.split(self.W_down(x), 2, axis=-1)
+
+        cKVt, cqt = jnp.split(
+            self.W_down(x), 2, axis=-1
+        )
 
         if self.rope:
+
+            t_start = 0
             if cKV_cache is not None:
-                t_end = cKV_cache.shape[1] + T
-            t_start = t_end - T
+                t_start = cKV_cache.shape[1]
 
-            kRt = self.rope(self.Wkr(x)[:, None, ...], t_start, t_end)
-            kRt = kRt.repeat(self.n_heads, axis=1)
+            kRt = self.rope_k(self.Wkr(x), t_start)
 
+            qRt = self.rope_q(self.Wqr(x), t_start)
             qRt = rearrange(
-                self.Wqr(x), "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR
+                qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR
             )
-            qRt = self.rope(qRt, t_idx, T)
 
         if not train:
             if cKV_cache is not None:
@@ -121,47 +136,42 @@ class MLA(nn.Module):
             cKV_cache = cKVt
 
             if self.rope:
-                krt_head = kRt[:, 0, :, :]
-                if kRT_cache is None:
-                    kRT_cache = krt_head
-                else:
-                    kRT_cache = jnp.concatenate([kRT_cache, krt_head], axis=1)
-                kRt = kRT_cache[:, None, ...].repeat(self.n_heads, axis=1)
+                if kRT_cache is not None:
+                    kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
+                kRT_cache = kRt
 
-            if cKV_cache.shape[1] >= self.T:
-                cKV_cache = cKV_cache[:, -self.T + 1 :, :]
-                if self.rope:
-                    kRT_cache = kRT_cache[:, -self.T + 1 :, :]
-
-        v_k = rearrange(
-            self.W_uKV(cKVt), "B T (nh d) -> B nh T d", nh=self.n_heads, d=2 * self.dk
-        )
-        v, k = jnp.split(v_k, 2, axis=-1)
-
-        if self.rope:
-            k = jnp.concatenate([k, kRt], axis=-1)
-
+        k,v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
         q = self.W_uQ(cqt)
+
+        k = rearrange(k, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
         q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
 
         if self.rope:
             q = jnp.concatenate([q, qRt], axis=-1)
+            kRt = jnp.repeat(
+                kRt[:, None, :, :], self.n_heads, axis=1
+            )
+            k = jnp.concatenate([k, kRt], axis=-1)
 
         def scaledDotProd(q, k, v, mask):
+            q = q.astype('float32')
+            k = k.astype('float32')
             w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.dk**0.5))
-            # w = jnp.where(mask == 0, -9e15, w)
-            w = nn.softmax(w, axis=-1)
+            w = jnp.where(mask == 0, -9e15, w)
+            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
             output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
-
             return output
 
         if self.grad_checkpoint:
             scaledDotProd = jax.remat(scaledDotProd)
 
-        q_len = q.shape[2]
-        k_len = k.shape[2]
-        mask = jnp.ones((B, self.n_heads, q_len, k_len))
-        mask = jnp.tril(mask)
+        if T == 1:
+            mask = jnp.ones((B, self.n_heads, 1, k.shape[2]))
+        else:
+            mask = jnp.tril(
+                jnp.ones((B, self.n_heads, q.shape[2], k.shape[2])),
+            )
 
         output = scaledDotProd(q, k, v, mask)
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
@@ -169,141 +179,6 @@ class MLA(nn.Module):
         output = self.output(output)
         output = self.out_dropout(output, deterministic=not train)
         return output, (cKV_cache, kRT_cache)
-
-
-class Attention(nn.Module):
-    """
-    Normal Multi-Head Attention Layer w/o RoPE
-    """
-
-    model_dim: int
-    n_heads: int
-    T: int
-    latent_dim: int
-    dhR: int
-    model_dtype: jnp.dtype
-    grad_checkpoint: bool
-    dropout: float = 0.0
-
-    @nn.compact
-    def __call__(
-        self,
-        x: Array,
-        *,
-        cKV_cache: Optional[Array] = None,  # actually k cache for MHA
-        kRT_cache: Optional[Array] = None,  # actually v cache for MHA
-        train=True,
-    ) -> Tuple[Array, Tuple[Array, Array]]:
-        B, T, C = x.shape
-
-        q, k, v = jnp.split(
-            nn.Dense(
-                features=3 * self.model_dim,
-                dtype=self.model_dtype,
-            )(x),
-            3,
-            axis=-1,
-        )
-
-        if not train:
-            # Handle K cache
-            if cKV_cache is not None:
-                k = jnp.concatenate([cKV_cache, k], axis=1)
-            # Update cache (before potential truncation)
-            cKV_cache = k
-
-            # Handle V cache
-            if kRT_cache is not None:
-                v = jnp.concatenate([kRT_cache, v], axis=1)
-            # Update cache (before potential truncation)
-            kRT_cache = v
-
-            # Truncate cache if it exceeds max length
-            # Keep the most recent T tokens
-            if cKV_cache.shape[1] > self.T:
-                cKV_cache = cKV_cache[:, -self.T :, :]
-                kRT_cache = kRT_cache[:, -self.T :, :]
-                # Also truncate k, v for current computation
-                k = k[:, -self.T :, :]
-                v = v[:, -self.T :, :]
-
-        # Reshape for multi-head attention
-        q = rearrange(
-            q,
-            "B T (nh d) -> B nh T d",
-            nh=self.n_heads,
-            d=self.model_dim // self.n_heads,
-        )
-        k = rearrange(
-            k,
-            "B T (nh d) -> B nh T d",
-            nh=self.n_heads,
-            d=self.model_dim // self.n_heads,
-        )
-        v = rearrange(
-            v,
-            "B T (nh d) -> B nh T d",
-            nh=self.n_heads,
-            d=self.model_dim // self.n_heads,
-        )
-
-        def scaledDotProd(q, k, v, mask):
-            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (
-                1 / (self.model_dim // self.n_heads) ** 0.5
-            )
-            w = jnp.where(mask == 0, -9e15, w)
-            w = nn.softmax(w, axis=-1)
-            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
-            return output
-
-        if self.grad_checkpoint:
-            scaledDotProd = jax.remat(scaledDotProd)
-
-        q_len = q.shape[2]
-        k_len = k.shape[2]
-
-        # Create causal mask
-        if train:
-            # During training, standard causal mask
-            mask = jnp.tril(jnp.ones((B, self.n_heads, q_len, k_len)))
-        else:
-            # During inference with cache
-            if cKV_cache is not None and q_len == 1:
-                # Single token generation - can attend to all previous tokens
-                mask = jnp.ones((B, self.n_heads, q_len, k_len))
-            else:
-                # First inference pass or no cache - use causal mask
-                mask = jnp.tril(jnp.ones((B, self.n_heads, q_len, k_len)))
-
-        output = scaledDotProd(q, k, v, mask)
-        output = rearrange(output, "B nh T dk -> B T (nh dk)")
-        output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)(output)
-
-        return output, (cKV_cache, kRT_cache)
-
-
-class LayerNorm(nn.Module):
-    model_dimension: int
-    model_dtype: jnp.dtype
-
-    def setup(self):
-        init = nn.initializers.constant
-        self.gamma = self.param(
-            "gamma", init(1), (1, 1, self.model_dimension), jnp.float32
-        )
-        self.beta = self.param(
-            "beta", init(0), (1, 1, self.model_dimension), jnp.float32
-        )
-        self.eps = 1e-05
-
-    def __call__(self, x: Array) -> Array:
-        mean = jnp.mean(x, axis=-1, keepdims=True)
-        var = jnp.var(x, axis=-1, keepdims=True)
-        norm = (x - mean) / jnp.sqrt(var + self.eps)
-        y = norm * self.gamma + self.beta
-
-        return y
-
 
 class NoisyKGate(nn.Module):
     model_dimension: int
@@ -488,10 +363,9 @@ class Block(nn.Module):
         cache: Optional[Tuple[Array, Optional[Array]]] = (None, None),
         train: bool = True,
     ):
-        x_norm = LayerNorm(
-            model_dimension=self.model_dimension,
-            model_dtype=self.model_dtype,
-        )(x)
+
+
+        x_norm = nn.LayerNorm()(x)
 
         x_up, cache = MLA(
             model_dim=self.model_dimension,
@@ -505,10 +379,7 @@ class Block(nn.Module):
         )(x_norm, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
         x = x + x_up
 
-        x_norm = LayerNorm(
-            model_dimension=self.model_dimension,
-            model_dtype=self.model_dtype,
-        )(x)
+        x_norm = nn.LayerNorm()(x)
 
         load = None
         if self.moe == True:
@@ -602,11 +473,7 @@ class OutHead(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        x = LayerNorm(
-            model_dimension=self.model_dimension,
-            model_dtype=self.model_dtype,
-        )(x)
-
+        x = nn.LayerNorm()(x)
         x = nn.Dense(
             features=self.vocab_size,
             dtype=self.model_dtype,
@@ -641,15 +508,15 @@ class Decoder(nn.Module):
     ) -> Tuple[
         Array, Tuple[Optional[List[Tuple[Optional[Array], Optional[Array]]]], Array]
     ]:
+        if cache is not None:
+            x = x[:, -1:]
+
         embed = Embeddings(
             model_dimension=self.model_dimension,
             vocab_size=self.vocab_size,
             model_dtype=self.model_dtype,
         )
         x = embed(x)
-        if cache is not None:
-            x = x[:, -1:]
-
         out_cache = []
         load = None
         for i in range(self.blocks):
@@ -686,11 +553,7 @@ class Decoder(nn.Module):
 
             out_cache.extend(current_cache)
 
-        x = OutHead(
-            model_dimension=self.model_dimension,
-            vocab_size=self.vocab_size,
-            model_dtype=self.model_dtype,
-        )(x)
+        x = embed(x, out=True)
 
         if load is not None:
             load = load[0] * load[1]
@@ -725,14 +588,6 @@ class Decoder(nn.Module):
             logits, (cache, _) = self.apply(
                 {"params": params}, inp, cache=cache, train=False
             )
-            logits_2, _ = self.apply({"params": params}, inp, cache=None, train=False)
-
-            cache_check = True if cache is not None else False
-            print(
-                f"use_cache: {use_cache}, logits_equal: {jnp.array_equal(logits[:, -1:], logits_2[:, -1:])} cache: {cache_check} inp_shape: {inp.shape} logits_shape: {logits.shape} cache_shape: {cache[0][0].shape if cache is not None else None}"
-            )
-
-            # breakpoint()
 
             logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
             logits /= temperature
@@ -742,20 +597,17 @@ class Decoder(nn.Module):
 
             return out_next, (cache, logits)
 
-        logits_history = []
-        for _ in range(max_tokens):
-            inp = out[:, -self.T :]
+        for _ in range(min(max_tokens, self.T)):
             key, sample_key = jax.random.split(key)
             out_next, (cache, logits) = sample(
-                sample_key, params, inp, cache, B, k, temperature
+                sample_key, params, out, cache, B, k, temperature
             )
             out = jnp.concatenate([out, out_next], axis=-1)
-            logits_history.append(logits)
 
         tokens = jax.device_get(out[:, 1:])
         outputs = list(map(lambda x: enc.decode(x), tokens))
 
-        return outputs, logits_history
+        return outputs
 
     @classmethod
     def get_model(
@@ -789,7 +641,7 @@ class Decoder(nn.Module):
             train=False,
         )["params"]
 
-        _, logits_history_1 = model.generate(
+        _ = model.generate(
             params,
             init_key,
             x="hello",
@@ -798,44 +650,6 @@ class Decoder(nn.Module):
             temperature=1,
             max_tokens=10,
         )
-
-        print(_)
-
-        _, logits_history_2 = model.generate(
-            params,
-            init_key,
-            x="hello",
-            B=1,
-            k=model_config.vocab_size,
-            temperature=1,
-            max_tokens=10,
-            use_cache=False,
-        )
-
-        print(_)
-
-        # Analyze the difference in logits over time
-        logits_diff = []
-        for i, (logits1, logits2) in enumerate(zip(logits_history_1, logits_history_2)):
-            diff = jnp.abs(logits1 - logits2)
-            max_diff = jnp.max(diff)
-            mean_diff = jnp.mean(diff)
-            logits_diff.append((max_diff, mean_diff))
-            print(
-                f"Step {i + 1}: Max diff = {max_diff.item():.6f}, Mean diff = {mean_diff.item():.6f}"
-            )
-
-        # Overall statistics
-        max_diffs = [d[0] for d in logits_diff]
-        mean_diffs = [d[1] for d in logits_diff]
-        print(
-            f"\nOverall Max diff range: {float(jnp.min(jnp.array(max_diffs))):.6f} - {float(jnp.max(jnp.array(max_diffs))):.6f}"
-        )
-        print(
-            f"Overall Mean diff range: {float(jnp.min(jnp.array(mean_diffs))):.6f} - {float(jnp.max(jnp.array(mean_diffs))):.6f}"
-        )
-
-        breakpoint()
 
         return model, params
 

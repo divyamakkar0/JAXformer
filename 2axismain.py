@@ -40,18 +40,14 @@ import numpy as np
 
 
 def setup_devices(cfg: config):
+
     device_cfg = cfg.device_config
-    assert device_cfg.n_axis == len(device_cfg.n_device_axis)
-    assert device_cfg.n_axis == len(device_cfg.n_device_name)
+    assert 2 == len(device_cfg.n_device_axis)
 
     jax.distributed.initialize()
-    devices = np.array(jax.devices())
-    n_devices = devices.shape[0]
+    devices = np.array(jax.devices())[:, None]
 
-    assert n_devices == np.prod(device_cfg.n_device_axis)
-
-    while devices.ndim < device_cfg.n_axis:
-        devices = devices[..., None]
+    assert devices.shape[0] == np.prod(device_cfg.n_device_axis)
     devices = devices.reshape(*device_cfg.n_device_axis)
 
     platform = jax.devices()[0].platform
@@ -65,13 +61,14 @@ def setup_devices(cfg: config):
                 f"Coords: {d.coords}, Core: {d.core_on_chip}"
             )
 
-    mesh = Mesh(devices, axis_names=device_cfg.n_device_name)
+    mesh = Mesh(devices, axis_names=('data', 'model'))
     count = devices.shape
 
     return mesh, count
 
 
 #TODO: init model
+# Figure out how to do it dynamically like if you have 3 axis shardings what am i suppose to do in that sense?
 def init_state(mesh, config, model, params, *, step=0, opt_state=None):
     lr_scheduler = optax.warmup_cosine_decay_schedule(
         init_value=config.lr.min_lr,

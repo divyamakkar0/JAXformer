@@ -16,6 +16,7 @@ jax.config.update(
 )
 jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_disable_jit", False)
+jax.config.update('jax_default_matmul_precision', "float32")
 
 import flax
 from flax.training import train_state

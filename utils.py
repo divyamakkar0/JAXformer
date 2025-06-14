@@ -51,9 +51,7 @@ class LRConfig:
 class deviceConfig:
     """class for distrbuted config"""
 
-    n_axis: int
     n_device_axis: List[int]
-    n_device_name: List[str]
 
 
 @dataclass
@@ -128,22 +126,12 @@ def parse_args():
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 
     parser.add_argument(
-        "--n_axis",
-        type=int,
-        default=1,
-    )
-    parser.add_argument(
         "--n_device_axis",
         type=int,
         nargs="*",
         default=[1],
     )
-    parser.add_argument(
-        "--n_device_name",
-        type=str,
-        nargs="*",
-        default=["data"],
-    )
+
     args = parser.parse_args()
 
     model_cfg = modelConfig(
@@ -181,9 +169,7 @@ def parse_args():
     )
 
     device_cfg = deviceConfig(
-        n_axis=args.n_axis,
         n_device_axis=args.n_device_axis,
-        n_device_name=args.n_device_name,
     )
 
     cfg = config(
