@@ -31,7 +31,7 @@ class Dataset:
         self.labels = data[1 : -self.T + 1]
         if display:
             print(
-                f"Loaded shard {self.data_path[self.shard_idx]} with {self.dataset.shape[0]} tokens"
+                f"Loaded shard {self.data_path[self.shard_idx]} with {self.dataset.shape[0]:,d} tokens"
             )
         self.shard_idx = (self.shard_idx + 1) % len(self.data_path)
 
