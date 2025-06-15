@@ -657,13 +657,17 @@ class shardedModel:
         pass
 
     @staticmethod
-    def shard_weights(
+    def shard_params(
         params: PyTree,
         mesh: jax.sharding.Mesh,
     ) -> Tuple[PyTree, PyTree]:
         embedding_params, layer_params = params
+        embedding_partition = jax.sharding.NamedSharding(
+            mesh,
+            P(),
+        )
+        embedding_params = jax.device_put(embedding_params, embedding_partition)
         layer_partition = jax.sharding.NamedSharding(mesh, P("model"))
-        jax.sharding.NamedSharding()
         layer_params = jax.device_put(layer_params, layer_partition)
         return embedding_params, layer_params
 
@@ -738,6 +742,7 @@ class shardedModel:
 
         return params
 
+    @staticmethod
     def get_model_and_params(
         cfg: modelConfig, mesh: jax.sharding.Mesh, key: jax.random.key
     ) -> Tuple[Tuple[Embeddings, EncoderBlock], PyTree]:

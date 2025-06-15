@@ -14,7 +14,7 @@ class Dataset:
         data_path: str | List[str],
         T: int,
         batch_size: int,
-        dataPartition: Optional[NamedSharding] = None,
+        partition: Optional[NamedSharding] = None,
     ):
         self.T = T
         self.batch_size = batch_size
@@ -25,14 +25,14 @@ class Dataset:
 
         self.shard_idx = 0
         self.step_idx = 0
-        self.partition = dataPartition
+        self.partition = partition
 
         self.load_next_shard(display=True)
 
     def load_next_shard(self, display: bool = False):
         data = np.load(self.data_path[self.shard_idx])
-        self.dataset = data[: -self.T]
-        self.labels = data[1 : -self.T + 1]
+        self.dataset = data[:-1]
+        self.labels = data[1 : ]
 
         len_dataset = self.dataset.shape[0]
         max_batches = len_dataset // (self.batch_size * self.T)
@@ -47,21 +47,22 @@ class Dataset:
         if self.partition is not None:
             self.dataset = jax.make_array_from_callback(
                 self.dataset.shape,
-                lambda idx: self.dataset[idx],
                 sharding=self.partition,
+                data_callback=lambda idx: self.dataset[idx],
             )
             self.labels = jax.make_array_from_callback(
                 self.labels.shape,
-                lambda idx: self.labels[idx],
                 sharding=self.partition,
+                data_callback=lambda idx: self.labels[idx],
             )
         else:
             self.dataset = jax.device_put(self.dataset)
             self.labels = jax.device_put(self.labels)
 
         if display:
+            current_shard = self.data_path[self.shard_idx].split("/")[-1].split(".")[0]
             print(
-                f"Loaded shard {self.data_path[self.shard_idx]} with {self.dataset.shape[0]:,d} tokens"
+                f"Loaded shard {current_shard} with {self.dataset.shape[0]:,d} batches"
             )
 
         self.shard_idx = (self.shard_idx + 1) % len(self.data_path)
@@ -102,9 +103,11 @@ class Dataset:
             ]
 
         train_dataset = cls(
-            train_dataset_path, cfg.T, cfg.train_batch_size, partition=None
+            train_dataset_path, cfg.T, cfg.train_batch_size, partition=partition
         )
-        val_dataset = cls(val_dataset_path, cfg.T, cfg.val_batch_size, partition=None)
+        val_dataset = cls(
+            val_dataset_path, cfg.T, cfg.val_batch_size, partition=partition
+        )
 
         return train_dataset, val_dataset
 

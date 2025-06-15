@@ -35,7 +35,7 @@ import orbax.checkpoint as ocp
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from functools import partial
-from typing import Optional, Tuple, Type
+from typing import Optional, Tuple, Type, TypeVar
 from jaxtyping import PyTree
 import numpy as np
 
@@ -53,19 +53,42 @@ class KeyState:
 
 
 class TrainStateEasy:
-    def __init__(self, params, opt_state, tx):
+    def __init__(self, params, tx, opt_state: Optional[PyTree] = None):
         self.params = params
-        self.opt_state = opt_state
         self.tx = tx
+        self.opt_state = opt_state
+        if opt_state is None:
+            self.opt_state = tx.init(params)
 
     def apply_gradients(self, grads):
         updates, self.opt_state = self.tx.update(grads, self.opt_state)
         self.params = optax.apply_updates(self.params, updates)
 
-    def count_params(self):
+    @classmethod
+    def restore(cls, restored: PyTree, tx, mesh: Mesh):
+        params = shardedModel.shard_params(restored["params"], mesh)
+
+        opt_state_init = tx.init(params)
+        opt_state_restored = jax.tree_util.tree_unflatten(
+            jax.tree_util.tree_structure(opt_state_init),
+            jax.tree_util.tree_leaves(restored["opt_state"])
+        )
+        opt_state = jax.tree.map(
+            lambda x, s: jax.device_put(x, s.sharding),
+            opt_state_restored,
+            opt_state_init,
+        )
+
+        return cls(
+            params=params,
+            tx=tx,
+            opt_state=opt_state,
+        )
+
+    @property
+    def n_params(self):
         param_count = sum(x.size for x in jax.tree.leaves(self.params))
         return param_count
-
 
 def setup_devices(cfg: config):
     device_cfg = cfg.device_config
@@ -91,47 +114,12 @@ def setup_devices(cfg: config):
     mesh = Mesh(devices, axis_names=("data", "model"))
     print(f"Mesh: {mesh}")
     count = devices.shape
+    count = {
+        'data': count[0],
+        'model': count[1],
+    }
 
     return mesh, count
-
-
-def init_state(
-    config: config,
-    mesh: Mesh,
-    model,
-    *,
-    key: Optional[jax.random.PRNGKey] = None,
-    params: Optional[Tuple[PyTree, PyTree]] = None,
-    opt_state: Optional[PyTree] = None,
-) -> PyTree:
-    if params is None:
-        params = shardedModel.get_params(
-            cfg=config.model, model=model, mesh=mesh, key=key
-        )
-    else:
-        params = shardedModel.shard_weights(params, mesh)
-
-    lr_scheduler = optax.warmup_cosine_decay_schedule(
-        init_value=config.lr.min_lr,
-        peak_value=config.lr.max_lr,
-        warmup_steps=config.lr.warmup_steps,
-        decay_steps=config.lr.end_steps,
-        end_value=config.lr.end_lr,
-    )
-
-    tx = optax.chain(
-        optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.inject_hyperparams(optax.adamw)(lr_scheduler),
-    )
-
-    if opt_state is None:
-        opt_state = tx.init(params)
-
-    return TrainStateEasy(
-        params=params,
-        opt_state=opt_state,
-        tx=tx,
-    )
 
 
 def loss(model, alpha, params, key, x, y, train):
@@ -211,22 +199,36 @@ def main(config: config):
     print("setting up devices")
     mesh, count = setup_devices(config)
 
+    checkpoint_dir = os.path.join(
+        os.path.abspath(config.output_dir), config.name, "checkpoints"
+    )
+    load = os.path.exists(checkpoint_dir)
+
+    checkpointer = ocp.PyTreeCheckpointer()
+    options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
+    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
+
     key = KeyState(config.seed)
 
     print("setting up state")
-
     model = shardedModel.get_model(cfg=config.model)
-    state = init_state(
-        config,
-        mesh,
-        model,
-        key=key(),
+
+    lr_scheduler = optax.warmup_cosine_decay_schedule(
+        init_value=config.lr.min_lr,
+        peak_value=config.lr.max_lr,
+        warmup_steps=config.lr.warmup_steps,
+        decay_steps=config.lr.end_steps,
+        end_value=config.lr.end_lr,
     )
-    print(f"Model parameter count: {state.count_params():,d} ")
+
+    tx = optax.chain(
+        optax.clip_by_global_norm(config.grad_clip_norm),
+        optax.inject_hyperparams(optax.adamw)(lr_scheduler),
+    )
 
     total_steps = config.training_steps
-    config.data.train_batch_size *= count * config.grad_step
-    config.data.val_batch_size *= count * config.eval_steps
+    config.data.train_batch_size *= count['data'] * config.grad_step
+    config.data.val_batch_size *= count['data'] * config.eval_steps
     data_partition = jax.sharding.NamedSharding(
         mesh,
         P(None, "data", None),
@@ -240,7 +242,86 @@ def main(config: config):
 
     print(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
 
-    loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
+
+    def save_checkpoint(step, wandb_id):
+        model_state = {
+            "params": jax.device_get(state.params),
+            "opt_state": jax.device_get(state.opt_state),
+        }
+        save_tree = {
+            "state": model_state,
+            "key": jax.device_get(key.key),
+            "train_step_idx": train_dataset.step_idx,
+            "train_shard_idx": (train_dataset.shard_idx - 1)
+            % len(train_dataset.data_path),
+            "val_step_idx": val_dataset.step_idx,
+            "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data_path),
+            "step": step,
+            "wandb_id": wandb_id,
+        }
+        checkpoint_manager.save(step, save_tree)
+
+    init_step = 0
+    use_wandb = config.wandb is True
+    wandb_id = None
+
+    if load:
+        print(f"loading checkpoint @ step {init_step}")
+
+        tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
+        init_step = tree_state["step"]
+        key.key = tree_state["key"]
+
+        state = TrainStateEasy.restore(
+            tree_state["state"],
+            tx,
+            mesh,
+        )
+
+        train_dataset.step_idx = tree_state["train_step_idx"]
+        train_dataset.shard_idx = tree_state["train_shard_idx"]
+        train_dataset.load_next_shard()
+
+        val_dataset.step_idx = tree_state["val_step_idx"]
+        val_dataset.shard_idx = tree_state["val_shard_idx"]
+        val_dataset.load_next_shard()
+
+        wandb_id = tree_state["wandb_id"]
+        if use_wandb:
+            assert wandb_id is not None, "wandb_id is None"
+            wandb.init(
+                entity="waterloo2",
+                project="jaxformer",
+                name=config.name,
+                resume="must",
+                id=wandb_id,
+                config=asdict(config),
+            )
+
+    else:
+        print("No checkpoint found, starting from scratch")
+        print("Creating model ...")
+
+        params = shardedModel.get_params(
+            cfg=config.model, model=model, mesh=mesh, key=key()
+        )
+        state = TrainStateEasy(
+            params=params,
+            tx=tx
+        )
+
+        if use_wandb:
+            wandb.init(
+                entity="waterloo2",
+                project="jaxformer",
+                name=config.name,
+                resume="allow",
+                config=asdict(config),
+            )
+            wandb_id = wandb.run.id
+        save_checkpoint(0, wandb_id)
+
+    print(f"Model parameter count: {state.n_params:,d} ")
 
     train_step = jax.jit(
         jax.shard_map(
@@ -264,86 +345,15 @@ def main(config: config):
         )
     )
 
-    checkpoint_dir = os.path.join(
-        os.path.abspath(config.output_dir), config.name, "checkpoints"
-    )
-    load = os.path.exists(checkpoint_dir)
-
-    checkpointer = ocp.PyTreeCheckpointer()
-    options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
-    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
-
-    def save_checkpoint(step, wandb_id):
-        save_tree = {
-            "state": flax.serialization.to_state_dict(state),
-            "key": jax.device_get(key.key),
-            "train_step_idx": train_dataset.step_idx,
-            "train_shard_idx": (train_dataset.shard_idx - 1)
-            % len(train_dataset.data_path),
-            "val_step_idx": val_dataset.step_idx,
-            "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data_path),
-            "step": step,
-            "wandb_id": wandb_id,
-        }
-        checkpoint_manager.save(step, save_tree)
-
-    init_step = 0
-
-    use_wandb = config.wandb is True
-    wandb_id = None
-    if load:
-        tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
-
-        init_step = tree_state["step"]
-        key.key = tree_state["key"]
-        unsharded_state = flax.serialization.from_state_dict(state, tree_state["state"])
-        state = init_state(
-            mesh,
-            config,
-            model,
-            params=unsharded_state.params,
-            step=init_step,
-            opt_state=unsharded_state.opt_state,
-        )
-
-        train_dataset.step_idx = tree_state["train_step_idx"]
-        train_dataset.shard_idx = tree_state["train_shard_idx"]
-        train_dataset.load_next_shard()
-
-        val_dataset.step_idx = tree_state["val_step_idx"]
-        val_dataset.shard_idx = tree_state["val_shard_idx"]
-        val_dataset.load_next_shard()
-
-        wandb_id = tree_state["wandb_id"]
-        if use_wandb:
-            assert wandb_id is not None, "wandb_id is None"
-            wandb.init(
-                entity="waterloo2",
-                project="jaxformer",
-                name=config.name,
-                resume="must",
-                id=wandb_id,
-                config=asdict(config),
-            )
-        print(f"loading checkpoint @ step {init_step}")
-    else:
-        print("No checkpoint found, starting from scratch")
-        if use_wandb:
-            wandb.init(
-                entity="waterloo2",
-                project="jaxformer",
-                name=config.name,
-                resume="allow",
-                config=asdict(config),
-            )
-            wandb_id = wandb.run.id
-        save_checkpoint(0, wandb_id)
 
     print("start training")
+    breakpoint()
 
     start = time.time()
     train_loss = 0.0
     sample_key = key()
+    loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
+
 
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):
