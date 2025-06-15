@@ -18,14 +18,13 @@ jax.config.update("jax_debug_nans", True)
 jax.config.update("jax_disable_jit", False)
 
 import flax
-from flax.training import train_state
 import time
 import ast
 import json
 import optax
 
 from utils import parse_args, config
-from model import Decoder
+from model import shardedModel
 from dataset import Dataset
 
 import wandb
@@ -36,7 +35,36 @@ import orbax.checkpoint as ocp
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from functools import partial
+from typing import Optional, Tuple, Type
+from jaxtyping import PyTree
 import numpy as np
+
+
+class KeyState:
+    def __init__(self, seed: int):
+        self.key = jax.random.PRNGKey(seed)
+
+    def __call__(self, num: int = 1):
+        self.key, *rng = jax.random.split(self.key, num=num + 1)
+        if num == 1:
+            return rng[0]
+        else:
+            return jnp.array(rng)
+
+
+class TrainStateEasy:
+    def __init__(self, params, opt_state, tx):
+        self.params = params
+        self.opt_state = opt_state
+        self.tx = tx
+
+    def apply_gradients(self, grads):
+        updates, self.opt_state = self.tx.update(grads, self.opt_state)
+        self.params = optax.apply_updates(self.params, updates)
+
+    def count_params(self):
+        param_count = sum(x.size for x in jax.tree.leaves(self.params))
+        return param_count
 
 
 def setup_devices(cfg: config):
@@ -61,14 +89,28 @@ def setup_devices(cfg: config):
             )
 
     mesh = Mesh(devices, axis_names=("data", "model"))
+    print(f"Mesh: {mesh}")
     count = devices.shape
 
     return mesh, count
 
 
-# TODO: init model
-# Figure out how to do it dynamically like if you have 3 axis shardings what am i suppose to do in that sense?
-def init_state(mesh, config, model, params, *, step=0, opt_state=None):
+def init_state(
+    config: config,
+    mesh: Mesh,
+    model,
+    *,
+    key: Optional[jax.random.PRNGKey] = None,
+    params: Optional[Tuple[PyTree, PyTree]] = None,
+    opt_state: Optional[PyTree] = None,
+) -> PyTree:
+    if params is None:
+        params = shardedModel.get_params(
+            cfg=config.model, model=model, mesh=mesh, key=key
+        )
+    else:
+        params = shardedModel.shard_weights(params, mesh)
+
     lr_scheduler = optax.warmup_cosine_decay_schedule(
         init_value=config.lr.min_lr,
         peak_value=config.lr.max_lr,
@@ -85,28 +127,11 @@ def init_state(mesh, config, model, params, *, step=0, opt_state=None):
     if opt_state is None:
         opt_state = tx.init(params)
 
-    @jax.jit
-    @partial(jax.shard_map, mesh=mesh, in_specs=(P(), P()), out_specs=(P()))
-    def state_fn(params, opt_state):
-        state = train_state.TrainState(
-            step=step, apply_fn=model.apply, params=params, tx=tx, opt_state=opt_state
-        )
-        return state
-
-    state_init = state_fn(params, opt_state)
-    return state_init
-
-
-class KeyState:
-    def __init__(self, seed: int):
-        self.key = jax.random.PRNGKey(seed)
-
-    def __call__(self, num: int = 1):
-        self.key, *rng = jax.random.split(self.key, num=num + 1)
-        if num == 1:
-            return rng[0]
-        else:
-            return jnp.array(rng)
+    return TrainStateEasy(
+        params=params,
+        opt_state=opt_state,
+        tx=tx,
+    )
 
 
 def loss(model, alpha, params, key, x, y, train):
@@ -188,22 +213,30 @@ def main(config: config):
 
     key = KeyState(config.seed)
 
-    print("setting up model")
-    model, global_params = Decoder.get_model(model_config=config.model, init_key=key())
-    param_count = sum(x.size for x in jax.tree.leaves(global_params))
-    print(f"Model parameter count: {param_count:,d} ")
+    print("setting up state")
 
-    print("setting up state & dataset")
-    state = init_state(mesh, config, model, global_params)
+    model = shardedModel.get_model(cfg=config.model)
+    state = init_state(
+        config,
+        mesh,
+        model,
+        key=key(),
+    )
+    print(f"Model parameter count: {state.count_params():,d} ")
 
     total_steps = config.training_steps
     config.data.train_batch_size *= count * config.grad_step
     config.data.val_batch_size *= count * config.eval_steps
+    data_partition = jax.sharding.NamedSharding(
+        mesh,
+        P(None, "data", None),
+    )
+
     print("setting up dataset")
     (
         train_dataset,
         val_dataset,
-    ) = Dataset.getDataset(config.data)
+    ) = Dataset.getDataset(config.data, partition=data_partition)
 
     print(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
 

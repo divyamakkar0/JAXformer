@@ -241,13 +241,10 @@ class MoE(nn.Module):
         )
 
     def get_gScores(self, scores: Array, indices: Array, x: Array, train: bool = True):
-
         def head_fn(i):
             return lambda mdl, x: mdl.experts[i](x, train=train)
 
-        expert_lambda = [
-            head_fn(i) for i in range(self.n_experts)
-        ]
+        expert_lambda = [head_fn(i) for i in range(self.n_experts)]
 
         if self.is_mutable_collection("params"):
             for expert_ffn in expert_lambda:
@@ -650,9 +647,6 @@ class Decoder(nn.Module):
 
 
 class shardedModel:
-    def forward():
-        pass
-
     @staticmethod
     def generate(
         model: Tuple[Embeddings, EncoderBlock],
@@ -663,24 +657,24 @@ class shardedModel:
         pass
 
     @staticmethod
-    def get_model(cfg, mesh: jax.sharding.Mesh, key: jax.random.key):
+    def shard_weights(
+        params: PyTree,
+        mesh: jax.sharding.Mesh,
+    ) -> Tuple[PyTree, PyTree]:
+        embedding_params, layer_params = params
+        layer_partition = jax.sharding.NamedSharding(mesh, P("model"))
+        jax.sharding.NamedSharding()
+        layer_params = jax.device_put(layer_params, layer_partition)
+        return embedding_params, layer_params
+
+    @staticmethod
+    def get_model(cfg):
         dtype = jnp.bfloat16 if (cfg.model_dtype == "bfloat16") else jnp.float32
-
-        x = jnp.ones((1, cfg.T), dtype=jnp.int32)
-
         embedding_layer = Embeddings(
             model_dimension=cfg.model_dimension,
             vocab_size=cfg.vocab_size,
             model_dtype=dtype,
         )
-
-        key, init_key = jax.random.split(key)
-        embedding_params = embedding_layer.init(init_key, x)["params"]
-
-        model_devices = mesh.devices.shape[1]
-        assert cfg.blocks // model_devices
-
-        layers_per_device = cfg.blocks // model_devices
         layer = EncoderBlock(
             model_dimension=cfg.model_dimension,
             n_heads=cfg.n_heads,
@@ -695,6 +689,31 @@ class shardedModel:
             k=cfg.k,
             model_dtype=cfg.model_dtype,
         )
+
+        return embedding_layer, layer
+
+    @staticmethod
+    def get_params(
+        cfg: modelConfig,
+        model: Tuple[Embeddings, EncoderBlock],
+        mesh: jax.sharding.Mesh,
+        key: jax.random.key,
+    ) -> Tuple[PyTree, PyTree]:
+        embedding_layer, layer = model
+
+        x = jnp.ones((1, cfg.T), dtype=jnp.int32)
+        key, init_key = jax.random.split(key)
+        embedding_params = embedding_layer.init(init_key, x)["params"]
+        embedding_partition = jax.sharding.NamedSharding(
+            mesh,
+            P(),
+        )
+        embedding_params = jax.device_put(embedding_params, embedding_partition)
+
+        model_devices = mesh.devices.shape[1]
+        assert cfg.blocks // model_devices
+
+        layers_per_device = cfg.blocks // model_devices
 
         @partial(
             jax.shard_map, mesh=mesh, in_specs=(P("model")), out_specs=(P("model"))
@@ -714,10 +733,16 @@ class shardedModel:
 
         key, *layer_keys = jax.random.split(key, model_devices + 1)
         layer_keys = jnp.array(layer_keys)
-        print(layer_keys.shape)
         layer_params = init_pipeline(layer_keys)
         params = (embedding_params, layer_params)
-        model = (embedding_layer, layer)
+
+        return params
+
+    def get_model_and_params(
+        cfg: modelConfig, mesh: jax.sharding.Mesh, key: jax.random.key
+    ) -> Tuple[Tuple[Embeddings, EncoderBlock], PyTree]:
+        model = shardedModel.get_model(cfg)
+        params = shardedModel.get_params(cfg, model, mesh, key)
 
         return model, params
 
@@ -725,9 +750,11 @@ class shardedModel:
 if __name__ == "__main__":
     import json
     import numpy as np
+
     def print_params(params):
         def tree_shapes(tree):
             return jax.tree_util.tree_map(lambda x: tuple(x.shape), tree)
+
         shapes = tree_shapes(params)
         print(json.dumps(shapes, indent=4))
 
@@ -757,5 +784,6 @@ if __name__ == "__main__":
     devices = np.array(jax.devices()).reshape((2, 4))
     mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
     print(mesh)
-    model, params_2 = shardedModel.get_model(model_cfg, mesh, key)
-    print_params(params_2)
+    model, params = shardedModel.get_model(model_cfg, mesh, key)
+    print_params(params)
+    breakpoint()
