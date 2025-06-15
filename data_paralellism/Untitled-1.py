@@ -1,257 +1,96 @@
-# %%
-import os
-import urllib.request
-from urllib.error import HTTPError
+"""
+Copyright (c) Simon Schug
+All rights reserved.
 
-# Github URL where python scripts are stored.
-base_url = "https://raw.githubusercontent.com/phlippe/uvadlc_notebooks/master/docs/tutorial_notebooks/scaling/JAX/"
-# Files to download.
-python_files = ["single_gpu.py", "utils.py"]
-# For each file, check whether it already exists. If not, try downloading it.
-for file_name in python_files:
-    if not os.path.isfile(file_name):
-        file_url = base_url + file_name
-        print(f"Downloading {file_url}...")
-        try:
-            urllib.request.urlretrieve(file_url, file_name)
-        except HTTPError as e:
-            print(
-                "Something went wrong. Please try to download the file directly from the GitHub repository, or contact the author with the full output including the following error:\n",
-                e,
-            )
+MIT License
 
-# %%
-from tensor_parallelism.utils import simulate_CPU_devices
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the “Software”), to deal in the Software
+without restriction, including without limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+to whom the Software is furnished to do so, subject to the following conditions:
 
-simulate_CPU_devices()
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
 
-# %%
-import functools
-from pprint import pprint
-from typing import Any, Callable, Dict, Sequence, Tuple
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+"""
 
+import chex
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import numpy as np
+import jax.sharding as shd
+import jaxtyping as jt
 import optax
-from absl import logging
-from jax import lax
-from jax.experimental.shard_map import shard_map
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
-from ml_collections import ConfigDict
-from flax.training import train_state
-from single_gpu import TrainState
-import time
+from absl.testing import parameterized
+from flax.training.train_state import TrainState
 
-PyTree = Any
-Metrics = Dict[str, Tuple[jax.Array, ...]]
+from . import fsdp
 
-# %%
-class DPClassifier(nn.Module):
-    config: ConfigDict
 
-    @nn.compact
-    def __call__(self, x: jax.Array, train: bool) -> jax.Array:
-        x = nn.Dense(
-            features=self.config.hidden_size,
-            dtype=self.config.dtype,
-            name="input_dense",
-        )(x)
-        x = nn.silu(x)
-        x = nn.Dropout(rate=self.config.dropout_rate, deterministic=not train)(x)
-        x = nn.Dense(
-            features=self.config.num_classes,
-            dtype=self.config.dtype,
-            name="output_dense",
-        )(x)
-        x = x.astype(jnp.float32)
-        return x
+def _mock_data_mesh(n_devices: int) -> shd.Mesh:
+    """Mocking a mesh with jax.device_count() > 1 using the cpu."""
+    chex.set_n_cpu_devices(n_devices)
+    jax.config.update("jax_platform_name", "cpu")
+    return jax.make_mesh((jax.device_count(),), ("data",))
 
-# %%
-data_config = ConfigDict(
-    dict(
-        batch_size=16,
-        num_classes=8,
-        input_size=32,
+
+class FSDPTest(chex.TestCase):
+    @parameterized.parameters(
+        dict(shape=(8, 129, 13, 64), n_devices=8, spec=(None, None, None, "data")),
+        dict(shape=(13, 17), n_devices=8, spec=(None, None)),
+        dict(shape=(16,), n_devices=8, spec=()),
+        dict(shape=(), n_devices=8, spec=()),
     )
-)
-model_config = ConfigDict(
-    dict(
-        hidden_size=8,
-        dropout_rate=0.1,
-        dtype=jnp.bfloat16,
-        num_classes=data_config.num_classes,
-        data_axis_name="data",
-    )
-)
-optimizer_config = ConfigDict(
-    dict(
-        learning_rate=1e-3,
-        num_minibatches=4,
-    )
-)
-config = ConfigDict(
-    dict(
-        model=model_config,
-        optimizer=optimizer_config,
-        data=data_config,
-        data_axis_name=model_config.data_axis_name,
-        seed=42,
-    )
-)
+    def test_fsdp_partition_spec(
+        self, shape: tuple, n_devices: int, spec: tuple
+    ) -> None:
+        assert fsdp._fsdp_partition_spec(shape, n_devices) == shd.PartitionSpec(*spec)
 
-# %%
-class KeyState:
-    def __init__(self, base_key: jax.random.key):
-        self.key = jax.random.key(base_key)
-
-    def __call__(self, num: int = 2):
-        self.key, rng = jax.random.split(self.key, num=num)
-        return rng
-
-# %%
-model = DPClassifier(config=config.model)
-optimizer = optax.adamw(
-    learning_rate=config.optimizer.learning_rate,
-)
-class TrainStateWithRNG(train_state.TrainState):
-        rng: Any
-
-# %%
-key = KeyState(config.seed)
-x=jax.random.normal(key(), (config.data.batch_size, config.data.input_size))
-y = jax.random.randint(key(), (config.data.batch_size,), 0, config.data.num_classes)
-variables = model.init({"params": key()}, x, train=False)
-params = variables.pop("params")
-device_array = np.array(jax.devices())
-mesh = Mesh(device_array, ("x",))
-print(jax.tree.reduce(lambda acc, current: acc + current.size, jax.tree.leaves(params), 0))
-
-
-# %%
-def init_device(params, rng, local_model, config):
-        tx = optax.chain(
-            optax.clip_by_global_norm(1),
-            optax.inject_hyperparams(optax.adam)(learning_rate=1e-3),
+    def test_shard_pytree(self) -> None:
+        mesh = _mock_data_mesh(8)
+        params = dict(
+            layer1=dict(w=jnp.ones((1, 2, 8)), b=jnp.ones((8,))),
+            layer2=dict(w=jnp.ones((1, 8)), s=jnp.ones(())),
         )
-        state = TrainStateWithRNG.create(
-            apply_fn=local_model.apply,
-            params=params,
-            tx=tx,
-            rng=rng,
-        )
-        return state
+        shardings = fsdp.infer_fsdp_sharding(params, mesh)
+        params = fsdp.shard_pytree(params, shardings)
 
-# %%
-sharded_init = shard_map(
-            functools.partial(init_device, rng=key(), local_model=model, config=model_config),
-            mesh,
-            in_specs=(P()),
-            out_specs=(P()),
+        self.assertEqual(
+            params["layer1"]["w"].sharding.spec, shd.PartitionSpec(None, None, "data")
         )
 
-state_initialized = sharded_init(params)
+    def test_shard_state(self) -> None:
+        mesh = _mock_data_mesh(8)
+        module = nn.Sequential((nn.Dense(32), nn.LayerNorm(), nn.Dense(8)))
 
-# %%
-def fold_key(key, axis):
-        axis_index = jax.lax.axis_index(axis)
-        return jax.random.fold_in(key, axis_index)
-
-# %%
-def cross_entropy_loss(model, params, key, x, y, train=True):
-        dropout_key = fold_key(key, "x")
-        B, T = x.shape
-        pred = model.apply({'params': params}, x, train=train, rngs={'dropout': dropout_key})
-        log_prob = jax.nn.log_softmax(pred, axis=-1)
-        loss = -jnp.mean(log_prob[jnp.arange(B), y])
-        loss = jax.lax.pmean(loss, axis_name="x")  
-        return loss
-#loss = cross_entropy_loss(model, params, key(), x, y)
-
-# %%
-def train_step(loss_fn, params, key, *args, **kwargs):
-        loss_grad = jax.value_and_grad(
-            loss_fn,
-            argnums=0,
-            has_aux=False
-        )
-        loss, grads = loss_grad(params, key, *args, **kwargs, train=True)
-        # don't need cache in training
-
-        metrics = {
-            'loss': loss,
-        }
-        return grads, metrics
-
-# %%
-def accumulate_grads(key, x, y, state):
-        print("starting training")
-        loss_fn = jax.tree_util.Partial(cross_entropy_loss, model)
-        train_step_jit = lambda key, params, x, y : train_step(loss_fn, params, key, x, y)
-   
-        start = time.time()
-        train_loss = 0.0
-
-        grads = None
-        acc_metrics = None
-        for i in range(2):
-            grads_step, metrics = train_step_jit(key, state.params, x, y)
-            grads = grads_step if grads is None else jax.tree.map(
-                lambda x, y: x + y, grads, grads_step
+        def init_train_state(rng: jt.PRNGKeyArray, inputs: jax.Array) -> TrainState:
+            params = module.init(rng, inputs)
+            return TrainState.create(
+                apply_fn=module.apply,
+                params=params["params"],
+                tx=optax.adam(1e-3),
             )
-            acc_metrics = metrics if acc_metrics is None else jax.tree.map(jnp.add, acc_metrics, metrics)
 
-        grads = jax.tree.map(lambda x: x / 2, grads)
-        
-        return grads, acc_metrics
+        rng = jax.random.key(0)
+        inputs = jax.ShapeDtypeStruct(shape=(16, 7), dtype=jnp.bfloat16)
+        state = jax.eval_shape(init_train_state, rng, inputs)
+        shardings = fsdp.infer_fsdp_sharding(state, mesh)
+        state = jax.jit(init_train_state, out_shardings=shardings)(rng, inputs)
 
-# %%
-def train_step_device(state, x, y):
-        key, step_key = jax.random.split(state.rng)
-        grads, step_metrics = accumulate_grads(step_key, x, y, state)
-        grads = jax.tree.map(lambda g: jax.lax.pmean(g, axis_name="x"), grads)
-        new_state = state.apply_gradients(grads=grads, rng=key)
-        step_metrics = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="x"), step_metrics)
-
-        return new_state, step_metrics
-
-
-# %%
-train_step_dp_fn =  shard_map(
-            train_step_device,
-            mesh,
-            in_specs=(P(), P("x",), P("x",)),
-            out_specs=(P(), P()),
+        self.assertEqual(
+            state.params["layers_0"]["kernel"].sharding.spec,
+            shd.PartitionSpec(None, "data"),
         )
-
-# %%
-# state, metrics = train_step_dp_fn(state_initialized, x, y)
-# state
-
-# # %%
-# print("DP Parameters")
-# pprint(jax.tree.map(lambda x: (x.shape, x.sharding), state_initialized.params))
-
-# %%
-state = state_initialized
-for _ in range(100):
-    state_dp, metrics_dp = train_step_dp_fn(state, x, y)
-    state = state_dp
-    print(metrics_dp)
-state_dp, final_metrics_dp = train_step_dp_fn(state_dp, x, y)
-print(final_metrics_dp)
-
-# %%
-# print(state)
-
-# %%
-# p = state.params['input_dense']['kernel']
-# jax.debug.visualize_array_sharding(x)
-
-# %%
-print("DP Parameters")
-pprint(jax.tree.map(lambda x: (x.shape, x.sharding), state.params))
-print("Metrics")
-pprint(jax.tree.map(lambda x: (x.shape, x.sharding), metrics))
+        self.assertEqual(
+            state.params["layers_1"]["bias"].sharding.spec, shd.PartitionSpec()
+        )
+        self.assertEqual(
+            state.params["layers_1"]["scale"].sharding.spec, shd.PartitionSpec()
+        )
