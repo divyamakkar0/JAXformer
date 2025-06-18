@@ -33,154 +33,6 @@ class Embeddings(nn.Module):
         return x
 
 
-class RoPE:
-    def __init__(self, T: int, model_dim: int):
-        assert model_dim % 2 == 0, "model_dim must be even"
-
-        freq = jnp.arange(T, dtype=jnp.float32)[:, None] + 1
-
-        pos = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
-        pos = pos.repeat(2, axis=-1).reshape(1, -1)
-        log_theta_base = jnp.log(10000.0)
-        theta = jnp.exp(-2 * pos / model_dim * log_theta_base)
-
-        self.cos = jnp.cos(freq * theta)
-        self.sin = jnp.sin(freq * theta)
-
-    def __call__(
-        self,
-        x: Array,
-        t_start: int,
-        offset: Optional[int] = None,
-        transpose: bool = False,
-    ) -> Array:
-        B, T, C = x.shape
-        x_proj = x.astype("float32")
-
-        if offset is None:
-            offset = T
-
-        cos_rope = x_proj * self.cos[t_start : t_start + offset, :]
-
-        x_inter = x_proj.reshape((B, T, C // 2, 2))
-        x_inter = jnp.flip(x_inter, axis=-1) * jnp.array([-1, 1])
-        x_inter = x_inter.reshape((B, T, C))
-        if transpose:
-            x_inter *= -1
-        sin_rope = x_inter * self.sin[t_start : t_start + offset, :]
-
-        x_rope = cos_rope + sin_rope
-        x = x_rope.astype(x.dtype)
-        return x
-
-
-class MLA(nn.Module):
-    model_dim: int
-    n_heads: int
-    T: int
-    latent_dim: int
-    dhR: int
-    model_dtype: jnp.dtype
-    grad_checkpoint: bool
-    dropout: float = 0.0
-
-    def setup(self):
-        self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
-
-        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
-        self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
-
-        self.dk = self.model_dim // self.n_heads
-
-        if self.grad_checkpoint:
-            self.output = nn.remat(nn.Dense)(
-                features=self.model_dim, dtype=self.model_dtype
-            )
-        else:
-            self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
-        self.out_dropout = nn.Dropout(rate=self.dropout)
-
-        self.rope = False
-        if self.dhR != 0:
-            self.rope = True
-            self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
-            self.Wqr = nn.Dense(
-                features=(self.dhR * self.n_heads), dtype=self.model_dtype
-            )
-            self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
-            self.rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
-
-    def __call__(
-        self,
-        x: Array,
-        *,
-        cKV_cache: Optional[Array] = None,
-        kRT_cache: Optional[Array] = None,
-        train=True,
-    ) -> Tuple[Array, Tuple[Array, Array]]:
-        B, T, C = x.shape
-
-        cKVt, cqt = jnp.split(self.W_down(x), 2, axis=-1)
-
-        if self.rope:
-            t_start = 0
-            if cKV_cache is not None:
-                t_start = cKV_cache.shape[1]
-
-            kRt = self.rope_k(self.Wkr(x), t_start)
-
-            qRt = self.rope_q(self.Wqr(x), t_start)
-            qRt = rearrange(qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR)
-
-        if not train:
-            if cKV_cache is not None:
-                cKVt = jnp.concatenate([cKV_cache, cKVt], axis=1)
-            cKV_cache = cKVt
-
-            if self.rope:
-                if kRT_cache is not None:
-                    kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
-                kRT_cache = kRt
-
-        k, v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
-        q = self.W_uQ(cqt)
-
-        k = rearrange(k, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-
-        if self.rope:
-            q = jnp.concatenate([q, qRt], axis=-1)
-            kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
-            k = jnp.concatenate([k, kRt], axis=-1)
-
-        def scaledDotProd(q, k, v, mask):
-            q = q.astype("float32")
-            k = k.astype("float32")
-            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.dk**0.5))
-            w = jnp.where(mask == 0, -9e15, w)
-            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
-            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
-            return output
-
-        if self.grad_checkpoint:
-            scaledDotProd = jax.remat(scaledDotProd)
-
-        if T == 1:
-            mask = jnp.ones((B, self.n_heads, 1, k.shape[2]))
-        else:
-            mask = jnp.tril(
-                jnp.ones((B, self.n_heads, q.shape[2], k.shape[2])),
-            )
-
-        output = scaledDotProd(q, k, v, mask)
-        output = rearrange(output, "B nh T dk -> B T (nh dk)")
-
-        output = self.output(output)
-        output = self.out_dropout(output, deterministic=not train)
-        return output, (cKV_cache, kRT_cache)
-
-
 class NoisyKGate(nn.Module):
     model_dimension: int
     n_experts: int
@@ -353,6 +205,154 @@ class FeedForward(nn.Module):
         return x_ff
 
 
+class RoPE:
+    def __init__(self, T: int, model_dim: int):
+        assert model_dim % 2 == 0, "model_dim must be even"
+
+        freq = jnp.arange(T, dtype=jnp.float32)[:, None] + 1
+
+        pos = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
+        pos = pos.repeat(2, axis=-1).reshape(1, -1)
+        log_theta_base = jnp.log(10000.0)
+        theta = jnp.exp(-2 * pos / model_dim * log_theta_base)
+
+        self.cos = jnp.cos(freq * theta)
+        self.sin = jnp.sin(freq * theta)
+
+    def __call__(
+        self,
+        x: Array,
+        t_start: int,
+        offset: Optional[int] = None,
+        transpose: bool = False,
+    ) -> Array:
+        B, T, C = x.shape
+        x_proj = x.astype("float32")
+
+        if offset is None:
+            offset = T
+
+        cos_rope = x_proj * self.cos[t_start : t_start + offset, :]
+
+        x_inter = x_proj.reshape((B, T, C // 2, 2))
+        x_inter = jnp.flip(x_inter, axis=-1) * jnp.array([-1, 1])
+        x_inter = x_inter.reshape((B, T, C))
+        if transpose:
+            x_inter *= -1
+        sin_rope = x_inter * self.sin[t_start : t_start + offset, :]
+
+        x_rope = cos_rope + sin_rope
+        x = x_rope.astype(x.dtype)
+        return x
+
+
+class MLA(nn.Module):
+    model_dim: int
+    n_heads: int
+    T: int
+    latent_dim: int
+    dhR: int
+    model_dtype: jnp.dtype
+    grad_checkpoint: bool
+    dropout: float = 0.0
+
+    def setup(self):
+        self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
+
+        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
+        self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+
+        self.dk = self.model_dim // self.n_heads
+
+        if self.grad_checkpoint:
+            self.output = nn.remat(nn.Dense)(
+                features=self.model_dim, dtype=self.model_dtype
+            )
+        else:
+            self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+        self.out_dropout = nn.Dropout(rate=self.dropout)
+
+        self.rope = False
+        if self.dhR != 0:
+            self.rope = True
+            self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
+            self.Wqr = nn.Dense(
+                features=(self.dhR * self.n_heads), dtype=self.model_dtype
+            )
+            self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
+            self.rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
+
+    def __call__(
+        self,
+        x: Array,
+        *,
+        cKV_cache: Optional[Array] = None,
+        kRT_cache: Optional[Array] = None,
+        train=True,
+    ) -> Tuple[Array, Tuple[Array, Array]]:
+        B, T, C = x.shape
+
+        cKVt, cqt = jnp.split(self.W_down(x), 2, axis=-1)
+
+        if self.rope:
+            t_start = 0
+            if cKV_cache is not None:
+                t_start = cKV_cache.shape[1]
+
+            kRt = self.rope_k(self.Wkr(x), t_start)
+
+            qRt = self.rope_q(self.Wqr(x), t_start)
+            qRt = rearrange(qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR)
+
+        if not train:
+            if cKV_cache is not None:
+                cKVt = jnp.concatenate([cKV_cache, cKVt], axis=1)
+            cKV_cache = cKVt
+
+            if self.rope:
+                if kRT_cache is not None:
+                    kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
+                kRT_cache = kRt
+
+        k, v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
+        q = self.W_uQ(cqt)
+
+        k = rearrange(k, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+
+        if self.rope:
+            q = jnp.concatenate([q, qRt], axis=-1)
+            kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
+            k = jnp.concatenate([k, kRt], axis=-1)
+
+        def scaledDotProd(q, k, v, mask):
+            q = q.astype("float32")
+            k = k.astype("float32")
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.dk**0.5))
+            w = jnp.where(mask == 0, -9e15, w)
+            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
+            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
+            return output
+
+        if self.grad_checkpoint:
+            scaledDotProd = jax.remat(scaledDotProd)
+
+        if T == 1:
+            mask = jnp.ones((B, self.n_heads, 1, k.shape[2]))
+        else:
+            mask = jnp.tril(
+                jnp.ones((B, self.n_heads, q.shape[2], k.shape[2])),
+            )
+
+        output = scaledDotProd(q, k, v, mask)
+        output = rearrange(output, "B nh T dk -> B T (nh dk)")
+
+        output = self.output(output)
+        output = self.out_dropout(output, deterministic=not train)
+        return output, (cKV_cache, kRT_cache)
+
+
 class Block(nn.Module):
     model_dimension: int
     n_heads: int
@@ -443,10 +443,17 @@ class EncoderBlock(nn.Module):
             Optional[List[Tuple[Optional[Array], Optional[Array]]]], Optional[PyTree]
         ],
     ]:
-        out_cache = []
+        cKV_cache = []
+        kRT_cache = []
         load = None
         for i in range(self.dhR_blocks):
-            layer_cache = (None, None) if cache is None else cache[i]
+            if cache is None:
+                layer_cache = (None, None)
+            else:
+                cKV = cache[0][i]
+                kRT = cache[1][i] if i < self.dhR_blocks - 1 else None
+                layer_cache = (cKV, kRT)
+
             x, (current_cache, current_load) = Block(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
@@ -469,7 +476,14 @@ class EncoderBlock(nn.Module):
                     add_tree(load[1], current_load[1]),
                 )
 
-            out_cache.append(current_cache)
+            cKV_cache.append(current_cache[0])
+            if i < self.dhR_blocks - 1:
+                kRT_cache.append(current_cache[1])
+
+        out_cache = (
+            jnp.stack(cKV_cache, axis=0),
+            jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
+        )
 
         return x, (out_cache, load)
 
@@ -509,16 +523,17 @@ class Decoder(nn.Module):
             model_dtype=self.model_dtype,
         )
         x = embed(x)
-        out_cache = []
+        cKV_cache = []
+        kRT_cache = []
         load = None
         for i in range(self.blocks):
-            layer_cache = (
-                None
-                if cache is None
-                else cache[
-                    i * len(cache) // self.blocks : (i + 1) * len(cache) // self.blocks
-                ]
-            )
+            if cache is None:
+                layer_cache = None
+            else:
+                cKV = cache[0][i]
+                kRT = cache[1][i] if self.dhR_blocks > 1 else None
+                layer_cache = (cKV, kRT)
+
             x, (current_cache, current_load) = EncoderBlock(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
@@ -543,7 +558,14 @@ class Decoder(nn.Module):
                     add_tree(load[1], current_load[1]),
                 )
 
-            out_cache.extend(current_cache)
+            cKV_cache.append(current_cache[0])
+            if i < self.dhR_blocks - 1:
+                kRT_cache.append(current_cache[1])
+
+        out_cache = (
+            jnp.stack(cKV_cache, axis=0),
+            jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
+        )
 
         x = embed(x, out=True)
 
@@ -654,7 +676,9 @@ class shardedModel:
         key: jax.random.key,
         mesh: jax.sharding.Mesh,
     ) -> List[str]:
-        pass
+        raise NotImplementedError(
+            "have to do"
+        )
 
     @staticmethod
     def shard_params(
@@ -731,7 +755,7 @@ class shardedModel:
                 current_params = layer.init(init_key, x, train=False)["params"]
                 layer_params.append(current_params)
 
-            layer_params = jax.tree.map(lambda *x: jnp.concat(x, axis=0), *layer_params)
+            layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
 
             return layer_params
 
@@ -767,9 +791,9 @@ if __name__ == "__main__":
         model_dimension=64,
         n_heads=4,
         dhR=64,
-        dhR_blocks=1,
+        dhR_blocks=2,
         T=32,
-        vocab_size=10000,
+        vocab_size=50257,
         dropout=0.1,
         blocks=4,
         n_experts=4,
@@ -789,6 +813,6 @@ if __name__ == "__main__":
     devices = np.array(jax.devices()).reshape((2, 4))
     mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
     print(mesh)
-    model, params = shardedModel.get_model(model_cfg, mesh, key)
+    model, params = shardedModel.get_model_and_params(model_cfg, mesh, key)
     print_params(params)
     breakpoint()

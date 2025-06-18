@@ -14,11 +14,20 @@ class Dataset:
         data_path: str | List[str],
         T: int,
         batch_size: int,
+        microbatch: int,
+        dp: int,
+        pp: int,
         partition: Optional[NamedSharding] = None,
     ):
+        assert (batch_size % microbatch) == 0, "microbatch should divide batch size"
+        assert (microbatch % pp) == 0, "pp should divide microbatch size"
+        assert len(data_path) > 0, "data should not be empty"
+
         self.T = T
         self.batch_size = batch_size
-        assert len(data_path) > 0, "data should not be empty"
+        self.dp = dp
+        self.microbatch = microbatch
+
         if isinstance(data_path, str):
             data_path = [data_path]
         self.data_path = data_path
@@ -32,16 +41,24 @@ class Dataset:
     def load_next_shard(self, display: bool = False):
         data = np.load(self.data_path[self.shard_idx])
         self.dataset = data[:-1]
-        self.labels = data[1 : ]
+        self.labels = data[1:]
 
         len_dataset = self.dataset.shape[0]
         max_batches = len_dataset // (self.batch_size * self.T)
 
         self.dataset = self.dataset[: max_batches * self.batch_size * self.T].reshape(
-            max_batches, self.batch_size, self.T
+            max_batches,
+            self.dp,
+            self.microbatch,
+            self.batch_size // (self.dp * self.microbatch),
+            self.T,
         )
         self.labels = self.labels[: max_batches * self.batch_size * self.T].reshape(
-            max_batches, self.batch_size, self.T
+            max_batches,
+            self.dp,
+            self.microbatch,
+            self.batch_size // (self.dp * self.microbatch),
+            self.T,
         )
 
         if self.partition is not None:
@@ -103,10 +120,18 @@ class Dataset:
             ]
 
         train_dataset = cls(
-            train_dataset_path, cfg.T, cfg.train_batch_size, partition=partition
+            train_dataset_path,
+            cfg.T,
+            cfg.train_batch_size,
+            cfg.microbatch,
+            partition=partition,
         )
         val_dataset = cls(
-            val_dataset_path, cfg.T, cfg.val_batch_size, partition=partition
+            val_dataset_path,
+            cfg.T,
+            cfg.val_batch_size,
+            cfg.microbatch,
+            partition=partition,
         )
 
         return train_dataset, val_dataset

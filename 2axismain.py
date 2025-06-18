@@ -71,7 +71,7 @@ class TrainStateEasy:
         opt_state_init = tx.init(params)
         opt_state_restored = jax.tree_util.tree_unflatten(
             jax.tree_util.tree_structure(opt_state_init),
-            jax.tree_util.tree_leaves(restored["opt_state"])
+            jax.tree_util.tree_leaves(restored["opt_state"]),
         )
         opt_state = jax.tree.map(
             lambda x, s: jax.device_put(x, s.sharding),
@@ -89,6 +89,7 @@ class TrainStateEasy:
     def n_params(self):
         param_count = sum(x.size for x in jax.tree.leaves(self.params))
         return param_count
+
 
 def setup_devices(cfg: config):
     device_cfg = cfg.device_config
@@ -115,8 +116,8 @@ def setup_devices(cfg: config):
     print(f"Mesh: {mesh}")
     count = devices.shape
     count = {
-        'data': count[0],
-        'model': count[1],
+        "data": count[0],
+        "model": count[1],
     }
 
     return mesh, count
@@ -124,12 +125,12 @@ def setup_devices(cfg: config):
 
 def loss(model, alpha, params, key, x, y, train):
     B, T = x.shape
-    pred, (_, load) = model.apply(
-        {"params": params}, x, train=train, rngs={"dropout": key}
-    )
+    pred, (_, load) = pipe_step(model, params, x, train=train, rngs={"dropout": key})
+
     log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
-    loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
     y = y.reshape(B * T)
+
+    loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
     loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_prob, y)).mean()
 
     loss_balance = 0.0
@@ -138,7 +139,120 @@ def loss(model, alpha, params, key, x, y, train):
 
     loss = loss_cross + alpha * loss_balance
 
-    return loss, (load, loss_cross, loss_balance)
+    loss = jax.lax.pmean(loss, axis_name="model")
+    aux_stat = (load, loss_cross, loss_balance)
+    aux_stat = jax.lax.pmean(aux_stat, axis_name="model")
+
+    return loss, aux_stat
+
+
+def pipe_step(model, params, x, train, rngs):
+    embedding_model, layer_model = model
+    embedding_params, layer_params = params
+
+    x = x[0]  # remove dp batch dim
+    embeddings = embedding_model.apply(
+        {"params": embedding_params},
+        x,
+        train=train,
+    )
+
+    layer_out, (cache, load) = layer_fn(
+        lambda x, params: layer_model.apply(
+            {"params": params},
+            x,
+            train=train,
+            rngs=rngs,
+        ),
+        embeddings,
+        layer_params,
+    )
+
+    logits = embedding_model.apply(
+        {"params": embedding_params}, layer_out, train=train, out=True
+    )
+
+    logits = logits[None, ...]  # add dp batch dim
+
+    return logits, (cache, load)
+
+
+# TODO: Add load
+def layer_fn(fwd_fn, x, params):
+    idx = jax.lax.axis_index("model")
+    n_devices = jax.lax.psum(1, "model")
+    microbatch_per_device = x.shape[0]
+    microbatch = n_devices * microbatch_per_device
+    layers_per_device = params["Block_0"]["LayerNorm_0"]["bias"].shape[0]
+    perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
+
+    outputs = jnp.zeros_like(x) * jnp.nan
+    state = jnp.zeros((layers_per_device, x.shape[0], x.shape[1]), dtype=x.dtype)
+    cKV_cache = []
+    kRT_cache = []
+
+    for i in range(n_devices + microbatch - 1):
+        batch_idx = i % microbatch_per_device
+        layer_idx = (i + 1 - layers_per_device) % microbatch_per_device
+        state, (cache, load) = state.at[0].set(
+            jnp.where(idx == 0, x[batch_idx], state[0])
+        )
+        cKV_cache.append(cache[0])
+        kRT_cache.append(cache[1])
+        state = jnp.vmap(fwd_fn, in_axes=(0, 0))(state, params)
+        outputs = outputs.at[layer_idx].set(
+            jnp.where(
+                idx == (n_devices - 1),
+                state[-1],
+                outputs[layer_idx],
+            )
+        )
+
+        state_perm = jax.lax.ppermute(
+            state[-1],
+            axis_name="model",
+            perm=perm,
+        )[None, ...]
+
+        state = jnp.concatenate([state_perm, state[:-1]], axis=0)
+
+        if batch_idx == microbatch - 1:
+            inputs = jax.lax.ppermute(
+                inputs,
+                axis="model",
+                perm=perm,
+            )
+
+        if layer_idx == microbatch_per_device - 1:
+            outputs = jax.lax.ppermute(
+                outputs,
+                axis="model",
+                perm=perm,
+            )
+
+    cKV_cache = jnp.stack(cKV_cache, axis=0)
+    kRT_cache = jnp.stack(kRT_cache, axis=0) if kRT_cache[0] is not None else None
+
+    slice_fn = lambda idx, x: jax.lax.dynamic_slice(
+        x, (0, idx, 0, 0), (x.shape[0], microbatch, x.shape[2], x.shape[3])
+    )
+    cKV_cache = jax.vmap(slice_fn)(
+        jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)), cKV_cache
+    )
+
+    if kRT_cache is not None:
+        kRT_cache = jax.vmap(slice_fn)(
+            jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)),
+            kRT_cache,
+        )
+
+    outputs = jax.lax.ppermute(
+        outputs,
+        axis_name="model",
+        perm=perm,
+    )
+
+    return outputs, ((cKV_cache, kRT_cache), None)
 
 
 def step(loss_fn, grad_steps, params, key, x, y, train=True):
@@ -227,21 +341,22 @@ def main(config: config):
     )
 
     total_steps = config.training_steps
-    config.data.train_batch_size *= count['data'] * config.grad_step
-    config.data.val_batch_size *= count['data'] * config.eval_steps
-    data_partition = jax.sharding.NamedSharding(
-        mesh,
-        P(None, "data", None),
-    )
+    config.data.train_batch_size *= count["data"] * config.grad_step
+    config.data.val_batch_size *= count["data"] * config.eval_steps
 
     print("setting up dataset")
+    data_partition = jax.sharding.NamedSharding(
+        mesh,
+        P(None, "data", "model", None),
+    )
     (
         train_dataset,
         val_dataset,
-    ) = Dataset.getDataset(config.data, partition=data_partition)
+    ) = Dataset.getDataset(
+        config.data, partition=data_partition, dp=count["data"], pp=count["model"]
+    )
 
     print(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
-
 
     def save_checkpoint(step, wandb_id):
         model_state = {
@@ -297,7 +412,6 @@ def main(config: config):
                 id=wandb_id,
                 config=asdict(config),
             )
-
     else:
         print("No checkpoint found, starting from scratch")
         print("Creating model ...")
@@ -305,10 +419,7 @@ def main(config: config):
         params = shardedModel.get_params(
             cfg=config.model, model=model, mesh=mesh, key=key()
         )
-        state = TrainStateEasy(
-            params=params,
-            tx=tx
-        )
+        state = TrainStateEasy(params=params, tx=tx)
 
         if use_wandb:
             wandb.init(
@@ -322,6 +433,8 @@ def main(config: config):
         save_checkpoint(0, wandb_id)
 
     print(f"Model parameter count: {state.n_params:,d} ")
+
+    breakpoint()
 
     train_step = jax.jit(
         jax.shard_map(
@@ -345,7 +458,6 @@ def main(config: config):
         )
     )
 
-
     print("start training")
     breakpoint()
 
@@ -353,7 +465,6 @@ def main(config: config):
     train_loss = 0.0
     sample_key = key()
     loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
-
 
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):
