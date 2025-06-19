@@ -184,6 +184,7 @@ def layer_fn(fwd_fn, x, params):
     microbatch_per_device = x.shape[0]
     microbatch = n_devices * microbatch_per_device
     layers_per_device = params["Block_0"]["LayerNorm_0"]["bias"].shape[0]
+    layers = layers_per_device * n_devices
     perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
 
     outputs = jnp.zeros_like(x) * jnp.nan
@@ -193,7 +194,7 @@ def layer_fn(fwd_fn, x, params):
 
     for i in range(n_devices + microbatch - 1):
         batch_idx = i % microbatch_per_device
-        layer_idx = (i + 1 - layers_per_device) % microbatch_per_device
+        layer_idx = (i + 1 - layers) % microbatch_per_device
         state, (cache, load) = state.at[0].set(
             jnp.where(idx == 0, x[batch_idx], state[0])
         )
@@ -347,7 +348,7 @@ def main(config: config):
     print("setting up dataset")
     data_partition = jax.sharding.NamedSharding(
         mesh,
-        P(None, "data", "model", None),
+        P(None, "data", "model", None, None),
     )
     (
         train_dataset,
@@ -434,7 +435,8 @@ def main(config: config):
 
     print(f"Model parameter count: {state.n_params:,d} ")
 
-    breakpoint()
+
+    loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
 
     train_step = jax.jit(
         jax.shard_map(
@@ -442,8 +444,8 @@ def main(config: config):
                 loss_fn, config.grad_step, params, key, x, y, train=True
             ),
             mesh=mesh,
-            in_specs=(P("data"), P(), P("data"), P("data")),
-            out_specs=(P(), P()),
+            in_specs=(P("data", "model"), (P(), P("model")), P("data", "model"), P("data", "model")),
+            out_specs=P(),
         )
     )
 
@@ -453,8 +455,8 @@ def main(config: config):
                 loss_fn, config.eval_steps, params, key, x, y, train=False
             )[1],
             mesh=mesh,
-            in_specs=(P("data"), P(), P("data"), P("data")),
-            out_specs=(P()),
+            in_specs=(P("data", "model"), (P(), P("model")), P("data", "model"), P("data", "model")),
+            out_specs=P(),
         )
     )
 
@@ -464,7 +466,7 @@ def main(config: config):
     start = time.time()
     train_loss = 0.0
     sample_key = key()
-    loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
+
 
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):

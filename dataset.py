@@ -100,7 +100,7 @@ class Dataset:
 
     @classmethod
     def getDataset(
-        cls, cfg: dataConfig, partition: Optional[NamedSharding] = None
+        cls, cfg: dataConfig, partition: Optional[NamedSharding] = None, dp: int = 1, pp: int = 1
     ) -> Tuple["Dataset", "Dataset"]:
         train_dataset_path = os.path.abspath(cfg.train_dataset_path)
 
@@ -123,15 +123,19 @@ class Dataset:
             train_dataset_path,
             cfg.T,
             cfg.train_batch_size,
-            cfg.microbatch,
+            cfg.micro_batch_size,
             partition=partition,
+            dp=dp,
+            pp=pp
         )
         val_dataset = cls(
             val_dataset_path,
             cfg.T,
             cfg.val_batch_size,
-            cfg.microbatch,
+            cfg.micro_batch_size,
             partition=partition,
+            dp=dp,
+            pp=pp
         )
 
         return train_dataset, val_dataset
