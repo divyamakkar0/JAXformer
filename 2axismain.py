@@ -14,10 +14,16 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
-jax.config.update("jax_debug_nans", True)
-jax.config.update("jax_disable_jit", False)
 
-import flax
+DEBUG = os.getenv("DEBUG")
+if DEBUG is not None and int(DEBUG) == 1:
+    print(f" --------- DEBUGGING MODE ON -----------")
+    jax.config.update("jax_debug_nans", False)
+    jax.config.update("jax_disable_jit", True)
+else:
+    jax.config.update("jax_debug_nans", True)
+    jax.config.update("jax_disable_jit", False)
+
 import time
 import ast
 import json
@@ -37,6 +43,7 @@ from jax.sharding import PartitionSpec as P
 from functools import partial
 from typing import Optional, Tuple, Type, TypeVar
 from jaxtyping import PyTree
+from einops import rearrange
 import numpy as np
 
 
@@ -59,10 +66,13 @@ class TrainStateEasy:
         self.opt_state = opt_state
         if opt_state is None:
             self.opt_state = tx.init(params)
+            breakpoint()
 
     def apply_gradients(self, grads):
-        updates, self.opt_state = self.tx.update(grads, self.opt_state)
+        updates, self.opt_state = self.tx.update(grads, self.opt_state, self.params)
         self.params = optax.apply_updates(self.params, updates)
+
+        return self
 
     @classmethod
     def restore(cls, restored: PyTree, tx, mesh: Mesh):
@@ -74,7 +84,7 @@ class TrainStateEasy:
             jax.tree_util.tree_leaves(restored["opt_state"]),
         )
         opt_state = jax.tree.map(
-            lambda x, s: jax.device_put(x, s.sharding),
+            lambda x, s: jax.lax.with_sharding_constraint(x, s.sharding),
             opt_state_restored,
             opt_state_init,
         )
@@ -124,11 +134,12 @@ def setup_devices(cfg: config):
 
 
 def loss(model, alpha, params, key, x, y, train):
-    B, T = x.shape
-    pred, (_, load) = pipe_step(model, params, x, train=train, rngs={"dropout": key})
+    M, B, T = x.shape
+    pred, (_, load) = pipe_step(model, params, x, key=key, train=train)
 
-    log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
-    y = y.reshape(B * T)
+    total_tokens = M * B * T
+    log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(total_tokens, -1)
+    y = y.reshape(total_tokens)
 
     loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
     loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_prob, y)).mean()
@@ -138,47 +149,38 @@ def loss(model, alpha, params, key, x, y, train):
         loss_balance = model.n_experts / (model.k * T**2) * load.sum(axis=0)
 
     loss = loss_cross + alpha * loss_balance
+    aux_stat = (load, loss_cross, loss_balance)
 
     loss = jax.lax.pmean(loss, axis_name="model")
-    aux_stat = (load, loss_cross, loss_balance)
     aux_stat = jax.lax.pmean(aux_stat, axis_name="model")
 
     return loss, aux_stat
 
 
-def pipe_step(model, params, x, train, rngs):
+def pipe_step(model, params, x, key, train):
     embedding_model, layer_model = model
     embedding_params, layer_params = params
 
-    x = x[0]  # remove dp batch dim
-    embeddings = embedding_model.apply(
-        {"params": embedding_params},
-        x,
-        train=train,
-    )
+    embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
 
-    layer_out, (cache, load) = layer_fn(
-        lambda x, params: layer_model.apply(
-            {"params": params},
-            x,
-            train=train,
-            rngs=rngs,
-        ),
-        embeddings,
-        layer_params,
-    )
+    # layer_out, (cache, load) = layer_fn(
+    #     lambda x, params, key: layer_model.apply(
+    #         {"params": params},
+    #         x,
+    #         train=train,
+    #         rngs={'dropout': key},
+    #     ),
+    #     embeddings,
+    #     layer_params,
+    #     key[0]
+    # )
 
-    logits = embedding_model.apply(
-        {"params": embedding_params}, layer_out, train=train, out=True
-    )
-
-    logits = logits[None, ...]  # add dp batch dim
-
-    return logits, (cache, load)
+    logits = embedding_model.apply({"params": embedding_params}, embeddings, out=True)
+    return logits, (None, None)
 
 
 # TODO: Add load
-def layer_fn(fwd_fn, x, params):
+def layer_fn(fwd_fn, x, params, key):
     idx = jax.lax.axis_index("model")
     n_devices = jax.lax.psum(1, "model")
     microbatch_per_device = x.shape[0]
@@ -188,19 +190,25 @@ def layer_fn(fwd_fn, x, params):
     perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
 
     outputs = jnp.zeros_like(x) * jnp.nan
-    state = jnp.zeros((layers_per_device, x.shape[0], x.shape[1]), dtype=x.dtype)
+    state = jnp.zeros(
+        (layers_per_device, x.shape[1], x.shape[2], x.shape[3]), dtype=x.dtype
+    )
     cKV_cache = []
     kRT_cache = []
 
     for i in range(n_devices + microbatch - 1):
         batch_idx = i % microbatch_per_device
         layer_idx = (i + 1 - layers) % microbatch_per_device
-        state, (cache, load) = state.at[0].set(
-            jnp.where(idx == 0, x[batch_idx], state[0])
-        )
-        cKV_cache.append(cache[0])
-        kRT_cache.append(cache[1])
-        state = jnp.vmap(fwd_fn, in_axes=(0, 0))(state, params)
+
+        state = state.at[0].set(jnp.where(idx == 0, x[batch_idx], state[0]))
+
+        key, dropout_key = jax.random.split(key)
+        fwd_fn_i = jax.tree_util.Partial(fwd_fn, key=dropout_key)
+        state, (cache, load) = jax.vmap(fwd_fn_i, in_axes=(0, 0))(state, params)
+        if cache is not None:
+            cKV_cache.append(cache[0])
+            kRT_cache.append(cache[1])
+
         outputs = outputs.at[layer_idx].set(
             jnp.where(
                 idx == (n_devices - 1),
@@ -220,32 +228,39 @@ def layer_fn(fwd_fn, x, params):
         if batch_idx == microbatch - 1:
             inputs = jax.lax.ppermute(
                 inputs,
-                axis="model",
+                axis_name="model",
                 perm=perm,
             )
 
         if layer_idx == microbatch_per_device - 1:
             outputs = jax.lax.ppermute(
                 outputs,
-                axis="model",
+                axis_name="model",
                 perm=perm,
             )
 
-    cKV_cache = jnp.stack(cKV_cache, axis=0)
-    kRT_cache = jnp.stack(kRT_cache, axis=0) if kRT_cache[0] is not None else None
-
-    slice_fn = lambda idx, x: jax.lax.dynamic_slice(
-        x, (0, idx, 0, 0), (x.shape[0], microbatch, x.shape[2], x.shape[3])
-    )
-    cKV_cache = jax.vmap(slice_fn)(
-        jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)), cKV_cache
-    )
-
-    if kRT_cache is not None:
-        kRT_cache = jax.vmap(slice_fn)(
-            jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)),
-            kRT_cache,
+    if len(cKV_cache) == 0:
+        out_cache = None
+    else:
+        slice_fn = lambda idx, x: jax.lax.dynamic_slice(
+            x, (0, idx, 0, 0), (x.shape[0], microbatch, x.shape[2], x.shape[3])
         )
+        cKV_cache = jax.vmap(slice_fn)(
+            jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)),
+            cKV_cache,
+        )
+        cKV_cache = jnp.stack(cKV_cache, axis=0)
+
+        if kRT_cache[0] is not None:
+            kRT_cache = jax.vmap(slice_fn)(
+                jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)),
+                kRT_cache,
+            )
+            kRT_cache = jnp.stack(kRT_cache, axis=0)
+        else:
+            kRT_cache = None
+
+        out_cache = (cKV_cache, kRT_cache)
 
     outputs = jax.lax.ppermute(
         outputs,
@@ -253,16 +268,16 @@ def layer_fn(fwd_fn, x, params):
         perm=perm,
     )
 
-    return outputs, ((cKV_cache, kRT_cache), None)
+    return outputs, (out_cache, None)
 
 
-def step(loss_fn, grad_steps, params, key, x, y, train=True):
+def step(loss_fn, grad_steps, params, key, x, y, train):
     if train:
         loss_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
 
     def step_fn(grads, batch):
-        *data, key = batch
-        val = loss_fn(params, key, *data, train=train)
+        x, y, key = batch
+        val = loss_fn(params, key, x, y, train=train)
 
         if train:
             val, grads_new = val
@@ -271,8 +286,6 @@ def step(loss_fn, grad_steps, params, key, x, y, train=True):
                 grads,
                 grads_new,
             )
-        else:
-            grads = None
 
         loss, (load, loss_cross, loss_balance) = val
 
@@ -289,10 +302,9 @@ def step(loss_fn, grad_steps, params, key, x, y, train=True):
 
         return grads, metrics
 
-    B, T = x.shape
-
-    x = x.reshape(grad_steps, B // grad_steps, T)
-    y = y.reshape(grad_steps, B // grad_steps, T)
+    x = rearrange(x, "1 m (g b) t -> g m b t", g=grad_steps)
+    y = rearrange(y, "1 m (g b) t -> g m b t", g=grad_steps)
+    key = rearrange(key, "1 m g s -> g m s", g=grad_steps, s=2)
 
     grads = None
     if train:
@@ -435,46 +447,58 @@ def main(config: config):
 
     print(f"Model parameter count: {state.n_params:,d} ")
 
+    loss_fn = jax.tree_util.Partial(
+        loss,
+        model,
+        config.alpha,
+    )
 
-    loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
-
-    train_step = jax.jit(
-        jax.shard_map(
+    train_step = jax.shard_map(
+        jax.jit(
             lambda key, params, x, y: step(
                 loss_fn, config.grad_step, params, key, x, y, train=True
             ),
-            mesh=mesh,
-            in_specs=(P("data", "model"), (P(), P("model")), P("data", "model"), P("data", "model")),
-            out_specs=P(),
-        )
+        ),
+        mesh=mesh,
+        in_specs=(
+            P("data", "model"),
+            (P(), P("model")),
+            P("data", "model"),
+            P("data", "model"),
+        ),
+        out_specs=((P(), P("model")), P()),
     )
 
-    eval_step = jax.jit(
-        jax.shard_map(
+    eval_step = jax.shard_map(
+        jax.jit(
             lambda key, params, x, y: step(
                 loss_fn, config.eval_steps, params, key, x, y, train=False
-            )[1],
-            mesh=mesh,
-            in_specs=(P("data", "model"), (P(), P("model")), P("data", "model"), P("data", "model")),
-            out_specs=P(),
-        )
+            )[0],
+        ),
+        mesh=mesh,
+        in_specs=(
+            P("data", "model"),
+            (P(), P("model")),
+            P("data", "model"),
+            P("data", "model"),
+        ),
+        out_specs=P(),
     )
 
     print("start training")
-    breakpoint()
 
     start = time.time()
     train_loss = 0.0
     sample_key = key()
 
-
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):
-            if count * config.grad_step == 1:
-                keys = jnp.array([key()])
+            if count["data"] * count["model"] * config.grad_step == 1:
+                keys = jnp.array([key()])[None, :]
             else:
-                keys = key(count * config.grad_step)
-
+                keys = key(count["data"] * count["model"] * config.grad_step).reshape(
+                    count["data"], count["model"], config.grad_step, 2
+                )
             grads, metrics = train_step(
                 keys,
                 state.params,
@@ -482,6 +506,8 @@ def main(config: config):
             )
 
         state = state.apply_gradients(grads=grads)
+        breakpoint()
+
         train_loss += metrics["loss"]
 
         if use_wandb:

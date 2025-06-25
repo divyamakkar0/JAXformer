@@ -83,7 +83,7 @@ def parse_args():
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--vocab_size", type=int, default=50257)
-    parser.add_argument("--blocks", type=int, default=2)
+    parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--dhR", type=int, default=64)
     parser.add_argument("--dhR_blocks", type=int, default=4)

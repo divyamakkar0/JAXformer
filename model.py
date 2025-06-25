@@ -27,9 +27,11 @@ class Embeddings(nn.Module):
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
             x = self.embedding(x)
+            if self.is_mutable_collection("params"):
+                _ = self.layer_norm(x)
         else:
-            x = self.layer_norm(x)
-            x = self.embedding.attend(x)
+            x = self.embedding.attend(self.layer_norm(x))
+
         return x
 
 
@@ -480,10 +482,13 @@ class EncoderBlock(nn.Module):
             if i < self.dhR_blocks - 1:
                 kRT_cache.append(current_cache[1])
 
-        out_cache = (
-            jnp.stack(cKV_cache, axis=0),
-            jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
-        )
+        if train:
+            out_cache = None
+        else:
+            out_cache = (
+                jnp.stack(cKV_cache, axis=0),
+                jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
+            )
 
         return x, (out_cache, load)
 
@@ -531,7 +536,7 @@ class Decoder(nn.Module):
                 layer_cache = None
             else:
                 cKV = cache[0][i]
-                kRT = cache[1][i] if self.dhR_blocks > 1 else None
+                kRT = cache[1][i] if cache[1][i] is not None else None
                 layer_cache = (cKV, kRT)
 
             x, (current_cache, current_load) = EncoderBlock(
@@ -559,8 +564,7 @@ class Decoder(nn.Module):
                 )
 
             cKV_cache.append(current_cache[0])
-            if i < self.dhR_blocks - 1:
-                kRT_cache.append(current_cache[1])
+            kRT_cache.append(current_cache[1])
 
         out_cache = (
             jnp.stack(cKV_cache, axis=0),
@@ -593,6 +597,7 @@ class Decoder(nn.Module):
             x_encode = jnp.array(enc.encode(x), dtype=jnp.int32)
             out = jnp.concatenate([out, x_encode], axis=-1)
 
+        prompt_length = out.shape[0]
         out = jnp.repeat(out[None, :], B, axis=0)
         cache = None
 
@@ -603,6 +608,8 @@ class Decoder(nn.Module):
                 {"params": params}, inp, cache=cache, train=False
             )
 
+            print(f"logits {logits.shape} | {cache[0].shape} | {cache[1].shape}")
+
             logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
             logits /= temperature
 
@@ -611,7 +618,7 @@ class Decoder(nn.Module):
 
             return out_next, (cache, logits)
 
-        for _ in range(min(max_tokens, self.T)):
+        for _ in range(min(max_tokens, self.T - prompt_length)):
             key, sample_key = jax.random.split(key)
             out_next, (cache, logits) = sample(
                 sample_key, params, out, cache, B, k, temperature
@@ -676,9 +683,7 @@ class shardedModel:
         key: jax.random.key,
         mesh: jax.sharding.Mesh,
     ) -> List[str]:
-        raise NotImplementedError(
-            "have to do"
-        )
+        raise NotImplementedError("have to do")
 
     @staticmethod
     def shard_params(
@@ -693,6 +698,7 @@ class shardedModel:
         embedding_params = jax.device_put(embedding_params, embedding_partition)
         layer_partition = jax.sharding.NamedSharding(mesh, P("model"))
         layer_params = jax.device_put(layer_params, layer_partition)
+
         return embedding_params, layer_params
 
     @staticmethod
@@ -788,19 +794,19 @@ if __name__ == "__main__":
         print(json.dumps(shapes, indent=4))
 
     model_cfg = modelConfig(
-        model_dimension=64,
+        model_dimension=16,
         n_heads=4,
-        dhR=64,
+        dhR=8,
         dhR_blocks=2,
-        T=32,
-        vocab_size=50257,
+        T=4,
+        vocab_size=32,
         dropout=0.1,
         blocks=4,
         n_experts=4,
         n_shared=2,
         k=2,
         moe=True,
-        latent_dim=16,
+        latent_dim=8,
         model_dtype="bfloat16",
         grad_checkpoint=False,
     )

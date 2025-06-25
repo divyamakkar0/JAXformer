@@ -302,7 +302,7 @@ def main(config: config):
 
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):
-            if count * config.grad_step == 1:
+            if count["data"] * count["model"] * config.grad_step == 1:
                 keys = jnp.array([key()])
             else:
                 keys = key(count * config.grad_step)
