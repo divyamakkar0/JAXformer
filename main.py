@@ -162,7 +162,7 @@ def step(loss_fn, grad_steps, params, key, x, y, train=True):
     grads = None
     if train:
         grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-        grads_vary = jax.lax.pvary(grads, 'model')
+        grads_vary = jax.lax.pvary(grads, "model")
 
     grads, metrics = jax.lax.scan(step_fn, init=grads_vary, xs=(x, y, key), unroll=1)
 

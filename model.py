@@ -690,14 +690,11 @@ class shardedModel:
         params: Tuple[PyTree, PyTree],
         mesh: jax.sharding.Mesh,
     ) -> Tuple[PyTree, PyTree]:
-
         embed_sharding = jax.tree.map(
-            lambda _: jax.sharding.NamedSharding(mesh, P()),
-            params[0]
+            lambda _: jax.sharding.NamedSharding(mesh, P()), params[0]
         )
         layer_sharding = jax.tree.map(
-            lambda _: jax.sharding.NamedSharding(mesh, P("model")),
-            params[1]
+            lambda _: jax.sharding.NamedSharding(mesh, P("model")), params[1]
         )
         params_sharding = (embed_sharding, layer_sharding)
         params = jax.device_put(params, params_sharding)
@@ -742,8 +739,7 @@ class shardedModel:
         key, init_key = jax.random.split(key)
         embedding_params = embedding_layer.init(init_key, x)["params"]
         embed_sharding = jax.tree.map(
-            lambda _: jax.sharding.NamedSharding(mesh, P()),
-            embedding_params
+            lambda _: jax.sharding.NamedSharding(mesh, P()), embedding_params
         )
         embedding_params = jax.device_put(embedding_params, embed_sharding)
 
