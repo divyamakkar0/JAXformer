@@ -53,11 +53,7 @@ class KeyState:
 
     def __call__(self, num: int = 1):
         self.key, *rng = jax.random.split(self.key, num=num + 1)
-        if num == 1:
-            return rng[0]
-        else:
-            return jnp.array(rng)
-
+        return (rng[0] if num == 1 else jnp.array(rng))
 
 class TrainStateEasy:
     def __init__(self, params, tx, opt_state: Optional[PyTree] = None):
@@ -66,7 +62,6 @@ class TrainStateEasy:
         self.opt_state = opt_state
         if opt_state is None:
             self.opt_state = tx.init(params)
-            breakpoint()
 
     def apply_gradients(self, grads):
         updates, self.opt_state = self.tx.update(grads, self.opt_state, self.params)
@@ -75,18 +70,27 @@ class TrainStateEasy:
         return self
 
     @classmethod
-    def restore(cls, restored: PyTree, tx, mesh: Mesh):
-        params = shardedModel.shard_params(restored["params"], mesh)
+    def restore(cls, restored: PyTree, tx, mesh):
+        params = shardedModel.shard_params((*restored["params"],), mesh=mesh)
 
         opt_state_init = tx.init(params)
-        opt_state_restored = jax.tree_util.tree_unflatten(
+
+        opt_state = jax.tree_util.tree_unflatten(
             jax.tree_util.tree_structure(opt_state_init),
             jax.tree_util.tree_leaves(restored["opt_state"]),
         )
+
+        def shard_opt_leaf(init_leaf, loaded_leaf):
+            if np.ndim(loaded_leaf) == 0:
+                sharding = jax.sharding.NamedSharding(mesh, P())
+            else:
+                sharding = init_leaf.sharding
+            return jax.device_put(jnp.asarray(loaded_leaf, dtype=init_leaf.dtype), sharding)
+
         opt_state = jax.tree.map(
-            lambda x, s: jax.lax.with_sharding_constraint(x, s.sharding),
-            opt_state_restored,
+            shard_opt_leaf,
             opt_state_init,
+            opt_state
         )
 
         return cls(
@@ -308,13 +312,18 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
 
     grads = None
     if train:
-        grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
+        grads_init = lambda x: jax.lax.pvary(jnp.zeros_like(x), 'model')
+        grads = jax.tree.map(grads_init, params)
 
     grads, metrics = jax.lax.scan(step_fn, init=grads, xs=(x, y, key), unroll=1)
 
     if grads is not None:
         grads = jax.tree.map(lambda x: x / grad_steps, grads)
         grads = jax.lax.pmean(grads, axis_name="data")
+
+        embed_grads, layer_grads = grads
+        embed_grads = jax.lax.pmean(embed_grads, axis_name="model")
+        grads = (embed_grads, layer_grads)
 
     metrics = jax.tree.map(lambda x: x.mean(), metrics)
     metrics = jax.lax.pmean(metrics, axis_name="data")
@@ -378,7 +387,7 @@ def main(config: config):
         }
         save_tree = {
             "state": model_state,
-            "key": jax.device_get(key.key),
+            "key": key.key,
             "train_step_idx": train_dataset.step_idx,
             "train_shard_idx": (train_dataset.shard_idx - 1)
             % len(train_dataset.data_path),
@@ -403,7 +412,7 @@ def main(config: config):
         state = TrainStateEasy.restore(
             tree_state["state"],
             tx,
-            mesh,
+            mesh
         )
 
         train_dataset.step_idx = tree_state["train_step_idx"]
@@ -447,42 +456,43 @@ def main(config: config):
 
     print(f"Model parameter count: {state.n_params:,d} ")
 
+
     loss_fn = jax.tree_util.Partial(
         loss,
         model,
         config.alpha,
     )
 
-    train_step = jax.shard_map(
-        jax.jit(
+    train_step = jax.jit(
+        jax.shard_map(
             lambda key, params, x, y: step(
                 loss_fn, config.grad_step, params, key, x, y, train=True
             ),
-        ),
-        mesh=mesh,
-        in_specs=(
-            P("data", "model"),
-            (P(), P("model")),
-            P("data", "model"),
-            P("data", "model"),
-        ),
-        out_specs=((P(), P("model")), P()),
+            mesh=mesh,
+            in_specs=(
+                P("data", "model"),
+                (P(), P("model")),
+                P("data", "model"),
+                P("data", "model"),
+            ),
+            out_specs=((P(), P("model")), P()),
+        )
     )
 
-    eval_step = jax.shard_map(
-        jax.jit(
+    eval_step = jax.jit(
+        jax.shard_map(
             lambda key, params, x, y: step(
                 loss_fn, config.eval_steps, params, key, x, y, train=False
             )[0],
-        ),
-        mesh=mesh,
-        in_specs=(
-            P("data", "model"),
-            (P(), P("model")),
-            P("data", "model"),
-            P("data", "model"),
-        ),
-        out_specs=P(),
+            mesh=mesh,
+            in_specs=(
+                P("data", "model"),
+                (P(), P("model")),
+                P("data", "model"),
+                P("data", "model"),
+            ),
+            out_specs=((P(), P('model')), P()),
+        )
     )
 
     print("start training")
@@ -499,12 +509,15 @@ def main(config: config):
                 keys = key(count["data"] * count["model"] * config.grad_step).reshape(
                     count["data"], count["model"], config.grad_step, 2
                 )
+            keys = jax.device_put(keys, jax.sharding.NamedSharding(mesh, P("data", "model")))
+
+            breakpoint()
             grads, metrics = train_step(
                 keys,
                 state.params,
                 *train_dataset(),
             )
-
+        breakpoint()
         state = state.apply_gradients(grads=grads)
         breakpoint()
 
@@ -535,12 +548,15 @@ def main(config: config):
             )
 
             with jax.named_scope("eval_step"):
-                if count * config.grad_step == 1:
-                    keys = jnp.array([key()])
+                if count["data"] * count["model"] * config.eval_steps == 1:
+                    keys = jnp.array([key()])[None, :]
                 else:
-                    keys = key(count * config.grad_step)
+                    keys = key(count["data"] * count["model"] * config.eval_steps).reshape(
+                        count["data"], count["model"], config.eval_steps, 2
+                    )
+                keys = jax.device_put(keys, jax.sharding.NamedSharding(mesh, P("data", "model")))
                 metrics_val = eval_step(
-                    key(count * config.eval_steps),
+                    keys,
                     state.params,
                     *val_dataset(),
                 )

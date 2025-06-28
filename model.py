@@ -687,19 +687,22 @@ class shardedModel:
 
     @staticmethod
     def shard_params(
-        params: PyTree,
+        params: Tuple[PyTree, PyTree],
         mesh: jax.sharding.Mesh,
     ) -> Tuple[PyTree, PyTree]:
-        embedding_params, layer_params = params
-        embedding_partition = jax.sharding.NamedSharding(
-            mesh,
-            P(),
-        )
-        embedding_params = jax.device_put(embedding_params, embedding_partition)
-        layer_partition = jax.sharding.NamedSharding(mesh, P("model"))
-        layer_params = jax.device_put(layer_params, layer_partition)
 
-        return embedding_params, layer_params
+        embed_sharding = jax.tree.map(
+            lambda _: jax.sharding.NamedSharding(mesh, P()),
+            params[0]
+        )
+        layer_sharding = jax.tree.map(
+            lambda _: jax.sharding.NamedSharding(mesh, P("model")),
+            params[1]
+        )
+        params_sharding = (embed_sharding, layer_sharding)
+        params = jax.device_put(params, params_sharding)
+
+        return params
 
     @staticmethod
     def get_model(cfg):
@@ -738,11 +741,11 @@ class shardedModel:
         x = jnp.ones((1, cfg.T), dtype=jnp.int32)
         key, init_key = jax.random.split(key)
         embedding_params = embedding_layer.init(init_key, x)["params"]
-        embedding_partition = jax.sharding.NamedSharding(
-            mesh,
-            P(),
+        embed_sharding = jax.tree.map(
+            lambda _: jax.sharding.NamedSharding(mesh, P()),
+            embedding_params
         )
-        embedding_params = jax.device_put(embedding_params, embedding_partition)
+        embedding_params = jax.device_put(embedding_params, embed_sharding)
 
         model_devices = mesh.devices.shape[1]
         assert cfg.blocks // model_devices
