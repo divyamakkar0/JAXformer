@@ -80,12 +80,11 @@ class TrainStateEasy:
             jax.tree_util.tree_leaves(restored["opt_state"]),
         )
 
+        default_shard = jax.sharding.NamedSharding(mesh, P())
         def shard_opt_leaf(init_leaf, loaded_leaf):
-            if np.ndim(loaded_leaf) == 0:
-                sharding = jax.sharding.NamedSharding(mesh, P())
-            else:
-                sharding = init_leaf.sharding
-            return jax.device_put(jnp.asarray(loaded_leaf, dtype=init_leaf.dtype), sharding)
+            dim = np.ndim(loaded_leaf)
+            sharding = init_leaf.sharding if dim != 0 else default_shard
+            return jax.device_put(loaded_leaf, sharding)
 
         opt_state = jax.tree.map(
             shard_opt_leaf,
