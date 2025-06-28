@@ -3,7 +3,6 @@ import os
 os.environ["XLA_FLAGS"] = (
     "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true "
 )
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import jax
 import jax.numpy as jnp
@@ -56,7 +55,7 @@ class KeyState:
         return rng[0] if num == 1 else jnp.array(rng)
 
 
-class TrainStateEasy:
+class TrainState:
     def __init__(self, params, tx, opt_state: Optional[PyTree] = None):
         self.params = params
         self.tx = tx
@@ -406,7 +405,7 @@ def main(config: config):
         init_step = tree_state["step"]
         key.key = tree_state["key"]
 
-        state = TrainStateEasy.restore(tree_state["state"], tx, mesh)
+        state = TrainState.restore(tree_state["state"], tx, mesh)
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]
@@ -434,7 +433,7 @@ def main(config: config):
         params = shardedModel.get_params(
             cfg=config.model, model=model, mesh=mesh, key=key()
         )
-        state = TrainStateEasy(params=params, tx=tx)
+        state = TrainState(params=params, tx=tx)
 
         if use_wandb:
             wandb.init(
