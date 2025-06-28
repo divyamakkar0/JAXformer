@@ -10,24 +10,23 @@ from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
 from functools import partial
 from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh
 
 
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
-    model_dtype: jnp.dtype = jnp.float32
+    model_dtype: jnp.dtype
 
     def setup(self):
-        embedding_init_function = nn.initializers.variance_scaling(1.0, 'fan_in', 'normal', out_axis=0)
         self.embedding = nn.Embed(
             num_embeddings=self.vocab_size,
             features=self.model_dimension,
             dtype=self.model_dtype,
-            embedding_init=nn.with_partitioning(embedding_init_function, (None, 'tensor'))
         )
-        self.layer_norm = nn.LayerNorm()    
+        self.layer_norm = nn.LayerNorm()
 
-    def __call__(self, x: Array, out: bool=False) -> Array:
+    def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
             x = self.embedding(x)
         else:
@@ -35,17 +34,6 @@ class Embeddings(nn.Module):
             x = self.embedding.attend(x)
         return x
 
-class TPDense(nn.Module):
-  features: int
-  dtype: jnp.dtype = jnp.bfloat16
-  @nn.compact
-  def __call__(self, x):
-    init_func = nn.linear.default_kernel_init
-    h = nn.Dense(
-        self.features,
-        dtype=self.dtype,
-        kernel_init=nn.with_partitioning(init_func, (None, 'tensor')))(x)
-    return h
 
 class NoisyKGate(nn.Module):
     model_dimension: int
@@ -54,7 +42,7 @@ class NoisyKGate(nn.Module):
     model_dtype: jnp.dtype
 
     def setup(self):
-        self.centroids = TPDense(features=self.n_experts, dtype=self.model_dtype)
+        self.centroids = nn.Dense(features=self.n_experts, dtype=self.model_dtype)
 
     def top(self, x: Array) -> Tuple[Array, Array]:
         assert x.shape[0] == self.n_experts, "x must be of shape (n_experts, )"
@@ -73,6 +61,7 @@ class NoisyKGate(nn.Module):
 
         return g_scores, indices, s
 
+
 class MoE(nn.Module):
     model_dimension: int
     n_shared: int
@@ -83,7 +72,7 @@ class MoE(nn.Module):
     grad_checkpoint: bool
 
     def setup(self):
-        self.shared = TPDense(
+        self.shared = nn.Dense(
             features=self.model_dimension * self.n_shared,
         )
         self.experts = [
@@ -172,6 +161,7 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
+
 class FFBody(nn.Module):
     model_dimension: int
     ff_dim: int
@@ -180,17 +170,18 @@ class FFBody(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        x = TPDense(
+        x = nn.Dense(
             features=self.ff_dim,
             dtype=self.model_dtype,
         )(x)
         x = nn.gelu(x)
-        x = TPDense(
+        x = nn.Dense(
             features=self.model_dimension,
             dtype=self.model_dtype,
         )(x)
 
         return x
+
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -214,6 +205,7 @@ class FeedForward(nn.Module):
         x_ff = nn.Dropout(rate=self.dropout)(ff(x), deterministic=not train)
 
         return x_ff
+
 
 class RoPE:
     def __init__(self, T: int, model_dim: int):
@@ -255,6 +247,7 @@ class RoPE:
         x = x_rope.astype(x.dtype)
         return x
 
+
 class MLA(nn.Module):
     model_dim: int
     n_heads: int
@@ -266,26 +259,26 @@ class MLA(nn.Module):
     dropout: float = 0.0
 
     def setup(self):
-        self.W_down = TPDense(features=2 * self.latent_dim, dtype=self.model_dtype)
+        self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
 
-        self.W_uKV = TPDense(features=2 * self.model_dim, dtype=self.model_dtype)
-        self.W_uQ = TPDense(features=self.model_dim, dtype=self.model_dtype)
+        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
+        self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
 
         if self.grad_checkpoint:
-            self.output = nn.remat(TPDense)(
+            self.output = nn.remat(nn.Dense)(
                 features=self.model_dim, dtype=self.model_dtype
             )
         else:
-            self.output = TPDense(features=self.model_dim, dtype=self.model_dtype)
+            self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
         self.out_dropout = nn.Dropout(rate=self.dropout)
 
         self.rope = False
         if self.dhR != 0:
             self.rope = True
-            self.Wkr = TPDense(features=self.dhR, dtype=self.model_dtype)
-            self.Wqr = TPDense(
+            self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
+            self.Wqr = nn.Dense(
                 features=(self.dhR * self.n_heads), dtype=self.model_dtype
             )
             self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
@@ -361,6 +354,7 @@ class MLA(nn.Module):
         output = self.out_dropout(output, deterministic=not train)
         return output, (cKV_cache, kRT_cache)
 
+
 class Block(nn.Module):
     model_dimension: int
     n_heads: int
@@ -422,6 +416,7 @@ class Block(nn.Module):
         x = x + x_ff
 
         return x, (cache, load)
+
 
 class EncoderBlock(nn.Module):
     model_dimension: int
@@ -493,6 +488,7 @@ class EncoderBlock(nn.Module):
         )
 
         return x, (out_cache, load)
+
 
 class Decoder(nn.Module):
     model_dimension: int
@@ -673,6 +669,7 @@ class Decoder(nn.Module):
 
         return model, params
 
+
 class shardedModel:
     @staticmethod
     def generate(
@@ -699,7 +696,7 @@ class shardedModel:
         layer_partition = jax.sharding.NamedSharding(mesh, P("model"))
         layer_params = jax.device_put(layer_params, layer_partition)
         return embedding_params, layer_params
-       
+
     @staticmethod
     def get_model(cfg):
         dtype = jnp.bfloat16 if (cfg.model_dtype == "bfloat16") else jnp.float32
@@ -708,7 +705,6 @@ class shardedModel:
             vocab_size=cfg.vocab_size,
             model_dtype=dtype,
         )
-        print("embedding done")
         layer = EncoderBlock(
             model_dimension=cfg.model_dimension,
             n_heads=cfg.n_heads,
@@ -723,7 +719,6 @@ class shardedModel:
             k=cfg.k,
             model_dtype=cfg.model_dtype,
         )
-        print("layer done")
 
         return embedding_layer, layer
 
@@ -736,15 +731,18 @@ class shardedModel:
     ) -> Tuple[PyTree, PyTree]:
         embedding_layer, layer = model
 
-        x = jnp.ones((1, 1, cfg.T), dtype=jnp.int32)
+        
+
+        x = jnp.ones((1, cfg.T), dtype=jnp.int32)
         key, init_key = jax.random.split(key)
 
-        embedding_initialized = Embeddings(cfg.model_dimension, cfg.vocab_size, cfg.model_dtype)
-        var_spec = jax.eval_shape(embedding_initialized.init, init_key, x)
-        var_spec_out = nn.get_partition_spec(var_spec)
-        init_specs = (None, P(None, None, "tensor"))
-        init_fn_sharded = partial(shard_map, mesh=mesh, in_specs=init_specs, out_specs=var_spec_out)(embedding_initialized.init)
-        embedding_params = init_fn_sharded(jax.random.PRNGKey(0), x)
+
+        embedding_params = embedding_layer.init(init_key, x)["params"]
+        embedding_partition = jax.sharding.NamedSharding(
+            mesh,
+            P(),
+        )
+        embedding_params = jax.device_put(embedding_params, embedding_partition)
 
 
 
@@ -781,7 +779,6 @@ class shardedModel:
         cfg: modelConfig, mesh: jax.sharding.Mesh, key: jax.random.key
     ) -> Tuple[Tuple[Embeddings, EncoderBlock], PyTree]:
         model = shardedModel.get_model(cfg)
-        print("got model")
         params = shardedModel.get_params(cfg, model, mesh, key)
 
         return model, params
@@ -804,7 +801,7 @@ if __name__ == "__main__":
         dhR=64,
         dhR_blocks=2,
         T=32,
-        vocab_size=64,
+        vocab_size=512,
         dropout=0.1,
         blocks=4,
         n_experts=4,
@@ -815,20 +812,18 @@ if __name__ == "__main__":
         model_dtype="bfloat16",
         grad_checkpoint=False,
     )
-    print("model config init")
+
 
     key = jax.random.PRNGKey(0)
 
     model, params = Decoder.get_model(model_cfg, key)
-    # print_params(params)
-    print("params done")
+    print_params(params)
 
-    devices = np.array(jax.devices()).reshape((1, 2, 2))
-    mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model", "tensor"))
+    devices = np.array(jax.devices()).reshape((2, 2))
+    mesh = jax.sharding.Mesh(devices=devices, axis_names=("tensor",))
+    # mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
+
     print(mesh)
-    print("mesh printed")
-
     model, params = shardedModel.get_model_and_params(model_cfg, mesh, key)
-    print("here")
-    # print_params(params)
+    print_params(params)
     breakpoint()
