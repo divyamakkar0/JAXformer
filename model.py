@@ -47,6 +47,8 @@ class TPDense(nn.Module):
         kernel_init=nn.with_partitioning(init_func, (None, 'tensor')))(x)
     return h
 
+
+
 class NoisyKGate(nn.Module):
     model_dimension: int
     n_experts: int
@@ -72,6 +74,7 @@ class NoisyKGate(nn.Module):
         # s = s / jnp.sum(s, axis=-1, keepdims=True)
 
         return g_scores, indices, s
+
 
 class MoE(nn.Module):
     model_dimension: int
@@ -172,6 +175,7 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
+
 class FFBody(nn.Module):
     model_dimension: int
     ff_dim: int
@@ -191,6 +195,7 @@ class FFBody(nn.Module):
         )(x)
 
         return x
+
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -214,6 +219,7 @@ class FeedForward(nn.Module):
         x_ff = nn.Dropout(rate=self.dropout)(ff(x), deterministic=not train)
 
         return x_ff
+
 
 class RoPE:
     def __init__(self, T: int, model_dim: int):
@@ -254,6 +260,7 @@ class RoPE:
         x_rope = cos_rope + sin_rope
         x = x_rope.astype(x.dtype)
         return x
+
 
 class MLA(nn.Module):
     model_dim: int
@@ -361,6 +368,7 @@ class MLA(nn.Module):
         output = self.out_dropout(output, deterministic=not train)
         return output, (cKV_cache, kRT_cache)
 
+
 class Block(nn.Module):
     model_dimension: int
     n_heads: int
@@ -422,6 +430,7 @@ class Block(nn.Module):
         x = x + x_ff
 
         return x, (cache, load)
+
 
 class EncoderBlock(nn.Module):
     model_dimension: int
@@ -487,12 +496,16 @@ class EncoderBlock(nn.Module):
             if i < self.dhR_blocks - 1:
                 kRT_cache.append(current_cache[1])
 
-        out_cache = (
-            jnp.stack(cKV_cache, axis=0),
-            jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
-        )
+        if train:
+            out_cache = None
+        else:
+            out_cache = (
+                jnp.stack(cKV_cache, axis=0),
+                jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
+            )
 
         return x, (out_cache, load)
+
 
 class Decoder(nn.Module):
     model_dimension: int
@@ -537,7 +550,7 @@ class Decoder(nn.Module):
                 layer_cache = None
             else:
                 cKV = cache[0][i]
-                kRT = cache[1][i] if self.dhR_blocks > 1 else None
+                kRT = cache[1][i] if cache[1][i] is not None else None
                 layer_cache = (cKV, kRT)
 
             x, (current_cache, current_load) = EncoderBlock(
@@ -565,8 +578,7 @@ class Decoder(nn.Module):
                 )
 
             cKV_cache.append(current_cache[0])
-            if i < self.dhR_blocks - 1:
-                kRT_cache.append(current_cache[1])
+            kRT_cache.append(current_cache[1])
 
         out_cache = (
             jnp.stack(cKV_cache, axis=0),
@@ -599,6 +611,7 @@ class Decoder(nn.Module):
             x_encode = jnp.array(enc.encode(x), dtype=jnp.int32)
             out = jnp.concatenate([out, x_encode], axis=-1)
 
+        prompt_length = out.shape[0]
         out = jnp.repeat(out[None, :], B, axis=0)
         cache = None
 
@@ -609,6 +622,8 @@ class Decoder(nn.Module):
                 {"params": params}, inp, cache=cache, train=False
             )
 
+            print(f"logits {logits.shape} | {cache[0].shape} | {cache[1].shape}")
+
             logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
             logits /= temperature
 
@@ -617,7 +632,7 @@ class Decoder(nn.Module):
 
             return out_next, (cache, logits)
 
-        for _ in range(min(max_tokens, self.T)):
+        for _ in range(min(max_tokens, self.T - prompt_length)):
             key, sample_key = jax.random.split(key)
             out_next, (cache, logits) = sample(
                 sample_key, params, out, cache, B, k, temperature
@@ -672,6 +687,7 @@ class Decoder(nn.Module):
         )
 
         return model, params
+
 
 class shardedModel:
     @staticmethod
@@ -738,40 +754,58 @@ class shardedModel:
 
         x = jnp.ones((1, 1, cfg.T), dtype=jnp.int32)
         key, init_key = jax.random.split(key)
-
-        embedding_initialized = Embeddings(cfg.model_dimension, cfg.vocab_size, cfg.model_dtype)
-        var_spec = jax.eval_shape(embedding_initialized.init, init_key, x)
-        var_spec_out = nn.get_partition_spec(var_spec)
         init_specs = (None, P(None, None, "tensor"))
-        init_fn_sharded = partial(shard_map, mesh=mesh, in_specs=init_specs, out_specs=var_spec_out)(embedding_initialized.init)
-        embedding_params = init_fn_sharded(jax.random.PRNGKey(0), x)
 
+
+
+        var_spec = jax.eval_shape(embedding_layer.init, init_key, x)
+        var_spec_out = nn.get_partition_spec(var_spec)
+        init_fn_sharded = partial(shard_map, mesh=mesh, in_specs=init_specs, out_specs=var_spec_out)(embedding_layer.init)
+        embedding_params = init_fn_sharded(jax.random.PRNGKey(0), x)
 
 
         model_devices = mesh.devices.shape[1]
         assert cfg.blocks // model_devices
 
+        layer_x = jnp.ones((1, cfg.T, cfg.model_dimension))
         layers_per_device = cfg.blocks // model_devices
+        layer_var_spec = jax.eval_shape(lambda key, x: layer.init(init_key, x, train=False), jax.random.PRNGKey(0), layer_x)
 
-        @partial(
-            jax.shard_map, mesh=mesh, in_specs=(P("model")), out_specs=(P("model"))
+        def get_layer_partition(params): 
+            dim = len(params.shape)
+            if dim == 2: 
+                return P("model", None, "tensor")
+            else: 
+                return P("model", None)
+
+        layer_spec_out = jax.tree.map(
+            lambda x: get_layer_partition(x), 
+            layer_var_spec
         )
-        def init_pipeline(key):
+
+        layer_init_fn_sharded = partial(shard_map, mesh=mesh, in_specs=init_specs, out_specs=layer_spec_out)(layer.init)
+        
+        @partial(
+            jax.shard_map, mesh=mesh, in_specs=(P("model"), P(None, "tensor", None)), out_specs=layer_spec_out
+        )
+        def init_pipeline(key, x):
             key = key[0]
-            x = jnp.ones((1, cfg.T, cfg.model_dimension))
             layer_params = []
             for _ in range(layers_per_device):
                 key, init_key = jax.random.split(key)
-                current_params = layer.init(init_key, x, train=False)["params"]
+                current_params = layer.init(init_key, x)
+                breakpoint()
                 layer_params.append(current_params)
 
+            
             layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
 
             return layer_params
 
+        
         key, *layer_keys = jax.random.split(key, model_devices + 1)
         layer_keys = jnp.array(layer_keys)
-        layer_params = init_pipeline(layer_keys)
+        layer_params = init_pipeline(layer_keys, layer_x)
         params = (embedding_params, layer_params)
 
         return params
@@ -819,7 +853,7 @@ if __name__ == "__main__":
 
     key = jax.random.PRNGKey(0)
 
-    model, params = Decoder.get_model(model_cfg, key)
+    # model, params = Decoder.get_model(model_cfg, key)
     # print_params(params)
     print("params done")
 
