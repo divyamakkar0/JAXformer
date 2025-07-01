@@ -135,7 +135,7 @@ def setup_devices(cfg: config):
 
 def loss(model, alpha, params, key, x, y, train):
     M, B, T = x.shape
-    load = None
+
     pred = pipe_step(model, params, x, key=key, train=train)
 
     total_tokens = M * B * T
@@ -146,6 +146,7 @@ def loss(model, alpha, params, key, x, y, train):
     loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_prob, y)).mean()
 
     loss_balance = 0.0
+    load = None
     if load is not None:
         loss_balance = model.n_experts / (model.k * T**2) * load.sum(axis=0)
 
@@ -196,7 +197,7 @@ def layer_fn(fwd_fn, x, params, key):
     cKV_cache = []
     kRT_cache = []
 
-    for i in range(n_devices + microbatch - 1):
+    for i in range(layers + microbatch - 1):
         batch_idx = i % microbatch_per_device
         layer_idx = (i + 1 - layers) % microbatch_per_device
 
@@ -205,7 +206,7 @@ def layer_fn(fwd_fn, x, params, key):
         key, dropout_key = jax.random.split(key)
         fwd_fn_i = jax.tree_util.Partial(fwd_fn, key=dropout_key)
         state, (cache, load) = jax.vmap(fwd_fn_i, in_axes=(0, 0))(state, params)
-        print(cache)
+        # print(cache)
         # if cache[0] is not None:
         #     cKV_cache.append(cache[0])
         #     kRT_cache.append(cache[1])
@@ -226,9 +227,9 @@ def layer_fn(fwd_fn, x, params, key):
 
         state = jnp.concatenate([state_perm, state[:-1]], axis=0)
 
-        if batch_idx == microbatch - 1:
-            inputs = jax.lax.ppermute(
-                inputs,
+        if batch_idx == microbatch_per_device - 1:
+            x = jax.lax.ppermute(
+                x,
                 axis_name="model",
                 perm=perm,
             )
