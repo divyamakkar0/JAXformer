@@ -335,15 +335,6 @@ def main(config: config):
         save_checkpoint(0, wandb_id)
 
     print(f"Model parameter count: {state.n_params:,d} ")
-    out = shardedModel.generate(
-        model,
-        state.params,
-        key(),
-        mesh,
-        x="hello"
-    )
-
-    breakpoint()
 
     loss_fn = jax.tree_util.Partial(
         loss,
@@ -469,29 +460,26 @@ def main(config: config):
 
             print(log_string)
 
-            # params_host_device = jax.device_put(
-            #     jax.device_get(state.params), mesh.devices[0]
-            # )
-            # tokens = model.generate(
-            #     params_host_device,
-            #     sample_key,
-            #     "",
-            #     B=config.inference_batch,
-            #     k=10000,
-            #     max_tokens=30,
-            #     temperature=1,
-            # )
+            samples = shardedModel.generate(
+                model,
+                state.params,
+                sample_key,
+                mesh,
+                x="hello"
+            )
+            print("sammple tokens: \n")
+            for tokens in samples:
+                print(f'\t {tokens}\n')
 
-            # print("tokens: ", tokens)
-            # with open(
-            #     os.path.join(
-            #         os.path.abspath(config.output_dir), config.name, "tokens.txt"
-            #     ),
-            #     "a",
-            # ) as f:
-            #     f.write(f"{current_step} | {tokens}\n")
+            with open(
+                os.path.join(
+                    os.path.abspath(config.output_dir), config.name, "tokens.txt"
+                ),
+                "a",
+            ) as f:
+                f.write(f"{current_step} | {tokens}\n")
 
-            # save_checkpoint(current_step, wandb_id)
+            save_checkpoint(current_step, wandb_id)
             start = time.time()
             train_loss = 0.0
 
