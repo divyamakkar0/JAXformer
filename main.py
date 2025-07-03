@@ -122,11 +122,6 @@ def step(loss_fn, grad_steps, params, key, x, y, train=True):
 
     def step_fn(grads, batch):
         *data, key = batch
-
-        # params = jax.tree.map(
-        #     lambda x: jax.lax.pvary(x, 'model')
-        #     params
-        # )
         val = loss_fn(params, key, *data, train=train)
 
         if train:
@@ -162,9 +157,8 @@ def step(loss_fn, grad_steps, params, key, x, y, train=True):
     grads = None
     if train:
         grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-        grads_vary = jax.lax.pvary(grads, "model")
 
-    grads, metrics = jax.lax.scan(step_fn, init=grads_vary, xs=(x, y, key), unroll=1)
+    grads, metrics = jax.lax.scan(step_fn, init=grads, xs=(x, y, key), unroll=1)
 
     if grads is not None:
         grads = jax.tree.map(lambda x: x / grad_steps, grads)
@@ -308,7 +302,7 @@ def main(config: config):
 
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):
-            if count["data"] * count["model"] * config.grad_step == 1:
+            if count * config.grad_step == 1:
                 keys = jnp.array([key()])
             else:
                 keys = key(count * config.grad_step)
