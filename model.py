@@ -1,13 +1,14 @@
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 from flax import linen as nn
 from einops import rearrange
-import math
 
 import tiktoken
 from utils import modelConfig
 from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
+from functools import partial
 
 
 class Embeddings(nn.Module):
@@ -26,159 +27,13 @@ class Embeddings(nn.Module):
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
             x = self.embedding(x)
+            if self.is_mutable_collection("params"):
+                _ = self.layer_norm(x)
         else:
-            x = self.layer_norm(x)
-            x = self.embedding.attend(x)
+            x = self.embedding.attend(self.layer_norm(x))
+
         return x
 
-
-class RoPE:
-    def __init__(self, T: int, model_dim: int):
-        assert model_dim % 2 == 0, "model_dim must be even"
-
-        freq = jnp.arange(T, dtype=jnp.float32)[:, None] + 1
-
-        pos = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
-        pos = pos.repeat(2, axis=-1).reshape(1, -1)
-        log_theta_base = jnp.log(10000.0)
-        theta = jnp.exp(-2 * pos / model_dim * log_theta_base)
-
-        self.cos = jnp.cos(freq * theta)
-        self.sin = jnp.sin(freq * theta)
-
-    def __call__(self, x: Array, t_start: int, offset: Optional[int] = None, transpose: bool = False) -> Array:
-        B, T, C = x.shape
-        x_proj = x.astype('float32')
-
-        if offset is None:
-            offset = T
-
-        cos_rope = x_proj * self.cos[t_start:t_start + offset, :]
-
-        x_inter = x_proj.reshape((B, T, C // 2, 2))
-        x_inter = jnp.flip(x_inter, axis=-1) * jnp.array([-1, 1])
-        x_inter = x_inter.reshape((B, T, C))
-        if transpose:
-            x_inter *= -1
-        sin_rope = x_inter * self.sin[t_start:t_start + offset, :]
-
-        x_rope = cos_rope + sin_rope
-        x = x_rope.astype(x.dtype)
-        return x
-
-
-class MLA(nn.Module):
-    model_dim: int
-    n_heads: int
-    T: int
-    latent_dim: int
-    dhR: int
-    model_dtype: jnp.dtype
-    grad_checkpoint: bool
-    dropout: float = 0.0
-
-    def setup(self):
-        self.W_down = nn.Dense(features=2*self.latent_dim, dtype=self.model_dtype)
-
-        self.W_uKV = nn.Dense(features=2*self.model_dim, dtype=self.model_dtype)
-        self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
-
-        self.dk = self.model_dim // self.n_heads
-
-        if self.grad_checkpoint:
-            self.output = nn.remat(nn.Dense)(
-                features=self.model_dim, dtype=self.model_dtype
-            )
-        else:
-            self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
-        self.out_dropout = nn.Dropout(rate=self.dropout)
-
-        self.rope = False
-        if self.dhR != 0:
-            self.rope = True
-            self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
-            self.Wqr = nn.Dense(
-                features=(self.dhR * self.n_heads), dtype=self.model_dtype
-            )
-            self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
-            self.rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
-
-    def __call__(
-        self,
-        x: Array,
-        *,
-        cKV_cache: Optional[Array] = None,
-        kRT_cache: Optional[Array] = None,
-        train=True,
-    ) -> Tuple[Array, Tuple[Array, Array]]:
-        B, T, C = x.shape
-
-        cKVt, cqt = jnp.split(
-            self.W_down(x), 2, axis=-1
-        )
-
-        if self.rope:
-
-            t_start = 0
-            if cKV_cache is not None:
-                t_start = cKV_cache.shape[1]
-
-            kRt = self.rope_k(self.Wkr(x), t_start)
-
-            qRt = self.rope_q(self.Wqr(x), t_start)
-            qRt = rearrange(
-                qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR
-            )
-
-        if not train:
-            if cKV_cache is not None:
-                cKVt = jnp.concatenate([cKV_cache, cKVt], axis=1)
-            cKV_cache = cKVt
-
-            if self.rope:
-                if kRT_cache is not None:
-                    kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
-                kRT_cache = kRt
-
-        k,v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
-        q = self.W_uQ(cqt)
-
-        k = rearrange(k, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-
-        if self.rope:
-            q = jnp.concatenate([q, qRt], axis=-1)
-            kRt = jnp.repeat(
-                kRt[:, None, :, :], self.n_heads, axis=1
-            )
-            k = jnp.concatenate([k, kRt], axis=-1)
-
-        def scaledDotProd(q, k, v, mask):
-            q = q.astype('float32')
-            k = k.astype('float32')
-            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.dk**0.5))
-            w = jnp.where(mask == 0, -9e15, w)
-            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
-            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
-            return output
-
-        if self.grad_checkpoint:
-            scaledDotProd = jax.remat(scaledDotProd)
-
-        if T == 1:
-            mask = jnp.ones((B, self.n_heads, 1, k.shape[2]))
-        else:
-            mask = jnp.tril(
-                jnp.ones((B, self.n_heads, q.shape[2], k.shape[2])),
-            )
-
-        output = scaledDotProd(q, k, v, mask)
-        output = rearrange(output, "B nh T dk -> B T (nh dk)")
-
-        output = self.output(output)
-        output = self.out_dropout(output, deterministic=not train)
-        return output, (cKV_cache, kRT_cache)
 
 class NoisyKGate(nn.Module):
     model_dimension: int
@@ -227,6 +82,7 @@ class MoE(nn.Module):
                 dropout=self.dropout,
                 model_dtype=self.model_dtype,
                 grad_checkpoint=self.grad_checkpoint,
+                name=f"expert_{i}",
             )
             for i in range(self.n_experts)
         ]
@@ -239,13 +95,16 @@ class MoE(nn.Module):
         )
 
     def get_gScores(self, scores: Array, indices: Array, x: Array, train: bool = True):
-        expert_lambda = [
-            lambda mdl, x: mdl.experts[i](x, train=train) for i in range(self.n_experts)
-        ]
+        def head_fn(i):
+            return lambda mdl, x: mdl.experts[i](x, train=train)
+
+        expert_lambda = [head_fn(i) for i in range(self.n_experts)]
 
         if self.is_mutable_collection("params"):
             for expert_ffn in expert_lambda:
                 _ = expert_ffn(self, x)
+
+            return jnp.zeros_like(x)
 
         expert_fn = lambda j, experts, x: nn.switch(j, expert_lambda, self, x)
         expert_parallel = jax.vmap(fun=expert_fn, in_axes=(0, None, None), out_axes=(0))
@@ -311,9 +170,15 @@ class FFBody(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        x = nn.Dense(features=self.ff_dim, dtype=self.model_dtype)(x)
+        x = nn.Dense(
+            features=self.ff_dim,
+            dtype=self.model_dtype,
+        )(x)
         x = nn.gelu(x)
-        x = nn.Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
+        x = nn.Dense(
+            features=self.model_dimension,
+            dtype=self.model_dtype,
+        )(x)
 
         return x
 
@@ -342,6 +207,154 @@ class FeedForward(nn.Module):
         return x_ff
 
 
+class RoPE:
+    def __init__(self, T: int, model_dim: int):
+        assert model_dim % 2 == 0, "model_dim must be even"
+
+        freq = jnp.arange(T, dtype=jnp.float32)[:, None] + 1
+
+        pos = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
+        pos = pos.repeat(2, axis=-1).reshape(1, -1)
+        log_theta_base = jnp.log(10000.0)
+        theta = jnp.exp(-2 * pos / model_dim * log_theta_base)
+
+        self.cos = jnp.cos(freq * theta)
+        self.sin = jnp.sin(freq * theta)
+
+    def __call__(
+        self,
+        x: Array,
+        t_start: int,
+        offset: Optional[int] = None,
+        transpose: bool = False,
+    ) -> Array:
+        B, T, C = x.shape
+        x_proj = x.astype("float32")
+
+        if offset is None:
+            offset = T
+
+        cos_rope = x_proj * self.cos[t_start : t_start + offset, :]
+
+        x_inter = x_proj.reshape((B, T, C // 2, 2))
+        x_inter = jnp.flip(x_inter, axis=-1) * jnp.array([-1, 1])
+        x_inter = x_inter.reshape((B, T, C))
+        if transpose:
+            x_inter *= -1
+        sin_rope = x_inter * self.sin[t_start : t_start + offset, :]
+
+        x_rope = cos_rope + sin_rope
+        x = x_rope.astype(x.dtype)
+        return x
+
+
+class MLA(nn.Module):
+    model_dim: int
+    n_heads: int
+    T: int
+    latent_dim: int
+    dhR: int
+    model_dtype: jnp.dtype
+    grad_checkpoint: bool
+    dropout: float = 0.0
+
+    def setup(self):
+        self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
+
+        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
+        self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+
+        self.dk = self.model_dim // self.n_heads
+
+        if self.grad_checkpoint:
+            self.output = nn.remat(nn.Dense)(
+                features=self.model_dim, dtype=self.model_dtype
+            )
+        else:
+            self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+        self.out_dropout = nn.Dropout(rate=self.dropout)
+
+        self.rope = False
+        if self.dhR != 0:
+            self.rope = True
+            self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
+            self.Wqr = nn.Dense(
+                features=(self.dhR * self.n_heads), dtype=self.model_dtype
+            )
+            self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
+            self.rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
+
+    def __call__(
+        self,
+        x: Array,
+        *,
+        cKV_cache: Optional[Array] = None,
+        kRT_cache: Optional[Array] = None,
+        train=True,
+    ) -> Tuple[Array, Tuple[Array, Array]]:
+        B, T, C = x.shape
+
+        cKVt, cqt = jnp.split(self.W_down(x), 2, axis=-1)
+
+        if self.rope:
+            t_start = 0
+            if cKV_cache is not None:
+                t_start = cKV_cache.shape[1]
+
+            kRt = self.rope_k(self.Wkr(x), t_start)
+
+            qRt = self.rope_q(self.Wqr(x), t_start)
+            qRt = rearrange(qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR)
+
+        if not train:
+            if cKV_cache is not None:
+                cKVt = jnp.concatenate([cKV_cache, cKVt], axis=1)
+            cKV_cache = cKVt
+
+            if self.rope:
+                if kRT_cache is not None:
+                    kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
+                kRT_cache = kRt
+
+        k, v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
+        q = self.W_uQ(cqt)
+
+        k = rearrange(k, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+
+        if self.rope:
+            q = jnp.concatenate([q, qRt], axis=-1)
+            kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
+            k = jnp.concatenate([k, kRt], axis=-1)
+
+        def scaledDotProd(q, k, v, mask):
+            q = q.astype("float32")
+            k = k.astype("float32")
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.dk**0.5))
+            w = jnp.where(mask == 0, -9e15, w)
+            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
+            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
+            return output
+
+        if self.grad_checkpoint:
+            scaledDotProd = jax.remat(scaledDotProd)
+
+        if T == 1:
+            mask = jnp.ones((B, self.n_heads, 1, k.shape[2]))
+        else:
+            mask = jnp.tril(
+                jnp.ones((B, self.n_heads, q.shape[2], k.shape[2])),
+            )
+
+        output = scaledDotProd(q, k, v, mask)
+        output = rearrange(output, "B nh T dk -> B T (nh dk)")
+
+        output = self.output(output)
+        output = self.out_dropout(output, deterministic=not train)
+        return output, (cKV_cache, kRT_cache)
+
+
 class Block(nn.Module):
     model_dimension: int
     n_heads: int
@@ -363,8 +376,6 @@ class Block(nn.Module):
         cache: Optional[Tuple[Array, Optional[Array]]] = (None, None),
         train: bool = True,
     ):
-
-
         x_norm = nn.LayerNorm()(x)
 
         x_up, cache = MLA(
@@ -434,10 +445,17 @@ class EncoderBlock(nn.Module):
             Optional[List[Tuple[Optional[Array], Optional[Array]]]], Optional[PyTree]
         ],
     ]:
-        out_cache = []
+        cKV_cache = []
+        kRT_cache = []
         load = None
         for i in range(self.dhR_blocks):
-            layer_cache = (None, None) if cache is None else cache[i]
+            if cache is None:
+                layer_cache = (None, None)
+            else:
+                cKV = cache[0][i]
+                kRT = cache[1][i] if i < self.dhR_blocks - 1 else None
+                layer_cache = (cKV, kRT)
+
             x, (current_cache, current_load) = Block(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
@@ -460,26 +478,19 @@ class EncoderBlock(nn.Module):
                     add_tree(load[1], current_load[1]),
                 )
 
-            out_cache.append(current_cache)
+            cKV_cache.append(current_cache[0])
+            if i < self.dhR_blocks - 1:
+                kRT_cache.append(current_cache[1])
+
+        if train:
+            out_cache = None
+        else:
+            out_cache = (
+                jnp.stack(cKV_cache, axis=0),
+                jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
+            )
 
         return x, (out_cache, load)
-
-
-class OutHead(nn.Module):
-    model_dimension: int
-    vocab_size: int
-    model_dtype: jnp.dtype
-    out_dtype: jnp.dtype = jnp.float32
-
-    @nn.compact
-    def __call__(self, x: Array) -> Array:
-        x = nn.LayerNorm()(x)
-        x = nn.Dense(
-            features=self.vocab_size,
-            dtype=self.model_dtype,
-        )(x)
-
-        return x
 
 
 class Decoder(nn.Module):
@@ -517,16 +528,17 @@ class Decoder(nn.Module):
             model_dtype=self.model_dtype,
         )
         x = embed(x)
-        out_cache = []
+        cKV_cache = []
+        kRT_cache = []
         load = None
         for i in range(self.blocks):
-            layer_cache = (
-                None
-                if cache is None
-                else cache[
-                    i * len(cache) // self.blocks : (i + 1) * len(cache) // self.blocks
-                ]
-            )
+            if cache is None:
+                layer_cache = None
+            else:
+                cKV = cache[0][i]
+                kRT = cache[1][i] if cache[1][i] is not None else None
+                layer_cache = (cKV, kRT)
+
             x, (current_cache, current_load) = EncoderBlock(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
@@ -551,7 +563,13 @@ class Decoder(nn.Module):
                     add_tree(load[1], current_load[1]),
                 )
 
-            out_cache.extend(current_cache)
+            cKV_cache.append(current_cache[0])
+            kRT_cache.append(current_cache[1])
+
+        out_cache = (
+            jnp.stack(cKV_cache, axis=0),
+            jnp.stack(kRT_cache, axis=0) if self.dhR_blocks > 1 else None,
+        )
 
         x = embed(x, out=True)
 
@@ -574,11 +592,12 @@ class Decoder(nn.Module):
     ) -> List[str]:
         enc = tiktoken.get_encoding("gpt2")
 
-        out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
-        if x != "":
-            x_encode = jnp.array(enc.encode(x), dtype=jnp.int32)
-            out = jnp.concatenate([out, x_encode], axis=-1)
+        if x == "":
+            out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
+        else:
+            out = jnp.array(enc.encode(x), dtype=jnp.int32)
 
+        prompt_length = out.shape[0]
         out = jnp.repeat(out[None, :], B, axis=0)
         cache = None
 
@@ -589,6 +608,8 @@ class Decoder(nn.Module):
                 {"params": params}, inp, cache=cache, train=False
             )
 
+            print(f"logits {logits.shape} | {cache[0].shape} | {cache[1].shape}")
+
             logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
             logits /= temperature
 
@@ -597,14 +618,14 @@ class Decoder(nn.Module):
 
             return out_next, (cache, logits)
 
-        for _ in range(min(max_tokens, self.T)):
+        for _ in range(min(max_tokens, self.T - prompt_length)):
             key, sample_key = jax.random.split(key)
             out_next, (cache, logits) = sample(
                 sample_key, params, out, cache, B, k, temperature
             )
             out = jnp.concatenate([out, out_next], axis=-1)
 
-        tokens = jax.device_get(out[:, 1:])
+        tokens = jax.device_get(out)
         outputs = list(map(lambda x: enc.decode(x), tokens))
 
         return outputs
@@ -655,35 +676,226 @@ class Decoder(nn.Module):
 
 
 class shardedModel:
-    def forward():
-        pass
-
     @staticmethod
     def generate(
-        model: Tuple[Embeddings, EncoderBlock, OutHead],
+        model: Tuple[Embeddings, EncoderBlock],
         params: PyTree,
         key: jax.random.key,
         mesh: jax.sharding.Mesh,
-    ) -> List[str]:
-        pass
+        x: str = "",
+        *,
+        B: int = 1,
+        k: int = 10000,
+        temperature: int = 1,
+        max_tokens: int = 10,
+        use_cache=True,
+    ) -> list[str]:
+        enc = tiktoken.get_encoding("gpt2")
+        if x == "":
+            out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
+        else:
+            out = jnp.array(enc.encode(x), dtype=jnp.int32)
+
+        out = jnp.repeat(out[None, :], B, axis=0)[None, None, None, ...]
+        prompt_length = out.shape[0]
+        T = model[1].T
+        max_tokens = min(max_tokens, T - prompt_length)
+
+        @jax.jit
+        def sample(sample_key, params, out, cache):
+            if not use_cache:
+                cache = None
+            sample_key, pipe_key = jax.random.split(sample_key)
+            logits, (cache, _) = shardedModel.pipe_step(
+                model, params, out, pipe_key, train=False, cache=cache
+            )
+            logits = logits[0] # remove microbatch
+            logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
+            logits /= temperature
+
+            out_next_idx = jax.random.categorical(sample_key, logits, axis=-1, shape=(B,))
+            out_next = idx[jnp.arange(B, dtype=jnp.int32), out_next_idx][None, :, None] # microbatch
+
+            return out_next, (cache, logits)
+
+        @partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(P("data", "model"), (P(), P("model")), P()),
+            out_specs=P("data", "model"),
+        )
+        def generate_shard(key, params, out):
+            cache = None
+            out = out[0, 0]
+            key = key[0, 0]
+            for _ in range(max_tokens):
+                key, sample_key = jax.random.split(key)
+                out_next, (cache, logits) = sample(
+                    sample_key, params, out, cache
+                )
+                out = jnp.concatenate([out, out_next], axis=-1)
+
+            return out[None, None, None, ...]
+
+        data_device = mesh.device_ids.shape[0]
+        pipeline_device = mesh.device_ids.shape[1]
+        sample_keys = jax.random.split(key, data_device * pipeline_device)
+        sample_keys = jnp.array(sample_keys).reshape(data_device, pipeline_device, 2)
+
+        sample_keys = jax.device_put(
+            sample_keys,
+            jax.sharding.NamedSharding(mesh, P("data", "model"))
+        )
+
+        out = generate_shard(
+            sample_keys,
+            params,
+            out
+        )
+        tokens = jax.device_get(out)
+        tokens = tokens.reshape(-1, tokens.shape[-1])
+        outputs = list(map(lambda x: enc.decode(x), tokens))
+
+        return outputs
 
     @staticmethod
-    def get_model(cfg, key: jax.random.key):
+    def pipe_step(model, params, x, key, train, cache=None):
+        embedding_model, layer_model = model
+        embedding_params, layer_params = params
+
+        embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
+
+        layer_out, (cache, load) = shardedModel.layer_fn(
+            lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
+                {"params": params},
+                x,
+                cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
+                train=train,
+                rngs={"dropout": key},
+            ),
+            embeddings,
+            layer_params,
+            key[0] if key.ndim > 1 else key,
+            cache=cache
+        )
+
+        logits = embedding_model.apply(
+            {"params": embedding_params}, layer_out, out=True
+        )
+        return logits, (cache, load)
+
+    @staticmethod
+    def layer_fn(fwd_fn, x, params, key, cache=None):
+        idx = jax.lax.axis_index("model")
+        n_devices = jax.lax.psum(1, "model")
+        microbatch_per_device = x.shape[0]
+        microbatch = n_devices * microbatch_per_device
+        layers_per_device = params["Block_0"]["LayerNorm_0"]["bias"].shape[0]
+        layers = layers_per_device * n_devices
+        perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
+
+
+        outputs = jnp.zeros_like(x) * jnp.nan
+        state = jnp.zeros(
+            (layers_per_device, x.shape[1], x.shape[2], x.shape[3]), dtype=x.dtype
+        )
+
+        cKV_cache = []
+        kRT_cache = []
+        out_load = None
+
+        for i in range(layers + microbatch - 1):
+            batch_idx = i % microbatch_per_device
+            layer_idx = (i + 1 - layers) % microbatch_per_device
+
+            state = state.at[0].set(jnp.where(idx == 0, x[batch_idx], state[0]))
+            current_cache = (None, None)
+            if cache is not None:
+                current_cache = (cache[0][i], cache[1][i])
+            key, dropout_key = jax.random.split(key)
+            fwd_fn_i = jax.tree_util.Partial(fwd_fn, key=dropout_key)
+            state, (layer_cache, load) = jax.vmap(fwd_fn_i)(state, params, *current_cache)
+
+            if layer_cache is not None:
+                cKV_cache.append(layer_cache[0])
+                kRT_cache.append(layer_cache[1])
+            if out_load is None:
+                out_load = load
+
+            outputs = outputs.at[layer_idx].set(
+                jnp.where(
+                    idx == (n_devices - 1),
+                    state[-1],
+                    outputs[layer_idx],
+                )
+            )
+
+            state_perm = jax.lax.ppermute(
+                state[-1],
+                axis_name="model",
+                perm=perm,
+            )[None, ...]
+
+            state = jnp.concatenate([state_perm, state[:-1]], axis=0)
+
+            if batch_idx == microbatch_per_device - 1:
+                x = jax.lax.ppermute(
+                    x,
+                    axis_name="model",
+                    perm=perm,
+                )
+
+            if layer_idx == microbatch_per_device - 1:
+                outputs = jax.lax.ppermute(
+                    outputs,
+                    axis_name="model",
+                    perm=perm,
+                )
+
+        if len(cKV_cache) == 0:
+            out_cache = None
+        else:
+            cKV_cache = jnp.stack(cKV_cache, axis=0)
+
+            if kRT_cache[0] is not None:
+                kRT_cache = jnp.stack(kRT_cache, axis=0)
+            else:
+                kRT_cache = None
+
+            out_cache = (cKV_cache, kRT_cache)
+
+        outputs = jax.lax.ppermute(
+            outputs,
+            axis_name="model",
+            perm=perm,
+        )
+
+        return outputs, (out_cache, out_load)
+
+    @staticmethod
+    def shard_params(
+        params: Tuple[PyTree, PyTree],
+        mesh: jax.sharding.Mesh,
+    ) -> Tuple[PyTree, PyTree]:
+        embed_sharding = jax.tree.map(
+            lambda _: jax.sharding.NamedSharding(mesh, P()), params[0]
+        )
+        layer_sharding = jax.tree.map(
+            lambda _: jax.sharding.NamedSharding(mesh, P("model")), params[1]
+        )
+        params_sharding = (embed_sharding, layer_sharding)
+        params = jax.device_put(params, params_sharding)
+
+        return params
+
+    @staticmethod
+    def get_model(cfg):
         dtype = jnp.bfloat16 if (cfg.model_dtype == "bfloat16") else jnp.float32
-
-        x = jnp.ones((1, cfg.T), dtype=jnp.int32)
-
         embedding_layer = Embeddings(
             model_dimension=cfg.model_dimension,
             vocab_size=cfg.vocab_size,
             model_dtype=dtype,
         )
-
-        key, init_key = jax.random.split(key)
-        embedding_params = embedding_layer.init(init_key, x)["params"]
-
-        # breakpoint()
-
         layer = EncoderBlock(
             model_dimension=cfg.model_dimension,
             n_heads=cfg.n_heads,
@@ -699,52 +911,100 @@ class shardedModel:
             model_dtype=cfg.model_dtype,
         )
 
-        x = jnp.ones((1, cfg.T, cfg.model_dimension))
-        layer_params = []
-        for l in range(cfg.blocks):
-            key, init_key = jax.random.split(key)
-            current_params = layer.init(init_key, x, train=False)["params"]
-            layer_params.append(current_params)
+        return embedding_layer, layer
 
-        layer_params = jax.tree.map(lambda *x: jnp.concat(x, axis=0), *layer_params)
+    @staticmethod
+    def get_params(
+        cfg: modelConfig,
+        model: Tuple[Embeddings, EncoderBlock],
+        mesh: jax.sharding.Mesh,
+        key: jax.random.key,
+    ) -> Tuple[PyTree, PyTree]:
+        embedding_layer, layer = model
 
-        end_layer = OutHead(
-            model_dimension=cfg.model_dimension,
-            model_dtype=cfg.model_dtype,
-        )
-
+        x = jnp.ones((1, cfg.T), dtype=jnp.int32)
         key, init_key = jax.random.split(key)
-
-        out_params = end_layer.init(
-            init_key, x, embedding_params["embedding"]["embedding"]
+        embedding_params = embedding_layer.init(init_key, x)["params"]
+        embed_sharding = jax.tree.map(
+            lambda _: jax.sharding.NamedSharding(mesh, P()), embedding_params
         )
+        embedding_params = jax.device_put(embedding_params, embed_sharding)
 
-        params = (embedding_params, layer_params, out_params)
-        model = (embedding_layer, layer, end_layer)
+        model_devices = mesh.devices.shape[1]
+        assert cfg.blocks // model_devices
+
+        layers_per_device = cfg.blocks // model_devices
+
+        @partial(
+            jax.shard_map, mesh=mesh, in_specs=(P("model")), out_specs=(P("model"))
+        )
+        def init_pipeline(key):
+            key = key[0]
+            x = jnp.ones((1, cfg.T, cfg.model_dimension))
+            layer_params = []
+            for _ in range(layers_per_device):
+                key, init_key = jax.random.split(key)
+                current_params = layer.init(init_key, x, train=False)["params"]
+                layer_params.append(current_params)
+
+            layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
+
+            return layer_params
+
+        key, *layer_keys = jax.random.split(key, model_devices + 1)
+        layer_keys = jnp.array(layer_keys)
+        layer_params = init_pipeline(layer_keys)
+        params = (embedding_params, layer_params)
+
+        return params
+
+    @staticmethod
+    def get_model_and_params(
+        cfg: modelConfig, mesh: jax.sharding.Mesh, key: jax.random.key
+    ) -> Tuple[Tuple[Embeddings, EncoderBlock], PyTree]:
+        model = shardedModel.get_model(cfg)
+        params = shardedModel.get_params(cfg, model, mesh, key)
 
         return model, params
 
 
 if __name__ == "__main__":
+    import json
+    import numpy as np
+
+    def print_params(params):
+        def tree_shapes(tree):
+            return jax.tree_util.tree_map(lambda x: tuple(x.shape), tree)
+
+        shapes = tree_shapes(params)
+        print(json.dumps(shapes, indent=4))
+
     model_cfg = modelConfig(
-        model_dimension=64,
+        model_dimension=16,
         n_heads=4,
-        dhR=64,
-        dhR_blocks=1,
-        T=32,
-        vocab_size=10000,
+        dhR=8,
+        dhR_blocks=2,
+        T=4,
+        vocab_size=32,
         dropout=0.1,
         blocks=2,
         n_experts=4,
         n_shared=2,
         k=2,
         moe=True,
-        latent_dim=16,
+        latent_dim=8,
         model_dtype="bfloat16",
         grad_checkpoint=False,
     )
 
-    key = jax.random.key(0)
+    key = jax.random.PRNGKey(0)
 
-    model, params = Decoder.get_model(model_cfg, key)
-    model, params = shardedModel.get_model(model_cfg, key)
+    # model, params = Decoder.get_model(model_cfg, key)
+    # print_params(params)
+
+    devices = np.array(jax.devices()).reshape((2, 2))
+    mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
+    print(mesh)
+    model, params = shardedModel.get_model_and_params(model_cfg, mesh, key)
+    print_params(params)
+    breakpoint()

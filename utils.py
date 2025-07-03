@@ -34,6 +34,7 @@ class dataConfig:
     T: int = 6
     train_batch_size: int = 3
     val_batch_size: int = 3
+    micro_batch_size: int = 1
 
 
 @dataclass
@@ -82,7 +83,7 @@ def parse_args():
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--vocab_size", type=int, default=50257)
-    parser.add_argument("--blocks", type=int, default=2)
+    parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--dhR", type=int, default=64)
     parser.add_argument("--dhR_blocks", type=int, default=4)
@@ -100,6 +101,7 @@ def parse_args():
     )
     parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--val_batch_size", type=int, default=16)
+    parser.add_argument("--micro_batch_size", type=int, default=4)
 
     parser.add_argument("--max_lr", type=float, default=4e-3)
     parser.add_argument("--min_lr", type=float, default=0)
@@ -158,6 +160,7 @@ def parse_args():
         T=args.T,
         train_batch_size=args.train_batch_size,
         val_batch_size=args.val_batch_size,
+        micro_batch_size=args.micro_batch_size,
     )
 
     lr_cfg = LRConfig(
