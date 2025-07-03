@@ -136,7 +136,7 @@ def setup_devices(cfg: config):
 def loss(model, alpha, params, key, x, y, train):
     M, B, T = x.shape
 
-    pred = pipe_step(model, params, x, key=key, train=train)
+    pred, (_, load) = shardedModel.pipe_step(model, params, x, key=key, train=train)
 
     total_tokens = M * B * T
     log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(total_tokens, -1)
@@ -146,7 +146,6 @@ def loss(model, alpha, params, key, x, y, train):
     loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_prob, y)).mean()
 
     loss_balance = 0.0
-    load = None
     if load is not None:
         loss_balance = model.n_experts / (model.k * T**2) * load.sum(axis=0)
 
@@ -157,120 +156,6 @@ def loss(model, alpha, params, key, x, y, train):
     aux_stat = jax.lax.pmean(aux_stat, axis_name="model")
 
     return loss, aux_stat
-
-
-def pipe_step(model, params, x, key, train):
-    embedding_model, layer_model = model
-    embedding_params, layer_params = params
-
-    embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
-
-    layer_out = layer_fn(
-        lambda x, params, key: layer_model.apply(
-            {"params": params},
-            x,
-            train=train,
-            rngs={"dropout": key},
-        ),
-        embeddings,
-        layer_params,
-        key[0],
-    )
-
-    logits = embedding_model.apply({"params": embedding_params}, layer_out, out=True)
-    return logits
-
-
-def layer_fn(fwd_fn, x, params, key):
-    idx = jax.lax.axis_index("model")
-    n_devices = jax.lax.psum(1, "model")
-    microbatch_per_device = x.shape[0]
-    microbatch = n_devices * microbatch_per_device
-    layers_per_device = params["Block_0"]["LayerNorm_0"]["bias"].shape[0]
-    layers = layers_per_device * n_devices
-    perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
-
-    outputs = jnp.zeros_like(x) * jnp.nan
-    state = jnp.zeros(
-        (layers_per_device, x.shape[1], x.shape[2], x.shape[3]), dtype=x.dtype
-    )
-    cKV_cache = []
-    kRT_cache = []
-
-    for i in range(layers + microbatch - 1):
-        batch_idx = i % microbatch_per_device
-        layer_idx = (i + 1 - layers) % microbatch_per_device
-
-        state = state.at[0].set(jnp.where(idx == 0, x[batch_idx], state[0]))
-
-        key, dropout_key = jax.random.split(key)
-        fwd_fn_i = jax.tree_util.Partial(fwd_fn, key=dropout_key)
-        state, (cache, load) = jax.vmap(fwd_fn_i, in_axes=(0, 0))(state, params)
-        # print(cache)
-        # if cache[0] is not None:
-        #     cKV_cache.append(cache[0])
-        #     kRT_cache.append(cache[1])
-
-        outputs = outputs.at[layer_idx].set(
-            jnp.where(
-                idx == (n_devices - 1),
-                state[-1],
-                outputs[layer_idx],
-            )
-        )
-
-        state_perm = jax.lax.ppermute(
-            state[-1],
-            axis_name="model",
-            perm=perm,
-        )[None, ...]
-
-        state = jnp.concatenate([state_perm, state[:-1]], axis=0)
-
-        if batch_idx == microbatch_per_device - 1:
-            x = jax.lax.ppermute(
-                x,
-                axis_name="model",
-                perm=perm,
-            )
-
-        if layer_idx == microbatch_per_device - 1:
-            outputs = jax.lax.ppermute(
-                outputs,
-                axis_name="model",
-                perm=perm,
-            )
-
-    # if len(cKV_cache) == 0:
-    #     out_cache = None
-    # else:
-    #     slice_fn = lambda idx, x: jax.lax.dynamic_slice(
-    #         x, (0, idx, 0, 0), (x.shape[0], microbatch, x.shape[2], x.shape[3])
-    #     )
-    #     cKV_cache = jax.vmap(slice_fn)(
-    #         jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)),
-    #         cKV_cache,
-    #     )
-    #     cKV_cache = jnp.stack(cKV_cache, axis=0)
-
-    #     if kRT_cache[0] is not None:
-    #         kRT_cache = jax.vmap(slice_fn)(
-    #             jnp.arange(idx * layers_per_device, idx * (layers_per_device + 1)),
-    #             kRT_cache,
-    #         )
-    #         kRT_cache = jnp.stack(kRT_cache, axis=0)
-    #     else:
-    #         kRT_cache = None
-
-    #     out_cache = (cKV_cache, kRT_cache)
-
-    outputs = jax.lax.ppermute(
-        outputs,
-        axis_name="model",
-        perm=perm,
-    )
-
-    return outputs
 
 
 def step(loss_fn, grad_steps, params, key, x, y, train):
@@ -450,6 +335,15 @@ def main(config: config):
         save_checkpoint(0, wandb_id)
 
     print(f"Model parameter count: {state.n_params:,d} ")
+    out = shardedModel.generate(
+        model,
+        state.params,
+        key(),
+        mesh,
+        x="hello"
+    )
+
+    breakpoint()
 
     loss_fn = jax.tree_util.Partial(
         loss,

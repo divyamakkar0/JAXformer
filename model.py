@@ -592,10 +592,10 @@ class Decoder(nn.Module):
     ) -> List[str]:
         enc = tiktoken.get_encoding("gpt2")
 
-        out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
-        if x != "":
-            x_encode = jnp.array(enc.encode(x), dtype=jnp.int32)
-            out = jnp.concatenate([out, x_encode], axis=-1)
+        if x == "":
+            out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
+        else:
+            out = jnp.array(enc.encode(x), dtype=jnp.int32)
 
         prompt_length = out.shape[0]
         out = jnp.repeat(out[None, :], B, axis=0)
@@ -625,7 +625,7 @@ class Decoder(nn.Module):
             )
             out = jnp.concatenate([out, out_next], axis=-1)
 
-        tokens = jax.device_get(out[:, 1:])
+        tokens = jax.device_get(out)
         outputs = list(map(lambda x: enc.decode(x), tokens))
 
         return outputs
@@ -682,8 +682,195 @@ class shardedModel:
         params: PyTree,
         key: jax.random.key,
         mesh: jax.sharding.Mesh,
-    ) -> List[str]:
-        raise NotImplementedError("have to do")
+        x: str = "",
+        *,
+        B: int = 1,
+        k: int = 10000,
+        temperature: int = 1,
+        max_tokens: int = 10,
+        use_cache=True,
+    ) -> list[str]:
+        enc = tiktoken.get_encoding("gpt2")
+        if x == "":
+            out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
+        else:
+            out = jnp.array(enc.encode(x), dtype=jnp.int32)
+
+        out = jnp.repeat(out[None, :], B, axis=0)[None, None, None, ...]
+        prompt_length = out.shape[0]
+        T = model[1].T
+        max_tokens = min(max_tokens, T - prompt_length)
+
+        def sample(sample_key, params, out, cache):
+            if not use_cache:
+                cache = None
+            sample_key, pipe_key = jax.random.split(sample_key)
+            logits, (cache, _) = shardedModel.pipe_step(
+                model, params, out, pipe_key, train=False, cache=cache
+            )
+            logits = logits[0] # remove microbatch
+            logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
+            logits /= temperature
+
+            out_next_idx = jax.random.categorical(sample_key, logits, axis=-1, shape=(B,))
+            out_next = idx[jnp.arange(B, dtype=jnp.int32), out_next_idx][None, :, None] # microbatch
+
+            return out_next, (cache, logits)
+
+        @jax.jit
+        @partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(P("data", "model"), (P(), P("model")), P()),
+            out_specs=P("data", "model"),
+        )
+        def generate_shard(key, params, out):
+            cache = None
+            out = out[0, 0]
+            key = key[0, 0]
+            for _ in range(max_tokens):
+                key, sample_key = jax.random.split(key)
+                out_next, (cache, logits) = sample(
+                    sample_key, params, out, cache
+                )
+                out = jnp.concatenate([out, out_next], axis=-1)
+
+            return out[None, None, None, ...]
+
+        data_device = mesh.device_ids.shape[0]
+        pipeline_device = mesh.device_ids.shape[1]
+        sample_keys = jax.random.split(key, data_device * pipeline_device)
+        sample_keys = jnp.array(sample_keys).reshape(data_device, pipeline_device, 2)
+
+        sample_keys = jax.device_put(
+            sample_keys,
+            jax.sharding.NamedSharding(mesh, P("data", "model"))
+        )
+
+        out = generate_shard(
+            sample_keys,
+            params,
+            out
+        )
+        tokens = jax.device_get(out)
+        tokens = tokens.reshape(-1, tokens.shape[-1])
+        outputs = list(map(lambda x: enc.decode(x), tokens))
+
+        return outputs
+
+    @staticmethod
+    def pipe_step(model, params, x, key, train, cache=None):
+        embedding_model, layer_model = model
+        embedding_params, layer_params = params
+
+        embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
+
+        layer_out, (cache, load) = shardedModel.layer_fn(
+            lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
+                {"params": params},
+                x,
+                cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
+                train=train,
+                rngs={"dropout": key},
+            ),
+            embeddings,
+            layer_params,
+            key[0] if key.ndim > 1 else key,
+            cache=cache
+        )
+
+        logits = embedding_model.apply(
+            {"params": embedding_params}, layer_out, out=True
+        )
+        return logits, (cache, load)
+
+    @staticmethod
+    def layer_fn(fwd_fn, x, params, key, cache=None):
+        idx = jax.lax.axis_index("model")
+        n_devices = jax.lax.psum(1, "model")
+        microbatch_per_device = x.shape[0]
+        microbatch = n_devices * microbatch_per_device
+        layers_per_device = params["Block_0"]["LayerNorm_0"]["bias"].shape[0]
+        layers = layers_per_device * n_devices
+        perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
+
+
+        outputs = jnp.zeros_like(x) * jnp.nan
+        state = jnp.zeros(
+            (layers_per_device, x.shape[1], x.shape[2], x.shape[3]), dtype=x.dtype
+        )
+
+        cKV_cache = []
+        kRT_cache = []
+        out_load = None
+
+        for i in range(layers + microbatch - 1):
+            batch_idx = i % microbatch_per_device
+            layer_idx = (i + 1 - layers) % microbatch_per_device
+
+            state = state.at[0].set(jnp.where(idx == 0, x[batch_idx], state[0]))
+            current_cache = (None, None)
+            if cache is not None:
+                current_cache = (cache[0][i], cache[1][i])
+            key, dropout_key = jax.random.split(key)
+            fwd_fn_i = jax.tree_util.Partial(fwd_fn, key=dropout_key)
+            state, (layer_cache, load) = jax.vmap(fwd_fn_i)(state, params, *current_cache)
+
+            if layer_cache is not None:
+                cKV_cache.append(layer_cache[0])
+                kRT_cache.append(layer_cache[1])
+            if out_load is None:
+                out_load = load
+
+            outputs = outputs.at[layer_idx].set(
+                jnp.where(
+                    idx == (n_devices - 1),
+                    state[-1],
+                    outputs[layer_idx],
+                )
+            )
+
+            state_perm = jax.lax.ppermute(
+                state[-1],
+                axis_name="model",
+                perm=perm,
+            )[None, ...]
+
+            state = jnp.concatenate([state_perm, state[:-1]], axis=0)
+
+            if batch_idx == microbatch_per_device - 1:
+                x = jax.lax.ppermute(
+                    x,
+                    axis_name="model",
+                    perm=perm,
+                )
+
+            if layer_idx == microbatch_per_device - 1:
+                outputs = jax.lax.ppermute(
+                    outputs,
+                    axis_name="model",
+                    perm=perm,
+                )
+
+        if len(cKV_cache) == 0:
+            out_cache = None
+        else:
+            cKV_cache = jnp.stack(cKV_cache, axis=0)
+
+            if kRT_cache[0] is not None:
+                kRT_cache = jnp.stack(kRT_cache, axis=0)
+            else:
+                kRT_cache = None
+
+            out_cache = (cKV_cache, kRT_cache)
+
+        outputs = jax.lax.ppermute(
+            outputs,
+            axis_name="model",
+            perm=perm,
+        )
+
+        return outputs, (out_cache, out_load)
 
     @staticmethod
     def shard_params(
@@ -800,7 +987,7 @@ if __name__ == "__main__":
         T=4,
         vocab_size=32,
         dropout=0.1,
-        blocks=4,
+        blocks=2,
         n_experts=4,
         n_shared=2,
         k=2,
@@ -812,10 +999,10 @@ if __name__ == "__main__":
 
     key = jax.random.PRNGKey(0)
 
-    model, params = Decoder.get_model(model_cfg, key)
-    print_params(params)
+    # model, params = Decoder.get_model(model_cfg, key)
+    # print_params(params)
 
-    devices = np.array(jax.devices()).reshape((2, 4))
+    devices = np.array(jax.devices()).reshape((2, 2))
     mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
     print(mesh)
     model, params = shardedModel.get_model_and_params(model_cfg, mesh, key)
