@@ -10,3 +10,6 @@ curl -L -o "$script_dir/fineweb-edu-10bt-for-gpt2.zip"\
 unzip "$script_dir/fineweb-edu-10bt-for-gpt2.zip" -d "$script_dir/fineweb-edu-10bt-for-gpt2"
 
 rm "$script_dir/fineweb-edu-10bt-for-gpt2.zip"
+
+rm "$script_dir/fineweb-edu-10bt-for-gpt2/SHA256SUMS"
+rm "$script_dir/fineweb-edu-10bt-for-gpt2/SHA512SUMS"

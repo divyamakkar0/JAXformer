@@ -8,6 +8,7 @@ The above copyright notice and this permission notice shall be included in all c
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 """
+
 import functools
 from typing import Any, Callable, Dict, Tuple
 
@@ -29,7 +30,10 @@ Metrics = Dict[str, Tuple[jax.Array, ...]]
 
 
 def stack_params(
-    params: PyTree, axis_name: str, axis: int = 0, mask_except: jax.Array | int | None = None
+    params: PyTree,
+    axis_name: str,
+    axis: int = 0,
+    mask_except: jax.Array | int | None = None,
 ) -> PyTree:
     """Stacks sharded parameters along a given axis name.
 
@@ -88,7 +92,9 @@ def unstack_params(params: PyTree, axis_name: str) -> PyTree:
         else:
             return x
 
-    return jax.tree_map(_unstack, params, is_leaf=lambda x: isinstance(x, nn.Partitioned))
+    return jax.tree_map(
+        _unstack, params, is_leaf=lambda x: isinstance(x, nn.Partitioned)
+    )
 
 
 def execute_pipeline_step(
@@ -137,7 +143,12 @@ def execute_pipeline_step(
 
 @jax.named_scope("pipeline")  # Naming scope for profiling.
 def execute_pipeline(
-    module: nn.Module, x: jax.Array, *args, num_microbatches: int, model_axis_name: str, **kwargs
+    module: nn.Module,
+    x: jax.Array,
+    *args,
+    num_microbatches: int,
+    model_axis_name: str,
+    **kwargs,
 ) -> jax.Array:
     """Execute a pipeline of stages on a batch of data.
 
@@ -159,15 +170,17 @@ def execute_pipeline(
     num_stages = jax.lax.psum(1, model_axis_name)
     # Structure the input data into micro-batches.
     batch_size = x.shape[0]
-    assert (
-        batch_size % num_microbatches == 0
-    ), f"Batch size {batch_size} must be divisible by number of microbatches {num_microbatches}"
+    assert batch_size % num_microbatches == 0, (
+        f"Batch size {batch_size} must be divisible by number of microbatches {num_microbatches}"
+    )
     microbatch_size = batch_size // num_microbatches
     microbatches = jnp.reshape(x, (num_microbatches, microbatch_size, *x.shape[1:]))
     inputs = jnp.concatenate(  # Add zeros for unused computation blocks in first stage.
         [
             microbatches,
-            jnp.zeros((num_stages - 1, *microbatches.shape[1:]), dtype=microbatches.dtype),
+            jnp.zeros(
+                (num_stages - 1, *microbatches.shape[1:]), dtype=microbatches.dtype
+            ),
         ],
         axis=0,
     )
@@ -234,7 +247,9 @@ class ModelParallelismWrapper(nn.Module):
         if self.is_initializing() and self.split_rngs:
             # Initialize each module across the model axis with different parameters.
             self.scope.rngs["params"] = self.scope.rngs["params"].replace(
-                rng=fold_rng_over_axis(self.scope.rngs["params"].rng, self.model_axis_name)
+                rng=fold_rng_over_axis(
+                    self.scope.rngs["params"].rng, self.model_axis_name
+                )
             )
         # Wrap variables in nn.Partitioned objects to add sharding over the model axis.
         module = nn.map_variables(
@@ -243,7 +258,9 @@ class ModelParallelismWrapper(nn.Module):
                 name="sharded",
                 **self.module_kwargs,
             ),
-            trans_in_fn=functools.partial(unstack_params, axis_name=self.model_axis_name),
+            trans_in_fn=functools.partial(
+                unstack_params, axis_name=self.model_axis_name
+            ),
             trans_out_fn=functools.partial(
                 stack_params,
                 axis_name=self.model_axis_name,
@@ -280,7 +297,9 @@ class MLPBlock(nn.Module):
         )(x)
         x = nn.silu(x)
         x = nn.Dropout(rate=self.config.dropout_rate, deterministic=not self.train)(x)
-        x = nn.Dense(features=input_features, dtype=self.config.dtype, name="output_dense")(x)
+        x = nn.Dense(
+            features=input_features, dtype=self.config.dtype, name="output_dense"
+        )(x)
         return x + residual
 
 
@@ -347,7 +366,8 @@ class PPClassifier(nn.Module):
             mask_except_model_idx=self.config.model_axis_size - 1,
         )
         x = output_wrapper(
-            module_fn=functools.partial(nn.LayerNorm, dtype=self.config.dtype), name="output_norm"
+            module_fn=functools.partial(nn.LayerNorm, dtype=self.config.dtype),
+            name="output_norm",
         )(x)
         x = output_wrapper(
             module_fn=functools.partial(
@@ -382,7 +402,9 @@ def get_default_pp_classifier_config() -> ConfigDict:
             num_microbatches=8,
         )
     )
-    model_config.num_layers //= model_config.model_axis_size  # Layers distributed over model axis.
+    model_config.num_layers //= (
+        model_config.model_axis_size
+    )  # Layers distributed over model axis.
     optimizer_config = ConfigDict(
         dict(
             learning_rate=1e-3,
@@ -409,7 +431,9 @@ def loss_fn_pp(
     # Since dropout masks vary across the batch dimension, we want each device to generate a
     # different mask. We can achieve this by folding the rng over the data axis, so that each
     # device gets a different rng and thus mask.
-    dropout_rng = fold_rng_over_axis(rng, (config.data_axis_name, config.model_axis_name))
+    dropout_rng = fold_rng_over_axis(
+        rng, (config.data_axis_name, config.model_axis_name)
+    )
     # Remaining computation is the same as before for single device.
     logits = apply_fn(
         {"params": params},
@@ -456,7 +480,9 @@ def train_step_pp(
     # Sum metrics across replicas (both model and data axes).
     with jax.named_scope("sync_metrics"):
         step_metrics = jax.tree_map(
-            lambda x: jax.lax.psum(x, axis_name=(config.data_axis_name, config.model_axis_name)),
+            lambda x: jax.lax.psum(
+                x, axis_name=(config.data_axis_name, config.model_axis_name)
+            ),
             step_metrics,
         )
     if metrics is None:
@@ -530,7 +556,9 @@ def train_pipeline_model(
         None,
         batch,
     )
-    metrics_pp = jax.tree_map(lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes)
+    metrics_pp = jax.tree_map(
+        lambda x: jnp.zeros(x.shape, dtype=x.dtype), metric_shapes
+    )
     for _ in range(num_steps):
         state_pp, metrics_pp = train_step_pp_fn(state_pp, metrics_pp, batch)
     return state_pp

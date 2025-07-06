@@ -608,8 +608,6 @@ class Decoder(nn.Module):
                 {"params": params}, inp, cache=cache, train=False
             )
 
-            print(f"logits {logits.shape} | {cache[0].shape} | {cache[1].shape}")
-
             logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
             logits /= temperature
 
@@ -701,22 +699,48 @@ class shardedModel:
         T = model[1].T
         max_tokens = min(max_tokens, T - prompt_length)
 
-        @jax.jit
+        # @jax.jit
         def sample(sample_key, params, out, cache):
             if not use_cache:
                 cache = None
-            sample_key, pipe_key = jax.random.split(sample_key)
-            logits, (cache, _) = shardedModel.pipe_step(
-                model, params, out, pipe_key, train=False, cache=cache
+
+            inp = out
+            if use_cache and cache is not None:
+                inp = inp[:, :, -1:]
+
+            sample_key, pipe_key = jax.random.split(sample_key, 2)
+            logits, (cache1, _) = shardedModel.pipe_step(
+                model, params, inp, pipe_key, train=False, cache=cache
             )
-            logits = logits[0] # remove microbatch
-            logits, idx = jax.lax.top_k(logits[:, -1, :], k=k)
+            logits2, (cache2, _) = shardedModel.pipe_step(
+                model, params, out, pipe_key, train=False, cache=None
+            )
+
+            def diff_fn(x, y):
+                if x.shape != y.shape:
+                    raise ValueError(f"Shape mismatch: {x.shape} != {y.shape}")
+                return jnp.max(jnp.abs(x - y))
+
+            diff1 = diff_fn(logits[..., -1, :], logits2[..., -1, :])
+            diff2 = diff_fn(cache1[0], cache2[0])
+            diff3 = diff_fn(cache1[1], cache2[1])
+            print(f"Diffs: logits {diff1}, cKV_cache {diff2}, kRT_cache {diff3}")
+            breakpoint()
+
+            logits = logits[:, :, -1, :]
+            M, B_sample, V = logits.shape
+            logits = logits.reshape(M * B_sample, V)
+            logits, idx = jax.lax.top_k(logits, k=k)
             logits /= temperature
 
-            out_next_idx = jax.random.categorical(sample_key, logits, axis=-1, shape=(B,))
-            out_next = idx[jnp.arange(B, dtype=jnp.int32), out_next_idx][None, :, None] # microbatch
+            sample_prob = lambda key, logits, idx: idx[
+                jax.random.categorical(key, logits)
+            ]
+            sample_key = jnp.array(jax.random.split(sample_key, logits.shape[0]))
+            out_next = jax.vmap(sample_prob)(sample_key, logits, idx)
+            out_next = out_next.reshape(M, B_sample, 1)
 
-            return out_next, (cache, logits)
+            return out_next, (cache1, logits)
 
         @partial(
             jax.shard_map,
@@ -730,12 +754,10 @@ class shardedModel:
             key = key[0, 0]
             for _ in range(max_tokens):
                 key, sample_key = jax.random.split(key)
-                out_next, (cache, logits) = sample(
-                    sample_key, params, out, cache
-                )
+                out_next, (cache, logits) = sample(sample_key, params, out, cache)
                 out = jnp.concatenate([out, out_next], axis=-1)
 
-            return out[None, None, None, ...]
+            return out[None, None, ...]
 
         data_device = mesh.device_ids.shape[0]
         pipeline_device = mesh.device_ids.shape[1]
@@ -743,15 +765,11 @@ class shardedModel:
         sample_keys = jnp.array(sample_keys).reshape(data_device, pipeline_device, 2)
 
         sample_keys = jax.device_put(
-            sample_keys,
-            jax.sharding.NamedSharding(mesh, P("data", "model"))
+            sample_keys, jax.sharding.NamedSharding(mesh, P("data", "model"))
         )
 
-        out = generate_shard(
-            sample_keys,
-            params,
-            out
-        )
+        out = generate_shard(sample_keys, params, out)
+
         tokens = jax.device_get(out)
         tokens = tokens.reshape(-1, tokens.shape[-1])
         outputs = list(map(lambda x: enc.decode(x), tokens))
@@ -759,6 +777,7 @@ class shardedModel:
         return outputs
 
     @staticmethod
+    @partial(jax.jit, static_argnames=["model", "train"])
     def pipe_step(model, params, x, key, train, cache=None):
         embedding_model, layer_model = model
         embedding_params, layer_params = params
@@ -771,12 +790,12 @@ class shardedModel:
                 x,
                 cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
                 train=train,
-                rngs={"dropout": key},
+                rngs=None if not train else {"dropout": key},
             ),
             embeddings,
             layer_params,
             key[0] if key.ndim > 1 else key,
-            cache=cache
+            cache=cache,
         )
 
         logits = embedding_model.apply(
@@ -794,11 +813,10 @@ class shardedModel:
         layers = layers_per_device * n_devices
         perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
 
-
         outputs = jnp.zeros_like(x) * jnp.nan
         state = jnp.zeros(
             (layers_per_device, x.shape[1], x.shape[2], x.shape[3]), dtype=x.dtype
-        )
+        ) * jnp.nan
 
         cKV_cache = []
         kRT_cache = []
@@ -812,13 +830,19 @@ class shardedModel:
             current_cache = (None, None)
             if cache is not None:
                 current_cache = (cache[0][i], cache[1][i])
-            key, dropout_key = jax.random.split(key)
-            fwd_fn_i = jax.tree_util.Partial(fwd_fn, key=dropout_key)
-            state, (layer_cache, load) = jax.vmap(fwd_fn_i)(state, params, *current_cache)
+            key, *dropout_key = jax.random.split(key, layers_per_device + 1)
+            dropout_key = jnp.array(dropout_key)
+            state, (layer_cache, load) = jax.vmap(fwd_fn)(
+                x=state,
+                params=params,
+                cKV_cache=current_cache[0],
+                kRT_cache=current_cache[1],
+                key=dropout_key,
+            )
 
             if layer_cache is not None:
-                cKV_cache.append(layer_cache[0])
-                kRT_cache.append(layer_cache[1])
+                cKV_cache.append(jnp.nan_to_num(layer_cache[0]))
+                kRT_cache.append(jnp.nan_to_num(layer_cache[1]))
             if out_load is None:
                 out_load = load
 

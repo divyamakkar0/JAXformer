@@ -336,6 +336,31 @@ def main(config: config):
 
     print(f"Model parameter count: {state.n_params:,d} ")
 
+    sample_key = key()
+    out_1 = shardedModel.generate(
+        model,
+        state.params,
+        key=sample_key,
+        mesh=mesh,
+        x="hello",
+        max_tokens=5,
+        use_cache=True,
+    )
+
+    out_2 = shardedModel.generate(
+        model,
+        state.params,
+        key=sample_key,
+        mesh=mesh,
+        x="hello",
+        max_tokens=5,
+        use_cache=False,
+    )
+
+    print(out_1)
+    print(out_2)
+    breakpoint()
+
     loss_fn = jax.tree_util.Partial(
         loss,
         model,
@@ -461,15 +486,11 @@ def main(config: config):
             print(log_string)
 
             samples = shardedModel.generate(
-                model,
-                state.params,
-                sample_key,
-                mesh,
-                x="hello"
+                model, state.params, sample_key, mesh, x="hello"
             )
             print("sammple tokens: \n")
             for tokens in samples:
-                print(f'\t {tokens}\n')
+                print(f"\t {tokens}\n")
 
             with open(
                 os.path.join(
