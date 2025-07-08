@@ -17,7 +17,7 @@ jax.config.update(
 DEBUG = os.getenv("DEBUG")
 if DEBUG is not None and int(DEBUG) == 1:
     print(f" --------- DEBUGGING MODE ON -----------")
-    jax.config.update("jax_debug_nans", False)
+    jax.config.update("jax_debug_nans", True)
     jax.config.update("jax_disable_jit", True)
 else:
     jax.config.update("jax_debug_nans", True)
@@ -191,7 +191,7 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
 
     x = rearrange(x, "1 m (g b) t -> g m b t", g=grad_steps)
     y = rearrange(y, "1 m (g b) t -> g m b t", g=grad_steps)
-    key = rearrange(key, "1 m g s -> g m s", g=grad_steps, s=2)
+    key = rearrange(key, "1 1 g s -> g s", g=grad_steps, s=2)
 
     grads = None
     if train:
@@ -287,10 +287,10 @@ def main(config: config):
     wandb_id = None
 
     if load:
-        print(f"loading checkpoint @ step {init_step}")
-
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
         init_step = tree_state["step"]
+        print(f"loading checkpoint @ step {init_step}")
+
         key.key = tree_state["key"]
 
         state = TrainState.restore(tree_state["state"], tx, mesh)
@@ -335,31 +335,6 @@ def main(config: config):
         save_checkpoint(0, wandb_id)
 
     print(f"Model parameter count: {state.n_params:,d} ")
-
-    sample_key = key()
-    out_1 = shardedModel.generate(
-        model,
-        state.params,
-        key=sample_key,
-        mesh=mesh,
-        x="hello",
-        max_tokens=5,
-        use_cache=True,
-    )
-
-    out_2 = shardedModel.generate(
-        model,
-        state.params,
-        key=sample_key,
-        mesh=mesh,
-        x="hello",
-        max_tokens=5,
-        use_cache=False,
-    )
-
-    print(out_1)
-    print(out_2)
-    breakpoint()
 
     loss_fn = jax.tree_util.Partial(
         loss,
@@ -409,7 +384,7 @@ def main(config: config):
         with jax.named_scope("train_step"):
             key_count = count["data"] * count["model"] * config.grad_step
             if key_count == 1:
-                keys = jnp.array([key()])[None, :]
+                keys = jnp.array([key()]).reshape(1,1,1,2)
             else:
                 keys = key(key_count).reshape(
                     count["data"], count["model"], config.grad_step, 2
@@ -455,7 +430,7 @@ def main(config: config):
             with jax.named_scope("eval_step"):
                 key_count = count["data"] * count["model"] * config.eval_steps
                 if key_count == 1:
-                    keys = jnp.array([key()])[None, :]
+                    keys = jnp.array([key()]).reshape(1,1,1,2)
                 else:
                     keys = key(key_count).reshape(
                         count["data"], count["model"], config.eval_steps, 2

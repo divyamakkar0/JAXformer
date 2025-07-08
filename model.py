@@ -699,33 +699,18 @@ class shardedModel:
         T = model[1].T
         max_tokens = min(max_tokens, T - prompt_length)
 
-        # @jax.jit
+        @jax.jit
         def sample(sample_key, params, out, cache):
             if not use_cache:
                 cache = None
 
-            inp = out
             if use_cache and cache is not None:
-                inp = inp[:, :, -1:]
+                out = out[:, :, -1:]
 
             sample_key, pipe_key = jax.random.split(sample_key, 2)
-            logits, (cache1, _) = shardedModel.pipe_step(
-                model, params, inp, pipe_key, train=False, cache=cache
+            logits, (cache, _) = shardedModel.pipe_step(
+                model, params, out, pipe_key, train=False, cache=cache
             )
-            logits2, (cache2, _) = shardedModel.pipe_step(
-                model, params, out, pipe_key, train=False, cache=None
-            )
-
-            def diff_fn(x, y):
-                if x.shape != y.shape:
-                    raise ValueError(f"Shape mismatch: {x.shape} != {y.shape}")
-                return jnp.max(jnp.abs(x - y))
-
-            diff1 = diff_fn(logits[..., -1, :], logits2[..., -1, :])
-            diff2 = diff_fn(cache1[0], cache2[0])
-            diff3 = diff_fn(cache1[1], cache2[1])
-            print(f"Diffs: logits {diff1}, cKV_cache {diff2}, kRT_cache {diff3}")
-            breakpoint()
 
             logits = logits[:, :, -1, :]
             M, B_sample, V = logits.shape
@@ -740,7 +725,7 @@ class shardedModel:
             out_next = jax.vmap(sample_prob)(sample_key, logits, idx)
             out_next = out_next.reshape(M, B_sample, 1)
 
-            return out_next, (cache1, logits)
+            return out_next, (cache, logits)
 
         @partial(
             jax.shard_map,
@@ -777,7 +762,6 @@ class shardedModel:
         return outputs
 
     @staticmethod
-    @partial(jax.jit, static_argnames=["model", "train"])
     def pipe_step(model, params, x, key, train, cache=None):
         embedding_model, layer_model = model
         embedding_params, layer_params = params
@@ -794,7 +778,7 @@ class shardedModel:
             ),
             embeddings,
             layer_params,
-            key[0] if key.ndim > 1 else key,
+            key,
             cache=cache,
         )
 
@@ -816,7 +800,7 @@ class shardedModel:
         outputs = jnp.zeros_like(x) * jnp.nan
         state = jnp.zeros(
             (layers_per_device, x.shape[1], x.shape[2], x.shape[3]), dtype=x.dtype
-        ) * jnp.nan
+        ) 
 
         cKV_cache = []
         kRT_cache = []
@@ -1023,8 +1007,8 @@ if __name__ == "__main__":
 
     key = jax.random.PRNGKey(0)
 
-    # model, params = Decoder.get_model(model_cfg, key)
-    # print_params(params)
+    model, params = Decoder.get_model(model_cfg, key)
+    print_params(params)
 
     devices = np.array(jax.devices()).reshape((2, 2))
     mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
