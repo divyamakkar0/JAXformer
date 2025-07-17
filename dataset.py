@@ -147,16 +147,17 @@ class Dataset:
 
 if __name__ == "__main__":
     test_cfg = dataConfig(
-        train_dataset_path="./trainSetShards",
-        val_dataset_path="./valSetShards",
+        train_dataset_path="./dataset/train",
+        val_dataset_path="./dataset/test",
         T=1024,
-        batch_size=16,
+        train_batch_size=16,
     )
 
     import time
 
     start = time.time()
-    train, test = Dataset.getDataset(test_cfg, jax.random.key(0))
+    #jax.random.key(0)
+    train, test = Dataset.getDataset(test_cfg, None)
     end = time.time()
     print(f"time taken to load dataset: {(end - start):.2f} seconds")
     print(len(train), len(test))
