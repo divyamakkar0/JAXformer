@@ -1,3 +1,11 @@
+
+#TODO:
+# make dense tensor parellel
+# fix attention (anything with nn.einsum)
+# make RMSNORM manually
+# Embedding is a little weird
+
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
@@ -159,6 +167,20 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
+class Dense(nn.Module):
+    features: int
+    model_dtype: jnp.dtype
+
+    @nn.compact
+    def __call__(self, x: Array):
+
+      if not self.is_mutable_collection("params"):
+        params = self.scope.get_variable("params", "Dense_0")
+        params['kernel'] = jax.lax.all_gather(params['kernel'], "fsdp", axis=-1, tiled=True)
+        out = x @ params['kernel'] + params['bias']
+      else:
+        out = nn.Dense(features=self.features, dtype=self.model_dtype)(x)
+      return out
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -168,12 +190,12 @@ class FeedForward(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array, train: bool = True) -> Array:
-        x = nn.Dense(
+        x = Dense(
             features=self.ff_dim,
             dtype=self.model_dtype,
         )(x)
         x = nn.gelu(x)
-        x = nn.Dense(
+        x = Dense(
             features=self.model_dimension,
             dtype=self.model_dtype,
         )(x)

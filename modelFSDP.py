@@ -1,3 +1,4 @@
+
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
@@ -42,7 +43,7 @@ class NoisyKGate(nn.Module):
     model_dtype: jnp.dtype
 
     def setup(self):
-        self.centroids = nn.Dense(features=self.n_experts, dtype=self.model_dtype)
+        self.centroids = Dense(features=self.n_experts, dtype=self.model_dtype)
 
     def top(self, x: Array) -> Tuple[Array, Array]:
         assert x.shape[0] == self.n_experts, "x must be of shape (n_experts, )"
@@ -71,7 +72,7 @@ class MoE(nn.Module):
     model_dtype: jnp.dtype
 
     def setup(self):
-        self.shared = nn.Dense(
+        self.shared = Dense(
             features=self.model_dimension * self.n_shared,
         )
         self.experts = [
@@ -159,6 +160,21 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
+class Dense(nn.Module):
+    features: int
+    dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x: Array):
+
+      if not self.is_mutable_collection("params"):
+        params = self.scope.get_variable("params", "Dense_0")
+        params['kernel'] = jax.lax.all_gather(params['kernel'], "fsdp", axis=-1, tiled=True)
+        out = x @ params['kernel'] + params['bias']
+        return out
+      else:
+        out = nn.Dense(features=self.features, dtype=self.dtype)(x)
+      return out
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -168,12 +184,12 @@ class FeedForward(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array, train: bool = True) -> Array:
-        x = nn.Dense(
+        x = Dense(
             features=self.ff_dim,
             dtype=self.model_dtype,
         )(x)
         x = nn.gelu(x)
-        x = nn.Dense(
+        x = Dense(
             features=self.model_dimension,
             dtype=self.model_dtype,
         )(x)
@@ -232,21 +248,21 @@ class MLA(nn.Module):
     dropout: float = 0.0
 
     def setup(self):
-        self.W_down = nn.Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
+        self.W_down = Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
 
-        self.W_uKV = nn.Dense(features=2 * self.model_dim, dtype=self.model_dtype)
-        self.W_uQ = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+        self.W_uKV = Dense(features=2 * self.model_dim, dtype=self.model_dtype)
+        self.W_uQ = Dense(features=self.model_dim, dtype=self.model_dtype)
 
         self.dk = self.model_dim // self.n_heads
 
-        self.output = nn.Dense(features=self.model_dim, dtype=self.model_dtype)
+        self.output = Dense(features=self.model_dim, dtype=self.model_dtype)
         self.out_dropout = nn.Dropout(rate=self.dropout)
 
         self.rope = False
         if self.dhR != 0:
             self.rope = True
-            self.Wkr = nn.Dense(features=self.dhR, dtype=self.model_dtype)
-            self.Wqr = nn.Dense(
+            self.Wkr = Dense(features=self.dhR, dtype=self.model_dtype)
+            self.Wqr = Dense(
                 features=(self.dhR * self.n_heads), dtype=self.model_dtype
             )
             self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
@@ -688,8 +704,8 @@ class shardedModel:
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P("data", "model"), (P(), P("model")), P()),
-            out_specs=P("data", "model"),
+            in_specs=(P("fsdp", "model"), (P(), shardedModel.get_p_spec(params[1])), P()),
+            out_specs=P("fsdp", "model"),
         )
         def generate_shard(key, params, out):
             cache = None
@@ -708,7 +724,7 @@ class shardedModel:
         sample_keys = jnp.array(sample_keys).reshape(data_device, pipeline_device, 2)
 
         sample_keys = jax.device_put(
-            sample_keys, jax.sharding.NamedSharding(mesh, P("data", "model"))
+            sample_keys, jax.sharding.NamedSharding(mesh, P("fsdp", "model"))
         )
 
         out = generate_shard(sample_keys, params, out)
@@ -736,7 +752,7 @@ class shardedModel:
                 rngs=None if not train else {"dropout": key},
             )
         if checkpoint:
-            layer_fn = jax.checkpoint(layer_fn)
+            layer_fn = jax.checkpoint(layer_fn, policy=jax.checkpoint_policies.nothing_saveable)
 
         layer_out, (current_cache, load) = shardedModel.layer_fn(
             layer_fn,
@@ -846,6 +862,17 @@ class shardedModel:
         return outputs, (out_cache, out_load)
 
     @staticmethod
+    def get_p_spec(params: PyTree) -> jax.sharding.NamedSharding:
+
+        def single_param_p(x: Array) -> jax.sharding.PartitionSpec:
+          return P('model') if x.ndim < 3 else P('model', None, 'fsdp')
+
+        return jax.tree.map(
+            single_param_p,
+            params,
+        )
+
+    @staticmethod
     def shard_params(
         params: Tuple[PyTree, PyTree],
         mesh: jax.sharding.Mesh,
@@ -853,10 +880,13 @@ class shardedModel:
         embed_sharding = jax.tree.map(
             lambda _: jax.sharding.NamedSharding(mesh, P()), params[0]
         )
+        layer_spec = shardedModel.get_p_spec(params[1])
         layer_sharding = jax.tree.map(
-            lambda _: jax.sharding.NamedSharding(mesh, P("model")), params[1]
+            lambda x: jax.sharding.NamedSharding(mesh, x), layer_spec
         )
+
         params_sharding = (embed_sharding, layer_sharding)
+
         params = jax.device_put(params, params_sharding)
 
         return params
@@ -927,6 +957,16 @@ class shardedModel:
         key, *layer_keys = jax.random.split(key, model_devices + 1)
         layer_keys = jnp.array(layer_keys)
         layer_params = init_pipeline(layer_keys)
+
+        layer_spec = shardedModel.get_p_spec(layer_params)
+        layer_params = jax.tree.map(
+            lambda x, y: jax.device_put(
+                x, jax.sharding.NamedSharding(mesh, y)
+            ),
+            layer_params,
+            layer_spec,
+        )
+
         params = (embedding_params, layer_params)
 
         return params
@@ -947,7 +987,7 @@ if __name__ == "__main__":
 
     def print_params(params):
         def tree_shapes(tree):
-            return jax.tree_util.tree_map(lambda x: tuple(x.shape), tree)
+            return jax.tree.map(lambda x: tuple(x.shape), tree)
 
         shapes = tree_shapes(params)
         print(json.dumps(shapes, indent=4))
@@ -964,18 +1004,18 @@ if __name__ == "__main__":
         n_experts=4,
         n_shared=2,
         k=2,
-        moe=True,
+        moe=False,
         latent_dim=8,
         model_dtype="bfloat16",
     )
 
     key = jax.random.PRNGKey(0)
 
-    model, params = Decoder.get_model(model_cfg, key)
-    print_params(params)
+    # model, params = Decoder.get_model(model_cfg, key)
+    # print_params(params)
 
     devices = np.array(jax.devices()).reshape((2, 2))
-    mesh = jax.sharding.Mesh(devices=devices, axis_names=("data", "model"))
+    mesh = jax.sharding.Mesh(devices=devices, axis_names=("fsdp", "model"))
     print(mesh)
     model, params = shardedModel.get_model_and_params(model_cfg, mesh, key)
     print_params(params)

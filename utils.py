@@ -24,7 +24,7 @@ class modelConfig:
     n_shared: int = 0
     latent_dim: int = 0
     model_dtype: str = "bfloat16"
-    grad_checkpoint: bool = False
+
 
 
 @dataclass
@@ -75,6 +75,7 @@ class config:
     seed: int = 0
     wandb: bool = True
     grad_clip_norm: float = 1.0
+    grad_checkpoint: bool = False
 
 
 def parse_args():
@@ -151,7 +152,7 @@ def parse_args():
         moe=args.moe,
         latent_dim=args.latent_dim,
         model_dtype=args.model_dtype,
-        grad_checkpoint=args.grad_checkpoint,
+
     )
 
     data_cfg = dataConfig(
@@ -192,6 +193,7 @@ def parse_args():
         alpha=args.alpha,
         wandb=args.wandb,
         grad_clip_norm=args.grad_clip_norm,
+        grad_checkpoint=args.grad_checkpoint,
     )
 
     return cfg
