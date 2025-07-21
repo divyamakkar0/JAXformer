@@ -1,4 +1,3 @@
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
@@ -6,10 +5,31 @@ from flax import linen as nn
 from einops import rearrange
 
 import tiktoken
-from utils import modelConfig
+from utils import config, modelConfig
 from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
 from functools import partial
+
+
+class RMSNorm(nn.Module):
+    model_dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x: Array) -> Array:
+        rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
+        rms = jax.lax.pmean(rms, "tensor")
+        x = x / jnp.sqrt(rms + 1e-6)
+
+        gamma = self.param(
+            "gamma", nn.initializers.ones, (x.shape[-1],), self.model_dtype
+        )
+        beta = self.param(
+            "beta", nn.initializers.zeros, (x.shape[-1],), self.model_dtype
+        )
+
+        x = x * gamma + beta
+
+        return x
 
 
 class Embeddings(nn.Module):
@@ -23,15 +43,19 @@ class Embeddings(nn.Module):
             features=self.model_dimension,
             dtype=self.model_dtype,
         )
-        self.layer_norm = nn.LayerNorm()
+        self.norm = RMSNorm()
 
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
             x = self.embedding(x)
+            x = jax.lax.all_to_all(x, "tensor", split_axis=2, concat_axis=1, tiled=True)
             if self.is_mutable_collection("params"):
-                _ = self.layer_norm(x)
+                x = jax.lax.all_gather(x, "tensor", axis=-1, tiled=True)
+                _ = self.norm(x)
         else:
-            x = self.embedding.attend(self.layer_norm(x))
+            x = jax.lax.all_to_all(x, "tensor", split_axis=1, concat_axis=2, tiled=True)
+            x = self.norm(x)
+            x = self.embedding.attend(x)
 
         return x
 
@@ -58,7 +82,7 @@ class NoisyKGate(nn.Module):
     def __call__(self, x: Array) -> Tuple[Array, Array, Array]:
         s = nn.sigmoid(self.centroids(x))
         g_scores, indices = jnp.apply_along_axis(func1d=self.top, axis=-1, arr=s)
-        # s = s / jnp.sum(s, axis=-1, keepdims=True)
+        # s = s / jnp.sum(s, axis=-1, keepdims=True) #TODO: why is this commented out?
 
         return g_scores, indices, s
 
@@ -105,6 +129,7 @@ class MoE(nn.Module):
 
             return jnp.zeros_like(x)
 
+        # TODO: don't think we need experts
         expert_fn = lambda j, experts, x: nn.switch(j, expert_lambda, self, x)
         expert_parallel = jax.vmap(fun=expert_fn, in_axes=(0, None, None), out_axes=(0))
 
@@ -160,21 +185,26 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
+
 class Dense(nn.Module):
     features: int
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, x: Array):
+        if not self.is_mutable_collection("params"):
+            params = self.scope.get_variable("params", "Dense_0")
+            params["kernel"] = jax.lax.all_gather(
+                params["kernel"], "fsdp", axis=-1, tiled=True
+            )
+            x = x @ params["kernel"] + params["bias"]
+        else:
+            x = nn.Dense(features=self.features, dtype=self.dtype)(x)
 
-      if not self.is_mutable_collection("params"):
-        params = self.scope.get_variable("params", "Dense_0")
-        params['kernel'] = jax.lax.all_gather(params['kernel'], "fsdp", axis=-1, tiled=True)
-        out = x @ params['kernel'] + params['bias']
-        return out
-      else:
-        out = nn.Dense(features=self.features, dtype=self.dtype)(x)
-      return out
+        x = jax.lax.psum_scatter(x, "tensor", scatter_dimension=x.ndim - 1, tiled=True)
+
+        return x
+
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -197,16 +227,19 @@ class FeedForward(nn.Module):
         return x
 
 
-class RoPE:
-    def __init__(self, T: int, model_dim: int):
-        assert model_dim % 2 == 0, "model_dim must be even"
+class RoPE(nn.Module):
+    T: int
+    model_dim: int
 
-        freq = jnp.arange(T, dtype=jnp.float32)[:, None] + 1
+    def setup(self):
+        assert self.model_dim % 2 == 0, "model_dim must be even"
 
-        pos = jnp.arange(model_dim // 2, dtype=jnp.float32)[:, None]
+        freq = jnp.arange(self.T, dtype=jnp.float32)[:, None] + 1
+
+        pos = jnp.arange(self.model_dim // 2, dtype=jnp.float32)[:, None]
         pos = pos.repeat(2, axis=-1).reshape(1, -1)
         log_theta_base = jnp.log(10000.0)
-        theta = jnp.exp(-2 * pos / model_dim * log_theta_base)
+        theta = jnp.exp(-2 * pos / self.model_dim * log_theta_base)
 
         self.cos = jnp.cos(freq * theta)
         self.sin = jnp.sin(freq * theta)
@@ -248,26 +281,9 @@ class MLA(nn.Module):
     dropout: float = 0.0
 
     def setup(self):
-        self.W_down = Dense(features=2 * self.latent_dim, dtype=self.model_dtype)
+        self.rope = self.dhR != 0
 
-        self.W_uKV = Dense(features=2 * self.model_dim, dtype=self.model_dtype)
-        self.W_uQ = Dense(features=self.model_dim, dtype=self.model_dtype)
-
-        self.dk = self.model_dim // self.n_heads
-
-        self.output = Dense(features=self.model_dim, dtype=self.model_dtype)
-        self.out_dropout = nn.Dropout(rate=self.dropout)
-
-        self.rope = False
-        if self.dhR != 0:
-            self.rope = True
-            self.Wkr = Dense(features=self.dhR, dtype=self.model_dtype)
-            self.Wqr = Dense(
-                features=(self.dhR * self.n_heads), dtype=self.model_dtype
-            )
-            self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
-            self.rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
-
+    @nn.compact
     def __call__(
         self,
         x: Array,
@@ -278,17 +294,24 @@ class MLA(nn.Module):
     ) -> Tuple[Array, Tuple[Array, Array]]:
         B, T, C = x.shape
 
-        cKVt, cqt = jnp.split(self.W_down(x), 2, axis=-1)
+        x = Dense(features=2 * self.latent_dim, dtype=self.model_dtype)(x)
+        cKVt, cqt = jnp.split(x, 2, axis=-1)
 
         if self.rope:
             t_start = 0
             if cKV_cache is not None:
                 t_start = cKV_cache.shape[1]
 
-            kRt = self.rope_k(self.Wkr(x), t_start)
+            x_k_r = Dense(features=self.dhR, dtype=self.model_dtype)(x)
+            x_q_r = Dense(features=(self.dhR * self.n_heads), dtype=self.model_dtype)(x)
 
-            qRt = self.rope_q(self.Wqr(x), t_start)
-            qRt = rearrange(qRt, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dhR)
+            rope_k = RoPE(model_dim=x_k_r.shape[-1], T=self.T)
+            rope_q = RoPE(model_dim=x_q_r.shape[-1], T=self.T)
+
+            kRt = rope_k(x_k_r, t_start)
+
+            qRt = rope_q(x_q_r, t_start)
+            qRt = rearrange(qRt, "B T (nh d) -> B nh T d", nh=self.n_heads)
 
         if not train:
             if cKV_cache is not None:
@@ -300,39 +323,77 @@ class MLA(nn.Module):
                     kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
                 kRT_cache = kRt
 
-        k, v = jnp.split(self.W_uKV(cKVt), 2, axis=-1)
-        q = self.W_uQ(cqt)
+        k, v = jnp.split(
+            Dense(features=2 * self.model_dim, dtype=self.model_dtype)(cKVt), 2, axis=-1
+        )
+        q = Dense(features=self.model_dim, dtype=self.model_dtype)(cqt)
 
-        k = rearrange(k, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
-        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads, d=self.dk)
+        qkv = jnp.concat([q, k,v], axis=0)
+        qkv = rearrange(
+            qkv,
+            "B T (nh dk) -> B nh T dk",
+            B=B * 3,
+            nh=self.n_heads,
+            dk=C // self.n_heads,
+        )
+        qkv = jax.lax.all_to_all(qkv, "tensor", split_axis=1, concat_axis=3, tiled=True)
+
+        q, k, v = jnp.split(qkv, 3, axis=0)
 
         if self.rope:
+            qRt = jax.lax.all_to_all(
+                qRt,
+                'tensor',
+                split_axis=1,
+                concat_axis=3,
+                tiled=True
+            )
+
             q = jnp.concatenate([q, qRt], axis=-1)
             kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
+            kRt = jax.lax.all_to_all(
+                kRt,
+                'tensor',
+                split_axis=1,
+                concat_axis=3,
+                tiled=True
+            )
             k = jnp.concatenate([k, kRt], axis=-1)
 
         def scaledDotProd(q, k, v, mask):
+            input_dtype = q.dtype
+
             q = q.astype("float32")
             k = k.astype("float32")
-            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.dk**0.5))
+            v = v.astype("float32")
+
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (1 / (self.model_dim // self.n_heads) ** 0.5)
             w = jnp.where(mask == 0, -9e15, w)
             w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
             output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
+
+            output = output.astype(input_dtype)
             return output
 
+        local_n_heads = q.shape[1]
         if T == 1:
-            mask = jnp.ones((B, self.n_heads, 1, k.shape[2]))
+            mask = jnp.ones((B, local_n_heads, 1, k.shape[2]))
         else:
             mask = jnp.tril(
-                jnp.ones((B, self.n_heads, q.shape[2], k.shape[2])),
+                jnp.ones((B, local_n_heads, q.shape[2], k.shape[2])),
             )
 
         output = scaledDotProd(q, k, v, mask)
+
+        output = jax.lax.all_to_all(
+            output, "tensor", split_axis=3, concat_axis=1, tiled=True
+        )
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
-        output = self.output(output)
-        output = self.out_dropout(output, deterministic=not train)
+        output = Dense(features=self.model_dim, dtype=self.model_dtype)(output)
+        output = nn.Dropout(rate=self.dropout)(output, deterministic=not train)
+
+
         return output, (cKV_cache, kRT_cache)
 
 
@@ -356,7 +417,7 @@ class Block(nn.Module):
         cache: Optional[Tuple[Array, Optional[Array]]] = (None, None),
         train: bool = True,
     ):
-        x_norm = nn.LayerNorm()(x)
+        x_norm = RMSNorm()(x)
 
         x_up, cache = MLA(
             model_dim=self.model_dimension,
@@ -369,7 +430,7 @@ class Block(nn.Module):
         )(x_norm, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
         x = x + x_up
 
-        x_norm = nn.LayerNorm()(x)
+        x_norm = RMSNorm()(x)
 
         load = None
         if self.moe == True:
@@ -653,15 +714,34 @@ class shardedModel:
         model: Tuple[Embeddings, EncoderBlock],
         params: PyTree,
         key: jax.random.key,
-        mesh: jax.sharding.Mesh,
         x: str = "",
         *,
         B: int = 1,
         k: int = 10000,
         temperature: int = 1,
         max_tokens: int = 10,
+
         use_cache=True,
     ) -> list[str]:
+
+
+        n_layers = params[1]["Block_0"]["LayerNorm_0"]["bias"].shape[0]
+        n_devices = n_layers * (jax.device_count() // n_layers)
+        mesh = jax.sharding.Mesh(
+            jax.devices()[:n_devices][None, :, None], axis_names=("fsdp", "model", "tensor")
+        )
+
+        out_spec = jax.tree.map(
+            lambda x : jax.sharding.NamedSharding(mesh, x.sharding.spec),
+            params
+        )
+
+        params = jax.tree.map(
+            lambda x, y: jax.device_put(x, out_spec),
+            params,
+            out_spec
+        )
+
         enc = tiktoken.get_encoding("gpt2")
         if x == "":
             out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
@@ -704,7 +784,11 @@ class shardedModel:
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P("fsdp", "model"), (P(), shardedModel.get_p_spec(params[1])), P()),
+            in_specs=(
+                P("fsdp", "model", "tensor"),
+                out_spec,
+                P(),
+            ),
             out_specs=P("fsdp", "model"),
         )
         def generate_shard(key, params, out):
@@ -740,33 +824,28 @@ class shardedModel:
         embedding_model, layer_model = model
         embedding_params, layer_params = params
 
-
         embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
 
-
         layer_fn = lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
-                {"params": params},
-                x,
-                cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
-                train=train,
-                rngs=None if not train else {"dropout": key},
-            )
+            {"params": params},
+            x,
+            cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
+            train=train,
+            rngs=None if not train else {"dropout": key},
+        )
         if checkpoint:
-            layer_fn = jax.checkpoint(layer_fn, policy=jax.checkpoint_policies.nothing_saveable)
+            layer_fn = jax.checkpoint(
+                layer_fn, policy=jax.checkpoint_policies.nothing_saveable
+            )
 
         layer_out, (current_cache, load) = shardedModel.layer_fn(
-            layer_fn,
-            embeddings,
-            layer_params,
-            key,
-            cache=cache
+            layer_fn, embeddings, layer_params, key, cache=cache
         )
 
         logits = embedding_model.apply(
             {"params": embedding_params}, layer_out, out=True
         )
         return logits, (current_cache, load)
-
 
     @staticmethod
     def layer_fn(fwd_fn, x, params, key, cache=None):
@@ -862,37 +941,63 @@ class shardedModel:
         return outputs, (out_cache, out_load)
 
     @staticmethod
-    def get_p_spec(params: PyTree) -> jax.sharding.NamedSharding:
-
-        def single_param_p(x: Array) -> jax.sharding.PartitionSpec:
-          return P('model') if x.ndim < 3 else P('model', None, 'fsdp')
-
-        return jax.tree.map(
-            single_param_p,
-            params,
-        )
-
-    @staticmethod
-    def shard_params(
-        params: Tuple[PyTree, PyTree],
+    def get_p_spec(
+        model: Tuple[Embeddings, EncoderBlock],
         mesh: jax.sharding.Mesh,
-    ) -> Tuple[PyTree, PyTree]:
-        embed_sharding = jax.tree.map(
-            lambda _: jax.sharding.NamedSharding(mesh, P()), params[0]
+        config: modelConfig,
+    ) -> jax.sharding.NamedSharding:
+        embed, layer = model
+
+        T = config.T
+        n_blocks = mesh.devices.shape[1]
+        n_layers = config.blocks
+
+        x_embed = jnp.ones((1, T), dtype=jnp.int32)
+        x_layer = jnp.ones((1, T, embed.model_dimension), dtype=jnp.float32)
+        key = jax.random.PRNGKey(0)
+
+        @partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(P(None, "model"), P(None, None, "model")),
+            out_specs=(P("model")),
         )
-        layer_spec = shardedModel.get_p_spec(params[1])
-        layer_sharding = jax.tree.map(
-            lambda x: jax.sharding.NamedSharding(mesh, x), layer_spec
+        def get_var_spec_shard(x_embed, x_layer):
+            embed_shape = embed.init(key, x_embed)["params"]
+            layer_shape = []
+            for _ in range(n_layers // n_blocks):
+                layer_shape.append(layer.init(key, x_layer, train=False)["params"])
+            layer_shape = jax.tree.map(
+                lambda *x: jnp.stack(x, axis=0),
+                *layer_shape
+            )
+
+            return embed_shape, layer_shape
+
+        eval_shape = jax.eval_shape(
+            get_var_spec_shard,
+            x_embed,
+            x_layer,
         )
 
-        params_sharding = (embed_sharding, layer_sharding)
+        embedding_partition = lambda x: P("tensor", "fsdp") if x.ndim == 2 else P(None)
+        layer_partition = (
+            lambda x: P("model", "tensor", "fsdp") if x.ndim == 3 else P("model", None)
+        )
 
-        params = jax.device_put(params, params_sharding)
+        embed_p_spec = jax.tree.map(
+            embedding_partition,
+            eval_shape[0],
+        )
+        layer_p_spec = jax.tree.map(
+            layer_partition,
+            eval_shape[1],
+        )
 
-        return params
+        return embed_p_spec, layer_p_spec
 
     @staticmethod
-    def get_model(cfg):
+    def get_model(cfg) -> Tuple[Embeddings, EncoderBlock]:
         dtype = jnp.bfloat16 if (cfg.model_dtype == "bfloat16") else jnp.float32
         embedding_layer = Embeddings(
             model_dimension=cfg.model_dimension,
@@ -923,51 +1028,62 @@ class shardedModel:
         mesh: jax.sharding.Mesh,
         key: jax.random.key,
     ) -> Tuple[PyTree, PyTree]:
+
+        out_spec = shardedModel.get_p_spec(model, mesh, cfg)
+        def replace_fsdp(p: jax.sharding.PartitionSpec):
+            if p[-1] == "fsdp":
+                p = P(
+                    *p[:-1], None
+                )
+            return p
+
+        out_spec_no_fsdp = jax.tree.map(
+            lambda x: replace_fsdp(x), out_spec
+        )
+
         embedding_layer, layer = model
 
-        x = jnp.ones((1, cfg.T), dtype=jnp.int32)
-        key, init_key = jax.random.split(key)
-        embedding_params = embedding_layer.init(init_key, x)["params"]
-        embed_sharding = jax.tree.map(
-            lambda _: jax.sharding.NamedSharding(mesh, P()), embedding_params
-        )
-        embedding_params = jax.device_put(embedding_params, embed_sharding)
+        x_embed = jnp.ones((1, cfg.T), dtype=jnp.int32)
+        x_layer = jnp.ones((1, cfg.T, cfg.model_dimension), dtype=jnp.float32)
+
+
 
         model_devices = mesh.devices.shape[1]
+        tensor_devices = mesh.devices.shape[2]
         assert cfg.blocks // model_devices
-
         layers_per_device = cfg.blocks // model_devices
 
         @partial(
-            jax.shard_map, mesh=mesh, in_specs=(P("model")), out_specs=(P("model"))
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(P(None, "tensor"), P(None, None, "tensor"), P("tensor"), P("model", "tensor")),
+            out_specs=out_spec_no_fsdp
         )
-        def init_pipeline(key):
-            key = key[0]
-            x = jnp.ones((1, cfg.T, cfg.model_dimension))
+        def init_weights(x_embed, x_layer, embed_key, layer_key):
+            embed_key = embed_key[0]
+            layer_key = layer_key[0, 0]
+            embedding_params = embedding_layer.init(embed_key, x_embed, out=False)["params"]
             layer_params = []
+
             for _ in range(layers_per_device):
-                key, init_key = jax.random.split(key)
-                current_params = layer.init(init_key, x, train=False)["params"]
+                layer_key, init_key = jax.random.split(layer_key)
+                current_params = layer.init(init_key, x_layer, train=False)["params"]
                 layer_params.append(current_params)
 
             layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
 
-            return layer_params
+            return embedding_params, layer_params
+        key, *embed_key = jax.random.split(key, tensor_devices + 1)
+        embed_key = jnp.array(embed_key)
+        key, *layer_keys = jax.random.split(key, tensor_devices * model_devices + 1)
+        layer_keys = jnp.array(layer_keys).reshape(model_devices, tensor_devices, 2)
 
-        key, *layer_keys = jax.random.split(key, model_devices + 1)
-        layer_keys = jnp.array(layer_keys)
-        layer_params = init_pipeline(layer_keys)
-
-        layer_spec = shardedModel.get_p_spec(layer_params)
-        layer_params = jax.tree.map(
-            lambda x, y: jax.device_put(
-                x, jax.sharding.NamedSharding(mesh, y)
-            ),
-            layer_params,
-            layer_spec,
+        params = init_weights(x_embed, x_layer, embed_key, layer_keys)
+        params = jax.tree.map(
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
+            params,
+            out_spec
         )
-
-        params = (embedding_params, layer_params)
 
         return params
 
@@ -1011,11 +1127,11 @@ if __name__ == "__main__":
 
     key = jax.random.PRNGKey(0)
 
-    # model, params = Decoder.get_model(model_cfg, key)
-    # print_params(params)
+    model, params = Decoder.get_model(model_cfg, key)
+    print_params(params)
 
-    devices = np.array(jax.devices()).reshape((2, 2))
-    mesh = jax.sharding.Mesh(devices=devices, axis_names=("fsdp", "model"))
+    devices = np.array(jax.devices()).reshape((1, 2, 2))
+    mesh = jax.sharding.Mesh(devices=devices, axis_names=("fsdp", "model", "tensor"))
     print(mesh)
     model, params = shardedModel.get_model_and_params(model_cfg, mesh, key)
     print_params(params)

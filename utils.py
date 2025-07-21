@@ -26,7 +26,6 @@ class modelConfig:
     model_dtype: str = "bfloat16"
 
 
-
 @dataclass
 class dataConfig:
     train_dataset_path: str = "./trainSetShards"
@@ -75,7 +74,6 @@ class config:
     seed: int = 0
     wandb: bool = True
     grad_clip_norm: float = 1.0
-    grad_checkpoint: bool = False
 
 
 def parse_args():
@@ -119,7 +117,6 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--grad_checkpoint", action="store_true")
 
     parser.add_argument("--training_steps", type=int, default=10000)
     parser.add_argument("--grad_step", type=int, default=1)
@@ -152,7 +149,6 @@ def parse_args():
         moe=args.moe,
         latent_dim=args.latent_dim,
         model_dtype=args.model_dtype,
-
     )
 
     data_cfg = dataConfig(
@@ -193,7 +189,6 @@ def parse_args():
         alpha=args.alpha,
         wandb=args.wandb,
         grad_clip_norm=args.grad_clip_norm,
-        grad_checkpoint=args.grad_checkpoint,
     )
 
     return cfg

@@ -39,8 +39,7 @@ import orbax.checkpoint as ocp
 
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
-from functools import partial
-from typing import Optional, Tuple, Type, TypeVar
+from typing import Optional
 from jaxtyping import PyTree
 from einops import rearrange
 import numpy as np
@@ -70,8 +69,12 @@ class TrainState:
         return self
 
     @classmethod
-    def restore(cls, restored: PyTree, tx, mesh):
-        params = shardedModel.shard_params((*restored["params"],), mesh=mesh)
+    def restore(cls, restored: PyTree, tx, model_spec, mesh):
+        params = jax.tree.map(
+            lambda x,y : jax.device_put(x, y),
+            restored["params"],
+            model_spec,
+        )
 
         opt_state_init = tx.init(params)
 
@@ -103,10 +106,10 @@ class TrainState:
 
 def setup_devices(cfg: config):
     device_cfg = cfg.device_config
-    assert 2 == len(device_cfg.n_device_axis)
+    assert 3 == len(device_cfg.n_device_axis)
 
     jax.distributed.initialize()
-    devices = np.array(jax.devices())[:, None]
+    devices = np.array(jax.devices())[:, None, None]
 
     assert devices.shape[0] == np.prod(device_cfg.n_device_axis)
     devices = devices.reshape(*device_cfg.n_device_axis)
@@ -122,20 +125,21 @@ def setup_devices(cfg: config):
                 f"Coords: {d.coords}, Core: {d.core_on_chip}"
             )
 
-    mesh = Mesh(devices, axis_names=("fsdp", "model"))
+    mesh = Mesh(devices, axis_names=("fsdp", "model", "tensor"))
     print(f"Mesh: {mesh}")
     count = devices.shape
     count = {
         "fsdp": count[0],
         "model": count[1],
+        "tensor": count[2],
     }
 
     return mesh, count
 
 
-def loss(model, alpha, checkpoint, params, key, x, y, train):
+def loss(model, alpha, params, key, x, y, train):
     M, B, T = x.shape
-    pred, (_, load) = shardedModel.pipe_step(model, params, x, key=key, train=train, checkpoint=checkpoint)
+    pred, (_, load) = shardedModel.pipe_step(model, params, x, key=key, train=train)
 
     total_tokens = M * B * T
     log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(total_tokens, -1)
@@ -153,6 +157,7 @@ def loss(model, alpha, checkpoint, params, key, x, y, train):
 
     loss = jax.lax.pmean(loss, axis_name="model")
     loss = jax.lax.pmean(loss, axis_name="fsdp")
+    loss = jax.lax.pmean(loss, axis_name="tensor")
 
     aux_stat = jax.lax.pmean(aux_stat, axis_name="model")
     aux_stat = jax.lax.pmean(aux_stat, axis_name="fsdp")
@@ -200,14 +205,26 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
         embed_grads = jax.tree.map(lambda x: jnp.zeros_like(x), params[0])
         layer_grads = jax.tree.map(lambda x: jnp.zeros_like(x), params[1])
 
-        def init_vary(x):
+        def init_vary_layer(x):
             x = jax.lax.pvary(x, axis_name="model")
             if x.ndim == 3:
                 x = jax.lax.pvary(x, axis_name="fsdp")
+                x = jax.lax.pvary(x, axis_name="tensor")
             return x
 
+        def init_vary_embed(x):
+            if x.ndim == 2:
+                x = jax.lax.pvary(x, axis_name="fsdp")
+                x = jax.lax.pvary(x, axis_name="tensor")
+            return x
+
+        embed_grads = jax.tree.map(
+            init_vary_embed,
+            embed_grads,
+        )
+
         layer_grads = jax.tree.map(
-            init_vary,
+            init_vary_layer,
             layer_grads,
         )
 
@@ -219,7 +236,6 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
     if grads is not None:
         grads = jax.tree.map(lambda x: x / grad_steps, grads)
         return grads, metrics
-
 
     return metrics
 
@@ -262,7 +278,7 @@ def main(config: config):
     print("setting up dataset")
     data_partition = jax.sharding.NamedSharding(
         mesh,
-        P(None, "fsdp", "model", None, None),
+        P(None, "fsdp", "model", None, "tensor")
     )
     (
         train_dataset,
@@ -295,6 +311,12 @@ def main(config: config):
     use_wandb = config.wandb is True
     wandb_id = None
 
+    model_spec = shardedModel.get_p_spec(
+        model=model,
+        mesh=mesh,
+        config=config.model,
+    )
+
     if load:
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
         init_step = tree_state["step"]
@@ -302,7 +324,7 @@ def main(config: config):
 
         key.key = tree_state["key"]
 
-        state = TrainState.restore(tree_state["state"], tx, mesh)
+        state = TrainState.restore(tree_state["state"], tx, model_spec, mesh)
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]
@@ -349,10 +371,10 @@ def main(config: config):
         loss,
         model,
         config.alpha,
-        config.grad_checkpoint
     )
 
-    layer_spec = shardedModel.get_p_spec(state.params[1])
+    key_spec = P("fsdp", "model", "tensor")
+    data_spec = P("fsdp", "model", None, "tensor")
     train_step = jax.jit(
         jax.shard_map(
             lambda key, params, x, y: step(
@@ -360,12 +382,12 @@ def main(config: config):
             ),
             mesh=mesh,
             in_specs=(
-                P("fsdp", "model"),
-                (P(), layer_spec),
-                P("fsdp", "model"),
-                P("fsdp", "model"),
+                key_spec,
+                model_spec,
+                data_spec,
+                data_spec,
             ),
-            out_specs=((P(), layer_spec), P()),
+            out_specs=(model_spec, P()),
         )
     )
 
@@ -376,10 +398,10 @@ def main(config: config):
             ),
             mesh=mesh,
             in_specs=(
-                P("fsdp", "model"),
-                (P(), layer_spec),
-                P("fsdp", "model"),
-                P("fsdp", "model"),
+                key_spec,
+                model_spec,
+                data_spec,
+                data_spec,
             ),
             out_specs=P(),
         )
@@ -391,19 +413,16 @@ def main(config: config):
     train_loss = 0.0
     sample_key = key()
 
+
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):
-            key_count = count["fsdp"] * count["model"] * config.grad_step
+            key_count = count["fsdp"] * count["model"] * count["tensor"] * config.grad_step
             if key_count == 1:
-                keys = jnp.array([key()]).reshape(1, 1, 1, 2)
+                keys = jnp.array([key()]).reshape(1, 1, 1, 1, 2)
             else:
                 keys = key(key_count).reshape(
-                    count["fsdp"], count["model"], config.grad_step, 2
+                    count["fsdp"], count["model"], count["tensor"], config.grad_step, 2
                 )
-
-            keys = jax.device_put(
-                keys, jax.sharding.NamedSharding(mesh, P("fsdp", "model"))
-            )
 
             grads, metrics = train_step(
                 keys,
@@ -439,12 +458,12 @@ def main(config: config):
             )
 
             with jax.named_scope("eval_step"):
-                key_count = count["fsdp"] * count["model"] * config.eval_steps
+                key_count = count["fsdp"] * count["model"] * count["tensor"] * config.eval_steps
                 if key_count == 1:
-                    keys = jnp.array([key()]).reshape(1, 1, 1, 2)
+                    keys = jnp.array([key()]).reshape(1, 1, 1, 1, 2)
                 else:
                     keys = key(key_count).reshape(
-                        count["fsdp"], count["model"], config.eval_steps, 2
+                        count["fsdp"], count["model"], count["tensor"], config.eval_steps, 2
                     )
 
                 metrics_val = eval_step(
@@ -472,7 +491,7 @@ def main(config: config):
             print(log_string)
 
             samples = shardedModel.generate(
-                model, state.params, sample_key, mesh, x="hello", use_cache=False
+                model, state.params, sample_key, mesh, x="hello", model_spec=model_spec, use_cache=False
             )
             print("sammple tokens: \n")
             for tokens in samples:

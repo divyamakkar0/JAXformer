@@ -1,5 +1,4 @@
-
-#TODO:
+# TODO:
 # make dense tensor parellel
 # fix attention (anything with nn.einsum)
 # make RMSNORM manually
@@ -167,20 +166,23 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
+
 class Dense(nn.Module):
     features: int
     model_dtype: jnp.dtype
 
     @nn.compact
     def __call__(self, x: Array):
+        if not self.is_mutable_collection("params"):
+            params = self.scope.get_variable("params", "Dense_0")
+            params["kernel"] = jax.lax.all_gather(
+                params["kernel"], "fsdp", axis=-1, tiled=True
+            )
+            out = x @ params["kernel"] + params["bias"]
+        else:
+            out = nn.Dense(features=self.features, dtype=self.model_dtype)(x)
+        return out
 
-      if not self.is_mutable_collection("params"):
-        params = self.scope.get_variable("params", "Dense_0")
-        params['kernel'] = jax.lax.all_gather(params['kernel'], "fsdp", axis=-1, tiled=True)
-        out = x @ params['kernel'] + params['bias']
-      else:
-        out = nn.Dense(features=self.features, dtype=self.model_dtype)(x)
-      return out
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -746,33 +748,26 @@ class shardedModel:
         embedding_model, layer_model = model
         embedding_params, layer_params = params
 
-
         embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
 
-
         layer_fn = lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
-                {"params": params},
-                x,
-                cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
-                train=train,
-                rngs=None if not train else {"dropout": key},
-            )
+            {"params": params},
+            x,
+            cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
+            train=train,
+            rngs=None if not train else {"dropout": key},
+        )
         if checkpoint:
             layer_fn = jax.checkpoint(layer_fn)
 
         layer_out, (current_cache, load) = shardedModel.layer_fn(
-            layer_fn,
-            embeddings,
-            layer_params,
-            key,
-            cache=cache
+            layer_fn, embeddings, layer_params, key, cache=cache
         )
 
         logits = embedding_model.apply(
             {"params": embedding_params}, layer_out, out=True
         )
         return logits, (current_cache, load)
-
 
     @staticmethod
     def layer_fn(fwd_fn, x, params, key, cache=None):

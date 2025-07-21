@@ -159,21 +159,24 @@ class MoE(nn.Module):
 
         return res, (f, p)
 
+
 class Dense(nn.Module):
     features: int
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, x: Array):
-
-      if not self.is_mutable_collection("params"):
-        params = self.scope.get_variable("params", "Dense_0")
-        params['kernel'] = jax.lax.all_gather(params['kernel'], "fsdp", axis=-1, tiled=True)
-        out = x @ params['kernel'] + params['bias']
+        if not self.is_mutable_collection("params"):
+            params = self.scope.get_variable("params", "Dense_0")
+            params["kernel"] = jax.lax.all_gather(
+                params["kernel"], "fsdp", axis=-1, tiled=True
+            )
+            out = x @ params["kernel"] + params["bias"]
+            return out
+        else:
+            out = nn.Dense(features=self.features, dtype=self.dtype)(x)
         return out
-      else:
-        out = nn.Dense(features=self.features, dtype=self.dtype)(x)
-      return out
+
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -261,9 +264,7 @@ class MLA(nn.Module):
         if self.dhR != 0:
             self.rope = True
             self.Wkr = Dense(features=self.dhR, dtype=self.model_dtype)
-            self.Wqr = Dense(
-                features=(self.dhR * self.n_heads), dtype=self.model_dtype
-            )
+            self.Wqr = Dense(features=(self.dhR * self.n_heads), dtype=self.model_dtype)
             self.rope_k = RoPE(model_dim=self.dhR, T=self.T)
             self.rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
 
@@ -703,7 +704,11 @@ class shardedModel:
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P("fsdp", "model"), (P(), shardedModel.get_p_spec(params[1])), P()),
+            in_specs=(
+                P("fsdp", "model"),
+                (P(), shardedModel.get_p_spec(params[1])),
+                P(),
+            ),
             out_specs=P("fsdp", "model"),
         )
         def generate_shard(key, params, out):
@@ -735,37 +740,31 @@ class shardedModel:
         return outputs
 
     @staticmethod
-    def pipe_step(model, params, x, key, train, cache=None, checkpoint=False):
+    def pipe_step(model, params, x, key, train, cache=None):
         embedding_model, layer_model = model
         embedding_params, layer_params = params
 
-
         embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
 
-
         layer_fn = lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
-                {"params": params},
-                x,
-                cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
-                train=train,
-                rngs=None if not train else {"dropout": key},
-            )
-        if checkpoint:
-            layer_fn = jax.checkpoint(layer_fn, policy=jax.checkpoint_policies.nothing_saveable)
+            {"params": params},
+            x,
+            cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
+            train=train,
+            rngs=None if not train else {"dropout": key},
+        )
+        layer_fn = jax.checkpoint(
+            layer_fn, policy=jax.checkpoint_policies.nothing_saveable
+        )
 
         layer_out, (current_cache, load) = shardedModel.layer_fn(
-            layer_fn,
-            embeddings,
-            layer_params,
-            key,
-            cache=cache
+            layer_fn, embeddings, layer_params, key, cache=cache
         )
 
         logits = embedding_model.apply(
             {"params": embedding_params}, layer_out, out=True
         )
         return logits, (current_cache, load)
-
 
     @staticmethod
     def layer_fn(fwd_fn, x, params, key, cache=None):
@@ -862,9 +861,8 @@ class shardedModel:
 
     @staticmethod
     def get_p_spec(params: PyTree) -> jax.sharding.NamedSharding:
-
         def single_param_p(x: Array) -> jax.sharding.PartitionSpec:
-          return P('model') if x.ndim < 3 else P('model', None, 'fsdp')
+            return P("model") if x.ndim < 3 else P("model", None, "fsdp")
 
         return jax.tree.map(
             single_param_p,
@@ -959,9 +957,7 @@ class shardedModel:
 
         layer_spec = shardedModel.get_p_spec(layer_params)
         layer_params = jax.tree.map(
-            lambda x, y: jax.device_put(
-                x, jax.sharding.NamedSharding(mesh, y)
-            ),
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
             layer_params,
             layer_spec,
         )
