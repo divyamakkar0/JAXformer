@@ -11,11 +11,14 @@ from google.cloud import storage
 import shutil
 import time
 
+
 bucket_name = "10bt_gpt4"
-source_blob_name = "edufineweb_train_00000"
-destination_file_name = "./bucketDownloads"
+source_blob_name_train = "edufineweb_train_"
+source_blob_name_val = "edufineweb_val_"
 folder = "./bucket_downloads/"
 os.makedirs(folder, exist_ok=True)
+prefix_train = "edufineweb_train"
+prefix_val = "edufineweb_val"
 
 def download_blob_to_stream(bucket_name, source_blob_name, file_obj):
     """Downloads a blob to a stream or other file-like object."""
@@ -38,39 +41,41 @@ def download_bucket(bucket_name, source_name, f):
     print("Downloaded")
     return result
 
-for i in range(1,6):
-    source_name = source_blob_name + str(i) + ".npy"
-    dest = destination_file_name + str(i) + ".npy"
+def len_blobs(bucket_name, prefix, delimiter=None):
+    len = 0
+    storage_client = storage.Client()
+    blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=delimiter)
+    for blob in blobs:
+        len += 1
+    
+    return len
 
-    with open(dest, "wb") as f:
-        result = download_bucket(bucket_name, source_name, f)
-        
-    shutil.move(dest, folder)
-    #the sharding 
 
-    full_path = folder + dest
-    os.remove(full_path)
-    print(f'removed {full_path} successfully')
 
 class Dataset:
     def __init__(
         self,
-        data_path: str | List[str],
+        data_path: List[str],
         T: int,
         batch_size: int,
         microbatch: int,
         dp: int,
         pp: int,
+        train: bool,
         partition: Optional[NamedSharding] = None,
+        count: int = 0,
+        train_size: int = 0,
+        val_size: int = 0,
     ):
         assert (batch_size % microbatch) == 0, "microbatch should divide batch size"
         assert (microbatch % pp) == 0, "pp should divide microbatch size"
-        assert len(data_path) > 0, "data should not be empty"
+        # assert len(data_path) > 0, "data should not be empty"
 
         self.T = T
         self.batch_size = batch_size
         self.dp = dp
         self.microbatch = microbatch
+        self.train = train 
 
         if isinstance(data_path, str):
             data_path = [data_path]
@@ -78,67 +83,89 @@ class Dataset:
 
         self.shard_idx = 0
         self.step_idx = 0
+        self.val_count = 0
         self.partition = partition
-
+        self.count = 1
+        self.train_size = len_blobs(bucket_name, prefix_train)
+        self.val_size = len_blobs(bucket_name, prefix_val)
         self.load_next_shard(display=True)
 
     def load_next_shard(self, display: bool = False):
-        data = np.load(self.data_path[self.shard_idx])
-        self.dataset = data[:-1]
-        self.labels = data[1:]
+        size = self.train_size if self.train else self.val_size
+        count = self.count if self.train else self.val_count
+        full_path = ""
 
-        len_dataset = self.dataset.shape[0]
-        max_batches = len_dataset // (self.batch_size * self.T)
+        if count <= size:
+            padded = str(count)
+            padded = padded.zfill(6)
+            source_name = source_blob_name_train if self.train else source_blob_name_val 
+            source_name += padded + ".npy"
+            destination_file_name = "./BucketDownload" + padded
+            if self.train:
+                self.count += 1
+            else:
+                self.val_count += 1
 
-        self.dataset = self.dataset[: max_batches * self.batch_size * self.T].reshape(
-            max_batches,
-            self.dp,
-            self.microbatch,
-            self.batch_size // (self.dp * self.microbatch),
-            self.T,
-        )
-        self.labels = self.labels[: max_batches * self.batch_size * self.T].reshape(
-            max_batches,
-            self.dp,
-            self.microbatch,
-            self.batch_size // (self.dp * self.microbatch),
-            self.T,
-        )
+            with open(destination_file_name, "wb") as f:
+                result = download_bucket(bucket_name, source_name, f)
+                print(result)
+            
+            shutil.move(destination_file_name, folder)
+            full_path += folder + destination_file_name
 
-        if self.partition is not None:
-            self.dataset = jax.make_array_from_callback(
-                self.dataset.shape,
-                sharding=self.partition,
-                data_callback=lambda idx: self.dataset[idx],
+            data = np.load(full_path)
+            self.dataset = data[:-1]
+            self.labels = data[1:]
+
+            len_dataset = self.dataset.shape[0]
+            max_batches = len_dataset // (self.batch_size * self.T)
+
+            self.dataset = self.dataset[: max_batches * self.batch_size * self.T].reshape(
+                max_batches,
+                self.dp,
+                self.microbatch,
+                self.batch_size // (self.dp * self.microbatch),
+                self.T,
             )
-            self.labels = jax.make_array_from_callback(
-                self.labels.shape,
-                sharding=self.partition,
-                data_callback=lambda idx: self.labels[idx],
-            )
-        else:
-            self.dataset = jax.device_put(self.dataset)
-            self.labels = jax.device_put(self.labels)
-
-        if display:
-            current_shard = self.data_path[self.shard_idx].split("/")[-1].split(".")[0]
-            print(
-                f"Loaded shard {current_shard} with {self.dataset.shape[0]:,d} batches"
+            self.labels = self.labels[: max_batches * self.batch_size * self.T].reshape(
+                max_batches,
+                self.dp,
+                self.microbatch,
+                self.batch_size // (self.dp * self.microbatch),
+                self.T,
             )
 
-        self.shard_idx = (self.shard_idx + 1) % len(self.data_path)
+            if self.partition is not None:
+                self.dataset = jax.make_array_from_callback(
+                    self.dataset.shape,
+                    sharding=self.partition,
+                    data_callback=lambda idx: self.dataset[idx],
+                )
+                self.labels = jax.make_array_from_callback(
+                    self.labels.shape,
+                    sharding=self.partition,
+                    data_callback=lambda idx: self.labels[idx],
+                )
+            else:
+                self.dataset = jax.device_put(self.dataset)
+                self.labels = jax.device_put(self.labels)
+
+            os.remove(full_path)
+            print(f'removed {full_path} successfully')
+
 
     def __len__(self):
         return self.dataset.shape[0]
 
     def __call__(self):
+        size = self.train_size if self.train else self.val_size
         x = self.dataset[self.step_idx]
         y = self.labels[self.step_idx]
         self.step_idx += 1
 
         if self.step_idx >= self.dataset.shape[0]:
             self.step_idx = 0
-            self.load_next_shard(display=True)
+            self.load_next_shard()
 
         return x, y
 
@@ -175,6 +202,7 @@ class Dataset:
             partition=partition,
             dp=dp,
             pp=pp,
+            train=True,
         )
         val_dataset = cls(
             val_dataset_path,
@@ -184,6 +212,7 @@ class Dataset:
             partition=partition,
             dp=dp,
             pp=pp,
+            train=False,
         )
 
         return train_dataset, val_dataset
@@ -191,7 +220,7 @@ class Dataset:
 
 if __name__ == "__main__":
     test_cfg = dataConfig(
-        train_dataset_path="./dataset/train",
+        train_dataset_path="./dataset/test", 
         val_dataset_path="./dataset/test",
         T=1024,
         train_batch_size=16,
@@ -205,4 +234,6 @@ if __name__ == "__main__":
     end = time.time()
     print(f"time taken to load dataset: {(end - start):.2f} seconds")
     print(len(train), len(test))
+    for i in range(6104):
+        train()
     breakpoint()
