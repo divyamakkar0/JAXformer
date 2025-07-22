@@ -29,8 +29,9 @@ class modelConfig:
 
 @dataclass
 class dataConfig:
-    train_dataset_path: str = "./trainSetShards"
-    val_dataset_path: str = "./valSetShards"
+    bucket_name: str
+    source_blob_name: str = "edufineweb_"
+    download_path: str = "./bucket_downloads/downloadedShard"
     T: int = 6
     train_batch_size: int = 3
     val_batch_size: int = 3

@@ -6,15 +6,12 @@ import numpy as np
 from typing import Optional, Tuple, List
 from utils import dataConfig
 import math
-
 from google.cloud import storage
 import shutil
 import time
 
-
 bucket_name = "10bt_gpt4"
-source_blob_name_train = "edufineweb_train_"
-source_blob_name_val = "edufineweb_val_"
+
 folder = "./bucket_downloads/"
 os.makedirs(folder, exist_ok=True)
 prefix_train = "edufineweb_train"
@@ -41,79 +38,84 @@ def download_bucket(bucket_name, source_name, f):
     print("Downloaded")
     return result
 
-def len_blobs(bucket_name, prefix, delimiter=None):
-    len = 0
-    storage_client = storage.Client()
-    blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=delimiter)
-    for blob in blobs:
-        len += 1
-    
-    return len
-
 
 
 class Dataset:
     def __init__(
         self,
-        data_path: List[str],
+        download_path: List[str],
         T: int,
         batch_size: int,
         microbatch: int,
         dp: int,
         pp: int,
         train: bool,
+        bucket_name: str,
+        source_blob_name: str,
         partition: Optional[NamedSharding] = None,
-        count: int = 0,
-        train_size: int = 0,
-        val_size: int = 0,
     ):
         assert (batch_size % microbatch) == 0, "microbatch should divide batch size"
         assert (microbatch % pp) == 0, "pp should divide microbatch size"
-        # assert len(data_path) > 0, "data should not be empty"
+        assert len(download_path) > 0, "data should not be empty"
 
         self.T = T
         self.batch_size = batch_size
         self.dp = dp
         self.microbatch = microbatch
         self.train = train 
-
-        if isinstance(data_path, str):
-            data_path = [data_path]
-        self.data_path = data_path
-
-        self.shard_idx = 0
         self.step_idx = 0
-        self.val_count = 0
+        self.train_idx = 1
+        self.val_idx = 0
         self.partition = partition
-        self.count = 1
-        self.train_size = len_blobs(bucket_name, prefix_train)
-        self.val_size = len_blobs(bucket_name, prefix_val)
+        self.source_blob_name = source_blob_name
+
+        self.prefix_train = "train/" + self.source_blob_name + "train"
+        self.prefix_val = "val/" + self.source_blob_name + "val"
+        self.bucket_name = bucket_name
+        self.download_path = download_path
+        
+
+        self.train_size = self.len_blobs(self.bucket_name, self.prefix_train)
+        self.val_size = self.len_blobs(self.bucket_name, self.prefix_val)
+
         self.load_next_shard(display=True)
 
+    @staticmethod 
+    def len_blobs(bucket_name, prefix, delimiter=None):
+        len = 0
+        storage_client = storage.Client()
+        blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=delimiter)
+        for blob in blobs:
+            len += 1
+        
+        return len
+
     def load_next_shard(self, display: bool = False):
-        size = self.train_size if self.train else self.val_size
-        count = self.count if self.train else self.val_count
-        full_path = ""
+        source_blob_name_train = "train/edufineweb_train_"
+        source_blob_name_val = "val/edufineweb_val_"
+        if self.train:
+            size = self.train_size
+            count = self.train_idx
+        else:
+            size = self.val_size
+            count = self.val_idx
 
         if count <= size:
-            padded = str(count)
-            padded = padded.zfill(6)
+            padded = str(count).zfill(6)
             source_name = source_blob_name_train if self.train else source_blob_name_val 
             source_name += padded + ".npy"
-            destination_file_name = "./BucketDownload" + padded
+            destination_file_name = self.download_path + padded
+            
             if self.train:
-                self.count += 1
+                self.train_idx += 1
             else:
-                self.val_count += 1
+                self.val_idx += 1
 
             with open(destination_file_name, "wb") as f:
-                result = download_bucket(bucket_name, source_name, f)
+                result = download_bucket(self.bucket_name, source_name, f)
                 print(result)
-            
-            shutil.move(destination_file_name, folder)
-            full_path += folder + destination_file_name
 
-            data = np.load(full_path)
+            data = np.load(destination_file_name)
             self.dataset = data[:-1]
             self.labels = data[1:]
 
@@ -150,8 +152,8 @@ class Dataset:
                 self.dataset = jax.device_put(self.dataset)
                 self.labels = jax.device_put(self.labels)
 
-            os.remove(full_path)
-            print(f'removed {full_path} successfully')
+            os.remove(destination_file_name)
+            print(f'removed {destination_file_name} successfully')
 
 
     def __len__(self):
@@ -177,25 +179,10 @@ class Dataset:
         dp: int = 1,
         pp: int = 1,
     ) -> Tuple["Dataset", "Dataset"]:
-        train_dataset_path = os.path.abspath(cfg.train_dataset_path)
-
-        if os.path.isdir(train_dataset_path):
-            train_dataset_path = [
-                os.path.join(train_dataset_path, f)
-                for f in os.listdir(train_dataset_path)
-                if f.endswith(".npy")
-            ]
-
-        val_dataset_path = os.path.abspath(cfg.val_dataset_path)
-        if os.path.isdir(val_dataset_path):
-            val_dataset_path = [
-                os.path.join(val_dataset_path, f)
-                for f in os.listdir(val_dataset_path)
-                if f.endswith(".npy")
-            ]
+        download = os.path.abspath(cfg.download_path)
 
         train_dataset = cls(
-            train_dataset_path,
+            download,
             cfg.T,
             cfg.train_batch_size,
             cfg.micro_batch_size,
@@ -203,9 +190,11 @@ class Dataset:
             dp=dp,
             pp=pp,
             train=True,
+            bucket_name=cfg.bucket_name,
+            source_blob_name=cfg.source_blob_name,
         )
         val_dataset = cls(
-            val_dataset_path,
+            download,
             cfg.T,
             cfg.val_batch_size,
             cfg.micro_batch_size,
@@ -213,6 +202,8 @@ class Dataset:
             dp=dp,
             pp=pp,
             train=False,
+            bucket_name=cfg.bucket_name,
+            source_blob_name=cfg.source_blob_name,
         )
 
         return train_dataset, val_dataset
@@ -220,13 +211,12 @@ class Dataset:
 
 if __name__ == "__main__":
     test_cfg = dataConfig(
-        train_dataset_path="./dataset/test", 
-        val_dataset_path="./dataset/test",
+        bucket_name="10bt_gpt4",
+        source_blob_name="edufineweb_",
+        download_path="./bucket_downloads/downloadedShard",
         T=1024,
         train_batch_size=16,
     )
-
-    import time
 
     start = time.time()
     #jax.random.key(0)
@@ -234,6 +224,4 @@ if __name__ == "__main__":
     end = time.time()
     print(f"time taken to load dataset: {(end - start):.2f} seconds")
     print(len(train), len(test))
-    for i in range(6104):
-        train()
     breakpoint()
