@@ -10,35 +10,6 @@ from google.cloud import storage
 import shutil
 import time
 
-bucket_name = "10bt_gpt4"
-
-folder = "./bucket_downloads/"
-os.makedirs(folder, exist_ok=True)
-prefix_train = "edufineweb_train"
-prefix_val = "edufineweb_val"
-
-def download_blob_to_stream(bucket_name, source_blob_name, file_obj):
-    """Downloads a blob to a stream or other file-like object."""
-    storage_client = storage.Client()
-    bucket = storage_client.bucket(bucket_name)
-    
-    blob = bucket.blob(source_blob_name)
-    blob.download_to_file(file_obj)
-    print(f"Downloaded blob {source_blob_name} to file-like object.")
-
-    return file_obj
-
-def download_bucket(bucket_name, source_name, f):
-    result = download_blob_to_stream(bucket_name, source_name, f)
-    while isinstance(result, Exception):
-        print("Failed to download due to exception")
-        time.sleep(5)
-        result = download_bucket(bucket_name, source_name, f)
-     
-    print("Downloaded")
-    return result
-
-
 
 class Dataset:
     def __init__(
@@ -80,8 +51,7 @@ class Dataset:
 
         self.load_next_shard(display=True)
 
-    @staticmethod 
-    def len_blobs(bucket_name, prefix, delimiter=None):
+    def len_blobs(self, bucket_name, prefix, delimiter=None):
         len = 0
         storage_client = storage.Client()
         blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=delimiter)
@@ -89,6 +59,27 @@ class Dataset:
             len += 1
         
         return len
+    
+    def download_blob_to_stream(self, bucket_name, source_blob_name, file_obj):
+        """Downloads a blob to a stream or other file-like object."""
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        
+        blob = bucket.blob(source_blob_name)
+        blob.download_to_file(file_obj)
+        print(f"Downloaded blob {source_blob_name} to file-like object.")
+
+        return file_obj
+
+    def download_bucket(self, bucket_name, source_name, f):
+        result = self.download_blob_to_stream(bucket_name, source_name, f)
+        while isinstance(result, Exception):
+            print("Failed to download due to exception")
+            time.sleep(5)
+            result = self.download_bucket(bucket_name, source_name, f)
+        
+        print("Downloaded")
+        return result
 
     def load_next_shard(self, display: bool = False):
         source_blob_name_train = "train/edufineweb_train_"
@@ -112,7 +103,7 @@ class Dataset:
                 self.val_idx += 1
 
             with open(destination_file_name, "wb") as f:
-                result = download_bucket(self.bucket_name, source_name, f)
+                result = self.download_bucket(self.bucket_name, source_name, f)
                 print(result)
 
             data = np.load(destination_file_name)
