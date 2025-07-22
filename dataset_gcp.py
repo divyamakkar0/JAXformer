@@ -72,14 +72,14 @@ class Dataset:
         return file_obj
 
     def download_bucket(self, bucket_name, source_name, f):
-        result = self.download_blob_to_stream(bucket_name, source_name, f)
-        while isinstance(result, Exception):
-            print("Failed to download due to exception")
-            time.sleep(5)
-            result = self.download_bucket(bucket_name, source_name, f)
-        
-        print("Downloaded")
-        return result
+        while True:
+            try:
+                result = self.download_blob_to_stream(bucket_name, source_name, f)
+                print("Downloaded")
+                return result
+            except Exception as e:
+                print("Failed to download due to exception")
+                time.sleep(5)
 
     def load_next_shard(self, display: bool = False):
         source_blob_name_train = "train/edufineweb_train_"
