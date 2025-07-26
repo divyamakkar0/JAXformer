@@ -23,7 +23,7 @@ import functools
 
 from config import parse_args, config
 from model import Decoder
-from dataset_gcp import Dataset
+from dataset import Dataset
 
 from typing import Tuple, Any
 import orbax.checkpoint as ocp
