@@ -29,8 +29,11 @@ class modelConfig:
 
 @dataclass
 class dataConfig:
-    train_dataset_path: str = "./trainSetShards"
-    val_dataset_path: str = "./valSetShards"
+    bucket_name: str
+    download_path: str = "./bucket_downloads/downloadedShard"
+    process_path: str = "./bucket_downloads/processShard" 
+    train_folder_name: str = "train"
+    val_folder_name: str = "val"
     T: int = 6
     train_batch_size: int = 3
     val_batch_size: int = 3
@@ -155,8 +158,11 @@ def parse_args():
     )
 
     data_cfg = dataConfig(
-        train_dataset_path=args.train_dataset,
-        val_dataset_path=args.val_dataset,
+        bucket_name=args.bucket_name,
+        download_path=args.download_path,
+        process_path=args.process_path,
+        train_folder_name=args.train_folder_name,
+        val_folder_name=args.train_folder_name,
         T=args.T,
         train_batch_size=args.train_batch_size,
         val_batch_size=args.val_batch_size,
