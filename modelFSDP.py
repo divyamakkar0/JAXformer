@@ -5,7 +5,8 @@ from flax import linen as nn
 from einops import rearrange
 
 import tiktoken
-from utils import config, modelConfig
+from utils import modelConfig
+import numpy as np
 from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
 from functools import partial
@@ -21,10 +22,10 @@ class RMSNorm(nn.Module):
         x = x / jnp.sqrt(rms + 1e-6)
 
         gamma = self.param(
-            "gamma", nn.initializers.ones, (x.shape[-1],), self.model_dtype
+            "gamma", nn.initializers.ones, (1,1,x.shape[-1]), self.model_dtype
         )
         beta = self.param(
-            "beta", nn.initializers.zeros, (x.shape[-1],), self.model_dtype
+            "beta", nn.initializers.zeros, (1,1,x.shape[-1]), self.model_dtype
         )
 
         x = x * gamma + beta
@@ -48,12 +49,13 @@ class Embeddings(nn.Module):
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
             x = self.embedding(x)
-            x = jax.lax.all_to_all(x, "tensor", split_axis=2, concat_axis=1, tiled=True)
+            axis = x.ndim - 1
+            x = jax.lax.all_to_all(x, "tensor", split_axis=axis, concat_axis=axis-1, tiled=True)
             if self.is_mutable_collection("params"):
                 x = jax.lax.all_gather(x, "tensor", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
-            x = jax.lax.all_to_all(x, "tensor", split_axis=1, concat_axis=2, tiled=True)
+            x = jax.lax.all_to_all(x, "tensor", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True)
             x = self.norm(x)
             x = self.embedding.attend(x)
 
@@ -197,7 +199,8 @@ class Dense(nn.Module):
             params["kernel"] = jax.lax.all_gather(
                 params["kernel"], "fsdp", axis=-1, tiled=True
             )
-            x = x @ params["kernel"] + params["bias"]
+            tensor_count = jax.lax.axis_size('tensor')
+            x = x @ params["kernel"] + (1/tensor_count) * params["bias"]
         else:
             x = nn.Dense(features=self.features, dtype=self.dtype)(x)
 
@@ -711,7 +714,7 @@ class Decoder(nn.Module):
 class shardedModel:
     @staticmethod
     def generate(
-        model: Tuple[Embeddings, EncoderBlock],
+        cfg: modelConfig,
         params: PyTree,
         key: jax.random.key,
         x: str = "",
@@ -720,24 +723,26 @@ class shardedModel:
         k: int = 10000,
         temperature: int = 1,
         max_tokens: int = 10,
-
         use_cache=True,
     ) -> list[str]:
 
 
-        n_layers = params[1]["Block_0"]["LayerNorm_0"]["bias"].shape[0]
+        n_layers = cfg.blocks
         n_devices = n_layers * (jax.device_count() // n_layers)
         mesh = jax.sharding.Mesh(
-            jax.devices()[:n_devices][None, :, None], axis_names=("fsdp", "model", "tensor")
+            np.array(jax.devices())[:n_devices][None, :, None], axis_names=("fsdp", "model", "tensor")
         )
 
-        out_spec = jax.tree.map(
-            lambda x : jax.sharding.NamedSharding(mesh, x.sharding.spec),
-            params
+        model = shardedModel.get_model(cfg)
+
+        out_spec = shardedModel.get_p_spec(
+            model,
+            mesh=mesh,
+            config=cfg
         )
 
         params = jax.tree.map(
-            lambda x, y: jax.device_put(x, out_spec),
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
             params,
             out_spec
         )
@@ -748,13 +753,14 @@ class shardedModel:
         else:
             out = jnp.array(enc.encode(x), dtype=jnp.int32)
 
-        out = jnp.repeat(out[None, :], B, axis=0)[None, None, None, ...]
+        out = jnp.repeat(out[None, :], B, axis=0)[:, None, :]
         prompt_length = out.shape[0]
-        T = model[1].T
+        T = cfg.T
         max_tokens = min(max_tokens, T - prompt_length)
 
         @jax.jit
         def sample(sample_key, params, out, cache):
+
             if not use_cache:
                 cache = None
 
@@ -789,26 +795,23 @@ class shardedModel:
                 out_spec,
                 P(),
             ),
-            out_specs=P("fsdp", "model"),
+            out_specs=P("fsdp", "model", "tensor")
         )
         def generate_shard(key, params, out):
+
             cache = None
-            out = out[0, 0]
-            key = key[0, 0]
+            key = key[0, 0, 0]
             for _ in range(max_tokens):
                 key, sample_key = jax.random.split(key)
-                out_next, (cache, logits) = sample(sample_key, params, out, cache)
+                out_next, (cache, _logits) = sample(sample_key, params, out, cache)
                 out = jnp.concatenate([out, out_next], axis=-1)
 
             return out[None, None, ...]
 
-        data_device = mesh.device_ids.shape[0]
-        pipeline_device = mesh.device_ids.shape[1]
-        sample_keys = jax.random.split(key, data_device * pipeline_device)
-        sample_keys = jnp.array(sample_keys).reshape(data_device, pipeline_device, 2)
-
+        sample_keys = jax.random.split(key, n_devices)
+        sample_keys = jnp.array(sample_keys)[None, :, None, :]
         sample_keys = jax.device_put(
-            sample_keys, jax.sharding.NamedSharding(mesh, P("fsdp", "model"))
+            sample_keys, jax.sharding.NamedSharding(mesh, P("fsdp", "model", "tensor"))
         )
 
         out = generate_shard(sample_keys, params, out)
@@ -833,10 +836,10 @@ class shardedModel:
             train=train,
             rngs=None if not train else {"dropout": key},
         )
-        if checkpoint:
-            layer_fn = jax.checkpoint(
-                layer_fn, policy=jax.checkpoint_policies.nothing_saveable
-            )
+
+        layer_fn = jax.checkpoint(
+            layer_fn, policy=jax.checkpoint_policies.nothing_saveable
+        )
 
         layer_out, (current_cache, load) = shardedModel.layer_fn(
             layer_fn, embeddings, layer_params, key, cache=cache
@@ -853,7 +856,7 @@ class shardedModel:
         n_devices = jax.lax.psum(1, "model")
         microbatch_per_device = x.shape[0]
         microbatch = n_devices * microbatch_per_device
-        layers_per_device = params["Block_0"]["LayerNorm_0"]["bias"].shape[0]
+        layers_per_device = params['Block_0']['MLA_0']['Dense_0']['Dense_0']['kernel'].shape[0]
         layers = layers_per_device * n_devices
         perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
 
@@ -876,6 +879,7 @@ class shardedModel:
                 current_cache = (cache[0][i], cache[1][i])
             key, *dropout_key = jax.random.split(key, layers_per_device + 1)
             dropout_key = jnp.array(dropout_key)
+
             state, (layer_cache, load) = jax.vmap(fwd_fn)(
                 x=state,
                 params=params,
@@ -959,10 +963,11 @@ class shardedModel:
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P(None, "model"), P(None, None, "model")),
+            in_specs=(P(None, 'tensor'), P(None, None, 'tensor')),
             out_specs=(P("model")),
         )
         def get_var_spec_shard(x_embed, x_layer):
+
             embed_shape = embed.init(key, x_embed)["params"]
             layer_shape = []
             for _ in range(n_layers // n_blocks):
@@ -980,10 +985,15 @@ class shardedModel:
             x_layer,
         )
 
-        embedding_partition = lambda x: P("tensor", "fsdp") if x.ndim == 2 else P(None)
-        layer_partition = (
-            lambda x: P("model", "tensor", "fsdp") if x.ndim == 3 else P("model", None)
-        )
+        def embedding_partition(_: Array) -> P:
+            return P(None)
+
+        def layer_partition(x: Array) -> P:
+            if x.ndim == 4:
+                return P("model", None, None, "tensor")
+            if x.ndim == 3:
+                return P("model", "tensor", "fsdp")
+            return P("model")
 
         embed_p_spec = jax.tree.map(
             embedding_partition,
@@ -1046,21 +1056,23 @@ class shardedModel:
         x_embed = jnp.ones((1, cfg.T), dtype=jnp.int32)
         x_layer = jnp.ones((1, cfg.T, cfg.model_dimension), dtype=jnp.float32)
 
-
-
         model_devices = mesh.devices.shape[1]
         tensor_devices = mesh.devices.shape[2]
         assert cfg.blocks // model_devices
         layers_per_device = cfg.blocks // model_devices
 
+        key, embed_key = jax.random.split(key, 2)
+        key, *layer_keys = jax.random.split(key, tensor_devices * model_devices + 1)
+        layer_keys = jnp.array(layer_keys).reshape(model_devices, tensor_devices, 2)
+
+        @jax.jit
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P(None, "tensor"), P(None, None, "tensor"), P("tensor"), P("model", "tensor")),
+            in_specs=(P(None, "tensor"), P(None, None, "tensor"), P("model", "tensor")),
             out_specs=out_spec_no_fsdp
         )
-        def init_weights(x_embed, x_layer, embed_key, layer_key):
-            embed_key = embed_key[0]
+        def init_weights(x_embed, x_layer, layer_key):
             layer_key = layer_key[0, 0]
             embedding_params = embedding_layer.init(embed_key, x_embed, out=False)["params"]
             layer_params = []
@@ -1071,14 +1083,9 @@ class shardedModel:
                 layer_params.append(current_params)
 
             layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
-
             return embedding_params, layer_params
-        key, *embed_key = jax.random.split(key, tensor_devices + 1)
-        embed_key = jnp.array(embed_key)
-        key, *layer_keys = jax.random.split(key, tensor_devices * model_devices + 1)
-        layer_keys = jnp.array(layer_keys).reshape(model_devices, tensor_devices, 2)
 
-        params = init_weights(x_embed, x_layer, embed_key, layer_keys)
+        params = init_weights(x_embed, x_layer, layer_keys)
         params = jax.tree.map(
             lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
             params,
@@ -1091,6 +1098,7 @@ class shardedModel:
     def get_model_and_params(
         cfg: modelConfig, mesh: jax.sharding.Mesh, key: jax.random.key
     ) -> Tuple[Tuple[Embeddings, EncoderBlock], PyTree]:
+
         model = shardedModel.get_model(cfg)
         params = shardedModel.get_params(cfg, model, mesh, key)
 
