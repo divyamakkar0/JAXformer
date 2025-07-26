@@ -27,7 +27,7 @@ import optax
 
 from utils import parse_args, config
 from model import Decoder
-from dataset import Dataset
+from dataset_gcp import Dataset
 
 import wandb
 from dataclasses import asdict
