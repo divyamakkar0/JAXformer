@@ -22,6 +22,7 @@ class modelConfig:
     k: int = 0
     n_experts: int = 0
     n_shared: int = 0
+    capacity_factor: float = 1.0
     latent_dim: int = 0
     model_dtype: str = "bfloat16"
 
@@ -90,6 +91,7 @@ def parse_args():
     parser.add_argument("--n_experts", type=int, default=4)
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--n_shared", type=int, default=2)
+    parser.add_argument("--capacity_factor", type=float, default=1.0)
     parser.add_argument("--latent_dim", type=int, default=64)
 
     parser.add_argument(
@@ -146,6 +148,7 @@ def parse_args():
         n_experts=args.n_experts,
         n_shared=args.n_shared,
         k=args.k,
+        capacity_factor=args.capacity_factor,
         moe=args.moe,
         latent_dim=args.latent_dim,
         model_dtype=args.model_dtype,

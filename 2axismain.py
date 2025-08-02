@@ -20,7 +20,7 @@ if DEBUG is not None and int(DEBUG) == 1:
     jax.config.update("jax_debug_nans", True)
     jax.config.update("jax_disable_jit", True)
 else:
-    jax.config.update("jax_debug_nans", True)
+    jax.config.update("jax_debug_nans", False)
     jax.config.update("jax_disable_jit", False)
 
 import time
@@ -71,8 +71,8 @@ class TrainState:
     @classmethod
     def restore(cls, restored: PyTree, tx, model_spec, mesh):
         params = jax.tree.map(
-            lambda x,y : jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
-            (*restored["params"], ),
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
+            (*restored["params"],),
             model_spec,
         )
 
@@ -137,7 +137,7 @@ def setup_devices(cfg: config):
     return mesh, count
 
 
-def loss(model, alpha, params, key, x, y, train):
+def loss(model, cfg: config, params: PyTree, key: jax.random.PRNGKey, x, y, train):
     M, B, T = x.shape
     pred, (_, load) = shardedModel.pipe_step(model, params, x, key=key, train=train)
 
@@ -150,18 +150,21 @@ def loss(model, alpha, params, key, x, y, train):
 
     loss_balance = 0.0
     if load is not None:
-        loss_balance = model.n_experts / (model.k * T**2) * load.sum(axis=0)
+        load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="fsdp"), load)
+        load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="model"), load)
+        load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="tensor"), load)
 
-    loss = loss_cross + alpha * loss_balance
-    aux_stat = (load, loss_cross, loss_balance)
+        f = load["f"]
+        p = load["p"]
 
-    loss = jax.lax.pmean(loss, axis_name="model")
-    loss = jax.lax.pmean(loss, axis_name="fsdp")
-    loss = jax.lax.pmean(loss, axis_name="tensor")
+        loss_balance = cfg.model.n_experts / cfg.model.k * jnp.sum(f * p)
 
-    aux_stat = jax.lax.pmean(aux_stat, axis_name="model")
-    aux_stat = jax.lax.pmean(aux_stat, axis_name="fsdp")
-    aux_stat = jax.lax.pmean(aux_stat, axis_name="tensor")
+    loss_cross = jax.lax.pmean(loss_cross, axis_name="model")
+    loss_cross = jax.lax.pmean(loss_cross, axis_name="fsdp")
+    loss_cross = jax.lax.pmean(loss_cross, axis_name="tensor")
+
+    loss = loss_cross + cfg.alpha * loss_balance
+    aux_stat = (load["tokens_per_expert"], loss_cross, loss_balance)
 
     return loss, aux_stat
 
@@ -190,7 +193,6 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
         }
 
         if load is not None:
-            load = load.mean(axis=0)
             metrics["loss_load"] = loss_balance
             for h in range(load.shape[0]):
                 metrics[f"load/head_{h}"] = load[h]
@@ -205,24 +207,22 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
     if train:
         embed_grads, layer_grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
 
-        def init_vary_layer(x):
-            x = jax.lax.pvary(x, axis_name="model")
-            if x.ndim == 3:
-                x = jax.lax.pvary(x, axis_name="fsdp")
-                x = jax.lax.pvary(x, axis_name="tensor")
-            if x.ndim == 4:
-                x = jax.lax.pvary(x, axis_name="tensor")
+        join_fn = lambda path: ' '.join(i.key for i in path).lower()
+
+        def init_vary_layer(key, x):
+            path = join_fn(key)
+            axes = ["model"]
+            if 'moe' in path and 'feedforward' in path:
+                if x.ndim == 4:
+                    axes.extend(["fsdp", "tensor"])
+            elif 'gamma' in path or 'beta' in path:
+                axes.extend(["tensor"])
+            elif x.ndim == 3:
+                axes.extend(["fsdp", "tensor"])
+            x = jax.lax.pvary(x, axis_name=(*axes,))
             return x
 
-        def init_vary_embed(x):
-            return x
-
-        embed_grads = jax.tree.map(
-            init_vary_embed,
-            embed_grads,
-        )
-
-        layer_grads = jax.tree.map(
+        layer_grads = jax.tree_util.tree_map_with_path(
             init_vary_layer,
             layer_grads,
         )
@@ -276,8 +276,7 @@ def main(config: config):
 
     print("setting up dataset")
     data_partition = jax.sharding.NamedSharding(
-        mesh,
-        P(None, "fsdp", "model", None, "tensor")
+        mesh, P(None, "fsdp", "model", None, "tensor")
     )
     (
         train_dataset,
@@ -365,11 +364,7 @@ def main(config: config):
         save_checkpoint(0, wandb_id)
 
     print(f"Model parameter count: {state.n_params:,d} ")
-    loss_fn = jax.tree_util.Partial(
-        loss,
-        model,
-        config.alpha,
-    )
+    loss_fn = jax.tree_util.Partial(loss, model, config)
 
     key_spec = P("fsdp", "model", "tensor")
     data_spec = P("fsdp", "model", None, "tensor")
@@ -386,6 +381,7 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=(model_spec, P()),
+            # check_vma=False
         )
     )
 
@@ -402,6 +398,7 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=P(),
+            # check_vma=False
         )
     )
 
@@ -411,10 +408,11 @@ def main(config: config):
     train_loss = 0.0
     sample_key = key()
 
-
     for current_step in range(init_step, total_steps):
         with jax.named_scope("train_step"):
-            key_count = count["fsdp"] * count["model"] * count["tensor"] * config.grad_step
+            key_count = (
+                count["fsdp"] * count["model"] * count["tensor"] * config.grad_step
+            )
             if key_count == 1:
                 keys = jnp.array([key()]).reshape(1, 1, 1, 1, 2)
             else:
@@ -422,16 +420,10 @@ def main(config: config):
                     count["fsdp"], count["model"], count["tensor"], config.grad_step, 2
                 )
 
-            keys = jax.device_put(
-                keys,
-                jax.sharding.NamedSharding(mesh, key_spec)
-            )
+            keys = jax.device_put(keys, jax.sharding.NamedSharding(mesh, key_spec))
+            x, y = train_dataset()
 
-            grads, metrics = train_step(
-                keys,
-                state.params,
-                *train_dataset(),
-            )
+            grads, metrics = train_step(keys, state.params, x, y)
 
         state = state.apply_gradients(grads=grads)
         train_loss += metrics["loss"]
@@ -461,19 +453,22 @@ def main(config: config):
             )
 
             with jax.named_scope("eval_step"):
-                key_count = count["fsdp"] * count["model"] * count["tensor"] * config.eval_steps
+                key_count = (
+                    count["fsdp"] * count["model"] * count["tensor"] * config.eval_steps
+                )
                 if key_count == 1:
                     keys = jnp.array([key()]).reshape(1, 1, 1, 1, 2)
                 else:
                     keys = key(key_count).reshape(
-                        count["fsdp"], count["model"], count["tensor"], config.eval_steps, 2
+                        count["fsdp"],
+                        count["model"],
+                        count["tensor"],
+                        config.eval_steps,
+                        2,
                     )
 
-                metrics_val = eval_step(
-                    keys,
-                    state.params,
-                    *val_dataset(),
-                )
+                x, y = val_dataset()
+                metrics_val = eval_step(keys, state.params, x, y)
 
             if use_wandb:
                 wandb_log["loss/val_loss"] = metrics_val["loss"]
