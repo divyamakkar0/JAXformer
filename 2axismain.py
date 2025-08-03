@@ -37,7 +37,6 @@ from dataclasses import asdict
 
 import orbax.checkpoint as ocp
 
-from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 from typing import Optional
 from jaxtyping import PyTree
@@ -103,6 +102,10 @@ class TrainState:
         param_count = sum(x.size for x in jax.tree.leaves(self.params))
         return param_count
 
+def log(msg: str):
+    if jax.process_index() == 0:
+        print(msg)
+
 
 def setup_devices(cfg: config):
     device_cfg = cfg.device_config
@@ -114,25 +117,27 @@ def setup_devices(cfg: config):
     assert devices.shape[0] == np.prod(device_cfg.n_device_axis)
     devices = devices.reshape(*device_cfg.n_device_axis)
 
-    platform = jax.devices()[0].platform
-    if platform == "tpu":
-        print("Available TPU Devices:")
-        print(f"Device array shape: {devices.shape}")
-        for idx in np.ndindex(devices.shape):
-            d = devices[idx]
-            print(
-                f"  {idx} ID: {d.id}, Process: {d.process_index}, "
-                f"Coords: {d.coords}, Core: {d.core_on_chip}"
-            )
 
-    mesh = Mesh(devices, axis_names=("fsdp", "model", "tensor"))
-    print(f"Mesh: {mesh}")
+    mesh = jax.make_mesh(*device_cfg.n_device_axis, axis_names=("fsdp", "model", "tensor"))
+
     count = devices.shape
     count = {
         "fsdp": count[0],
         "model": count[1],
         "tensor": count[2],
     }
+
+    platform = jax.devices()[0].platform
+    if platform == "tpu":
+        log("Available TPU Devices:")
+        log(f"Device array shape: {devices.shape}")
+        for idx in np.ndindex(devices.shape):
+            d = devices[idx]
+            log(
+                f"  {idx} ID: {d.id}, Process: {d.process_index}, "
+                f"Coords: {d.coords}, Core: {d.core_on_chip}"
+            )
+    log(f"Mesh: {mesh}")
 
     return mesh, count
 
@@ -164,7 +169,7 @@ def loss(model, cfg: config, params: PyTree, key: jax.random.PRNGKey, x, y, trai
     loss_cross = jax.lax.pmean(loss_cross, axis_name="tensor")
 
     loss = loss_cross + cfg.alpha * loss_balance
-    aux_stat = (load["tokens_per_expert"], loss_cross, loss_balance)
+    aux_stat = (load if load is None else load["tokens_per_expert"], loss_cross, loss_balance)
 
     return loss, aux_stat
 
@@ -240,8 +245,10 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
 
 
 def main(config: config):
-    print("setting up devices")
+
     mesh, count = setup_devices(config)
+
+    log(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
 
     checkpoint_dir = os.path.join(
         os.path.abspath(config.output_dir), config.name, "checkpoints"
@@ -253,8 +260,6 @@ def main(config: config):
     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
 
     key = KeyState(config.seed)
-
-    print("setting up state")
     model = shardedModel.get_model(cfg=config.model)
 
     lr_scheduler = optax.warmup_cosine_decay_schedule(
@@ -274,7 +279,8 @@ def main(config: config):
     config.data.train_batch_size *= count["fsdp"] * config.grad_step
     config.data.val_batch_size *= count["fsdp"] * config.eval_steps
 
-    print("setting up dataset")
+    log("setting up dataset")
+
     data_partition = jax.sharding.NamedSharding(
         mesh, P(None, "fsdp", "model", None, "tensor")
     )
@@ -285,9 +291,11 @@ def main(config: config):
         config.data, partition=data_partition, dp=count["fsdp"], pp=count["model"]
     )
 
-    print(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
+    log(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
 
     def save_checkpoint(step, wandb_id):
+        if jax.process_index() != 0:
+            return
         model_state = {
             "params": jax.device_get(state.params),
             "opt_state": jax.device_get(state.opt_state),
@@ -306,7 +314,7 @@ def main(config: config):
         checkpoint_manager.save(step, save_tree)
 
     init_step = 0
-    use_wandb = config.wandb is True
+    use_wandb = config.wandb is True and jax.process_index() == 0
     wandb_id = None
 
     model_spec = shardedModel.get_p_spec(
@@ -318,7 +326,7 @@ def main(config: config):
     if load:
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
         init_step = tree_state["step"]
-        print(f"loading checkpoint @ step {init_step}")
+        log(f"loading checkpoint @ step {init_step}")
 
         key.key = tree_state["key"]
 
@@ -344,8 +352,8 @@ def main(config: config):
                 config=asdict(config),
             )
     else:
-        print("No checkpoint found, starting from scratch")
-        print("Creating model ...")
+        log("No checkpoint found, starting from scratch")
+        log("Creating model ...")
 
         params = shardedModel.get_params(
             cfg=config.model, model=model, mesh=mesh, key=key()
@@ -361,9 +369,10 @@ def main(config: config):
                 config=asdict(config),
             )
             wandb_id = wandb.run.id
+
         save_checkpoint(0, wandb_id)
 
-    print(f"Model parameter count: {state.n_params:,d} ")
+    log(f"Model parameter count: {state.n_params:,d} ")
     loss_fn = jax.tree_util.Partial(loss, model, config)
 
     key_spec = P("fsdp", "model", "tensor")
@@ -381,7 +390,6 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=(model_spec, P()),
-            # check_vma=False
         )
     )
 
@@ -398,11 +406,10 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=P(),
-            # check_vma=False
         )
     )
 
-    print("start training")
+    log("start training")
 
     start = time.time()
     train_loss = 0.0
@@ -486,22 +493,23 @@ def main(config: config):
                 + f" | time: {float(end - start):.2f}s"
             )
 
-            print(log_string)
+            log(log_string)
 
             samples = shardedModel.generate(
                 config.model, state.params, sample_key, x="hello", use_cache=False
             )
-            print("sample tokens: \n")
+            log("sample tokens: \n")
             for tokens in samples:
-                print(f"\t {tokens}\n")
+                log(f"\t {tokens}\n")
 
-            with open(
-                os.path.join(
-                    os.path.abspath(config.output_dir), config.name, "tokens.txt"
-                ),
-                "a",
-            ) as f:
-                f.write(f"{current_step} | {tokens}\n")
+            if jax.process_index() == 0:
+                with open(
+                    os.path.join(
+                        os.path.abspath(config.output_dir), config.name, "tokens.txt"
+                    ),
+                    "a",
+                ) as f:
+                    f.write(f"{current_step} | {tokens}\n")
 
             save_checkpoint(current_step, wandb_id)
             start = time.time()
@@ -534,5 +542,4 @@ def main(config: config):
 
 if __name__ == "__main__":
     cfg = parse_args()
-    print(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
     main(cfg)

@@ -62,15 +62,13 @@ class Dataset:
         )
 
         if self.partition is not None:
-            self.dataset = jax.make_array_from_callback(
-                self.dataset.shape,
+            self.dataset = jax.make_array_from_process_local_data(
                 sharding=self.partition,
-                data_callback=lambda idx: self.dataset[idx],
+                local_data=self.dataset
             )
-            self.labels = jax.make_array_from_callback(
-                self.labels.shape,
+            self.labels = jax.make_array_from_process_local_data(
                 sharding=self.partition,
-                data_callback=lambda idx: self.labels[idx],
+                local_data=self.labels
             )
         else:
             self.dataset = jax.device_put(self.dataset)

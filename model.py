@@ -684,7 +684,7 @@ class Decoder(nn.Module):
         max_tokens: int = 100,
         use_cache=True,
     ) -> List[str]:
-        enc = tiktoken.get_encoding("gpt2")
+        enc = tiktoken.get_encoding("gpt-4")
 
         if x == "":
             out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
@@ -782,8 +782,8 @@ class shardedModel:
     ) -> list[str]:
         n_layers = cfg.blocks
         n_devices = n_layers * (jax.device_count() // n_layers)
-        mesh = jax.sharding.Mesh(
-            np.array(jax.devices())[:n_devices][None, :, None],
+        mesh = jax.make_mesh(
+            (1, n_devices, 1),
             axis_names=("fsdp", "model", "tensor"),
         )
 
@@ -960,7 +960,7 @@ class shardedModel:
                     kRT_cache.append(jnp.nan_to_num(layer_cache[1]))
             if load is not None:
                 load = jax.tree.map(
-                    lambda x: jnp.nan_to_num(x),
+                    lambda x: jnp.nan_to_num(x).sum(axis=0),
                     load,
                 )
                 if out_load is None:
