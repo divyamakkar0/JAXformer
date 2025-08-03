@@ -29,7 +29,7 @@ import json
 import optax
 
 from utils import parse_args, config
-from modelFSDP import shardedModel
+from model import shardedModel
 from dataset import Dataset
 
 import wandb

@@ -808,7 +808,6 @@ class shardedModel:
         T = cfg.T
         max_tokens = min(max_tokens, T - prompt_length)
 
-        @jax.jit
         def sample(sample_key, params, out, cache):
             if not use_cache:
                 cache = None
