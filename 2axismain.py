@@ -118,7 +118,7 @@ def setup_devices(cfg: config):
     devices = devices.reshape(*device_cfg.n_device_axis)
 
 
-    mesh = jax.make_mesh(*device_cfg.n_device_axis, axis_names=("fsdp", "model", "tensor"))
+    mesh = jax.make_mesh((*device_cfg.n_device_axis,), axis_names=("fsdp", "model", "tensor"))
 
     count = devices.shape
     count = {
@@ -369,6 +369,10 @@ def main(config: config):
                 config=asdict(config),
             )
             wandb_id = wandb.run.id
+            table = wandb.Table(
+                columns=["step"] + [f"tokens_{i}" for i in range(config.inference_batch * config.model.blocks * (jax.device_count() // config.model.blocks))],
+                log_mode="INCREMENTAL",
+            )
 
         save_checkpoint(0, wandb_id)
 
@@ -511,6 +515,11 @@ def main(config: config):
                 ) as f:
                     f.write(f"{current_step} | {tokens}\n")
 
+            if use_wandb:
+                table.add_data(current_step, *samples)
+                wandb_log["inference_tokens"] = table
+
+
             save_checkpoint(current_step, wandb_id)
             start = time.time()
             train_loss = 0.0
@@ -523,7 +532,7 @@ def main(config: config):
 
     if use_wandb:
         table = wandb.Table(
-            columns=[f"tokens_{i}" for i in range(config.inference_batch)]
+            columns=["step"] + [f"tokens_{i}" for i in range(config.inference_batch * config.model.blocks * (jax.device_count() // config.model.blocks))],
         )
         wandb.Table.MAX_ROWS = total_steps // config.checkpoint_steps
         with open(
@@ -531,10 +540,10 @@ def main(config: config):
             "r",
         ) as f:
             lines = f.readlines()
-        for line in lines:
+        for i, line in enumerate(lines):
             tokens = line.split("|")[1]
             tokens = ast.literal_eval(tokens)
-            table.add_data(tokens)
+            table.add_data(i, *tokens)
 
         wandb.log({"inference_tokens": table})
         wandb.finish()
