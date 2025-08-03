@@ -39,7 +39,7 @@ class Dataset:
         self.partition = partition
 
         self.bucket_name = bucket_name
-        self.base_process_path = process_path 
+        self.base_process_path = process_path
         self.process_path = process_path
         self.id = id
         self.data = self.return_blobs(bucket_name, self.id)
@@ -48,8 +48,8 @@ class Dataset:
             os.mkdir(self.dir_name)
         except OSError as e:
             print(f"{self.dir_name} already exists")
-        
-        
+
+
         self.load_next_shard()
 
     def return_blobs(self, bucket_name, prefix, delimiter=None):
@@ -58,14 +58,14 @@ class Dataset:
         blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=delimiter)
         for blob in blobs:
             res.append(blob.name)
-        
+
         return res[1:]
-    
+
     def download_blob_to_stream(self, bucket_name, source_blob_name, file_obj):
         """Downloads a blob to a stream or other file-like object."""
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
-        
+
         blob = bucket.blob(source_blob_name)
         blob.download_to_file(file_obj)
         print(f"Downloaded blob {source_blob_name} to file-like object.")
@@ -80,7 +80,7 @@ class Dataset:
             except Exception as e:
                 print("Failed to download due to exception")
                 time.sleep(5)
-    
+
     def download_next(self):
         print("Started downloading")
         source_name = self.data[self.shard_idx % len(self.data)]
@@ -93,7 +93,7 @@ class Dataset:
             print(f"Done downloading {result}")
 
     def load_next_shard(self):
-        self.download_next() 
+        self.download_next()
         def process_prev():
             print(f"Processing shard at {self.process_path}\n\n")
             try:
@@ -139,7 +139,7 @@ class Dataset:
         print("waiting for download to finish..")
         print("download done")
         process_prev()
-        
+
         os.remove(self.process_path)
 
 
@@ -212,7 +212,7 @@ if __name__ == "__main__":
     test.load_next_shard()
 
 
-    
+
     # start = time.time()
     # train, test = Dataset.getDataset(test_cfg, None)
     #jax.random.key(0)

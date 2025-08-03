@@ -782,8 +782,8 @@ class shardedModel:
     ) -> list[str]:
         n_layers = cfg.blocks
         n_devices = n_layers * (jax.device_count() // n_layers)
-        mesh = jax.sharding.Mesh(
-            np.array(jax.devices())[:n_devices][None, :, None],
+        mesh = jax.make_mesh(
+            (1, n_devices, 1),
             axis_names=("fsdp", "model", "tensor"),
         )
 
