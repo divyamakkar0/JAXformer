@@ -30,7 +30,6 @@ class modelConfig:
 @dataclass
 class dataConfig:
     bucket_name: str
-    download_path: str = "./bucket_downloads/downloadedShard"
     process_path: str = "./bucket_downloads/processShard" 
     train_folder_name: str = "train"
     val_folder_name: str = "val"
@@ -85,7 +84,7 @@ def parse_args():
     parser.add_argument("--model_dimension", type=int, default=256)
     parser.add_argument("--n_heads", type=int, default=8)
     parser.add_argument("--T", type=int, default=1024)
-    parser.add_argument("--vocab_size", type=int, default=50257)
+    parser.add_argument("--vocab_size", type=int, default=100277)
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--dhR", type=int, default=64)
@@ -97,12 +96,10 @@ def parse_args():
     parser.add_argument("--capacity_factor", type=float, default=1.0)
     parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument(
-        "--train_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/train"
-    )
-    parser.add_argument(
-        "--val_dataset", type=str, default="./fineweb-edu-10bt-for-gpt2/test"
-    )
+    parser.add_argument("--bucket_name", type=str, default="10bt_gpt4")
+    parser.add_argument("--process_path", type=str, default="./bucket_downloads/processShard" )  
+    parser.add_argument("--train_folder_name", type=str, default="train")
+    parser.add_argument("--val_folder_name", type=str, default="val")  
     parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--val_batch_size", type=int, default=16)
     parser.add_argument("--micro_batch_size", type=int, default=4)
@@ -159,10 +156,9 @@ def parse_args():
 
     data_cfg = dataConfig(
         bucket_name=args.bucket_name,
-        download_path=args.download_path,
         process_path=args.process_path,
         train_folder_name=args.train_folder_name,
-        val_folder_name=args.train_folder_name,
+        val_folder_name=args.val_folder_name,
         T=args.T,
         train_batch_size=args.train_batch_size,
         val_batch_size=args.val_batch_size,

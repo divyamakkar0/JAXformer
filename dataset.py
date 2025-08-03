@@ -11,12 +11,10 @@ from gcloud.aio.storage import Storage
 import shutil
 import time
 import asyncio
-import threading 
 
 class Dataset:
     def __init__(
         self,
-        download_path: str,
         process_path : str,
         T: int,
         batch_size: int,
@@ -29,7 +27,6 @@ class Dataset:
     ):
         assert (batch_size % microbatch) == 0, "microbatch should divide batch size"
         assert (microbatch % pp) == 0, "pp should divide microbatch size"
-        assert len(download_path) > 0, "data should not be empty"
 
         self.T = T
         self.batch_size = batch_size
@@ -42,14 +39,16 @@ class Dataset:
         self.partition = partition
 
         self.bucket_name = bucket_name
-        self.download_path = download_path
         self.base_process_path = process_path 
         self.process_path = process_path
         self.id = id
         self.data = self.return_blobs(bucket_name, self.id)
-
-        self.download_thread = threading.Thread(target=self.download_next)
-        self.download_thread.start()
+        self.dir_name = "bucket_downloads"
+        try:
+            os.mkdir(self.dir_name)
+        except OSError as e:
+            print(f"{self.dir_name} already exists")
+        
         
         self.load_next_shard()
 
@@ -86,7 +85,7 @@ class Dataset:
         print("Started downloading")
         source_name = self.data[self.shard_idx % len(self.data)]
         self.shard_idx += 1
-        print(f" Downloading {source_name} and {self.shard_idx}")
+        print(f" Downloading: {source_name} | Shard_idx: {self.shard_idx}")
 
         self.process_path = f"{self.base_process_path}_{self.id}_{self.shard_idx}"
         with open(self.process_path, "wb") as f:
@@ -94,10 +93,13 @@ class Dataset:
             print(f"Done downloading {result}")
 
     def load_next_shard(self):
-        
+        self.download_next() 
         def process_prev():
-            print("Processing shard")
-            data = np.load(self.process_path)
+            print(f"Processing shard at {self.process_path}\n\n")
+            try:
+                data = np.load(self.process_path)
+            except:
+                print(f"couldn't load data\n\n")
             self.dataset = data[:-1]
             self.labels = data[1:]
 
@@ -135,14 +137,11 @@ class Dataset:
                 self.labels = jax.device_put(self.labels)
 
         print("waiting for download to finish..")
-        self.download_thread.join()
         print("download done")
         process_prev()
         
         os.remove(self.process_path)
 
-        self.download_thread = threading.Thread(target=self.download_next)
-        self.download_thread.start()
 
     def __len__(self):
         return self.dataset.shape[0]
@@ -166,10 +165,8 @@ class Dataset:
         dp: int = 1,
         pp: int = 1,
     ) -> Tuple["Dataset", "Dataset"]:
-        download = os.path.abspath(cfg.download_path)
 
         train_dataset = cls(
-            download,
             cfg.process_path,
             cfg.T,
             cfg.train_batch_size,
@@ -181,7 +178,6 @@ class Dataset:
             id=cfg.train_folder_name
         )
         val_dataset = cls(
-            download,
             cfg.process_path,
             cfg.T,
             cfg.val_batch_size,
@@ -199,25 +195,34 @@ class Dataset:
 if __name__ == "__main__":
     test_cfg = dataConfig(
         bucket_name="10bt_gpt4",
-        download_path="./bucket_downloads/downloadedShard",
         process_path="./bucket_downloads/processShard",
         train_folder_name="train",
         val_folder_name="val",
         T=1024,
         train_batch_size=16,
     )
+    train,test = Dataset.getDataset(test_cfg, None)
+
+    train_step_id = 20
+    train_shard_id = (train.shard_idx - 1) % len(train.data),
+    train.load_next_shard()
+
+    val_step_id = 20
+    val_shard_id = (test.shard_idx - 1) % len(test.data),
+    test.load_next_shard()
+
 
     
-    start = time.time()
-    train, test = Dataset.getDataset(test_cfg, None)
+    # start = time.time()
+    # train, test = Dataset.getDataset(test_cfg, None)
     #jax.random.key(0)
-    end = time.time()
-    print(f"time taken to load dataset: {(end - start):.2f} seconds")
+    # end = time.time()
+    # print(f"time taken to load dataset: {(end - start):.2f} seconds")
     # for i in range(6104 * 4):
     #     x,y = train()
 
-    print(len(train), len(test))
-    breakpoint()
+    # print(len(train), len(test))
+    # breakpoint()
 
     if os.path.exists(train.process_path):
         os.remove(train.process_path)
