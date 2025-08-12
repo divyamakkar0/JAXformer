@@ -286,7 +286,6 @@ class FeedForward(nn.Module):
 class RoPE(nn.Module):
     T: int
     model_dim: int
-
     def setup(self):
         assert self.model_dim % 2 == 0, "model_dim must be even"
 
@@ -304,17 +303,21 @@ class RoPE(nn.Module):
         self,
         x: Array,
         t_start: int,
-        offset: Optional[int] = None,
-        transpose: bool = False,
     ) -> Array:
         B, T, C = x.shape
         x_dtype = x.dtype
         x = x.astype(jnp.float32)
 
-        if offset is None:
-            offset = T
+        x = jax.lax.all_to_all(
+            x,
+            axis_name='tensor',
+            split_axis=x.ndim - 2,
+            concat_axis=x.ndim - 1,
+            tiled=True
+        )
 
-        cos_rope = x * self.cos[t_start : t_start + offset, :]
+
+        cos_rope = x * self.cos[t_start : t_start + T, :]
 
         x_inter = x.reshape((B, T, C // 2, 2))
         x_inter_one = x_inter[..., 0]
@@ -322,11 +325,18 @@ class RoPE(nn.Module):
         x_inter = jnp.stack([x_inter_two, x_inter_one], axis=-1).reshape((B, T, C))
 
         x_inter = x_inter.reshape((B, T, C))
-        if transpose:
-            x_inter *= -1
-        sin_rope = x_inter * self.sin[t_start : t_start + offset, :]
+        sin_rope = x_inter * self.sin[t_start : t_start + T, :]
+
         x = cos_rope + sin_rope
         x = x.astype(x_dtype)
+
+        x = jax.lax.all_to_all(
+            x,
+            axis_name='tensor',
+            split_axis=x.ndim - 1,
+            concat_axis=x.ndim - 2,
+            tiled=True
+        )
 
         return x
 
@@ -366,8 +376,8 @@ class MLA(nn.Module):
             x_k_r = Dense(features=self.dhR, dtype=self.model_dtype)(x)
             x_q_r = Dense(features=(self.dhR * self.n_heads), dtype=self.model_dtype)(x)
 
-            rope_k = RoPE(model_dim=x_k_r.shape[-1], T=self.T)
-            rope_q = RoPE(model_dim=x_q_r.shape[-1], T=self.T)
+            rope_k = RoPE(model_dim=self.dhR, T=self.T)
+            rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
 
             kRt = rope_k(x_k_r, t_start)
 
@@ -785,6 +795,7 @@ class shardedModel:
         mesh = jax.make_mesh(
             (1, n_devices, 1),
             axis_names=("fsdp", "model", "tensor"),
+            devices=np.array(jax.devices())[:n_devices],
         )
 
         model = shardedModel.get_model(cfg)
@@ -797,7 +808,7 @@ class shardedModel:
             out_spec,
         )
 
-        enc = tiktoken.get_encoding("gpt2")
+        enc = tiktoken.get_encoding("cl100k_base")
         if x == "":
             out = jnp.array([enc._special_tokens["<|endoftext|>"]], dtype=jnp.int32)
         else:
@@ -866,7 +877,8 @@ class shardedModel:
 
         tokens = jax.device_get(out)
         tokens = tokens.reshape(-1, tokens.shape[-1])
-        outputs = list(map(lambda x: enc.decode(x), tokens))
+
+        outputs = [enc.decode(x) for x in tokens]
 
         return outputs
 

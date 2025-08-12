@@ -30,7 +30,7 @@ class modelConfig:
 @dataclass
 class dataConfig:
     bucket_name: str
-    process_path: str = "./bucket_downloads/processShard" 
+    process_path: str = "./bucket_downloads/processShard"
     train_folder_name: str = "train"
     val_folder_name: str = "val"
     T: int = 6
@@ -81,34 +81,34 @@ class config:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
-    parser.add_argument("--model_dimension", type=int, default=256)
-    parser.add_argument("--n_heads", type=int, default=8)
+    parser.add_argument("--model_dimension", type=int, default=768)
+    parser.add_argument("--n_heads", type=int, default=64)
     parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--vocab_size", type=int, default=100277)
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--dhR", type=int, default=64)
+    parser.add_argument("--dhR", type=int, default=128)
     parser.add_argument("--dhR_blocks", type=int, default=4)
     parser.add_argument("--moe", action="store_true")
-    parser.add_argument("--n_experts", type=int, default=4)
+    parser.add_argument("--n_experts", type=int, default=8)
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--n_shared", type=int, default=2)
-    parser.add_argument("--capacity_factor", type=float, default=1.0)
-    parser.add_argument("--latent_dim", type=int, default=64)
+    parser.add_argument("--capacity_factor", type=float, default=1.5)
+    parser.add_argument("--latent_dim", type=int, default=128)
 
     parser.add_argument("--bucket_name", type=str, default="10bt_gpt4")
-    parser.add_argument("--process_path", type=str, default="./bucket_downloads/processShard" )  
+    parser.add_argument("--process_path", type=str, default="./bucket_downloads/processShard" )
     parser.add_argument("--train_folder_name", type=str, default="train")
-    parser.add_argument("--val_folder_name", type=str, default="val")  
+    parser.add_argument("--val_folder_name", type=str, default="val")
     parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--val_batch_size", type=int, default=16)
     parser.add_argument("--micro_batch_size", type=int, default=4)
 
-    parser.add_argument("--max_lr", type=float, default=4e-3)
+    parser.add_argument("--max_lr", type=float, default=6e-4)
     parser.add_argument("--min_lr", type=float, default=0)
-    parser.add_argument("--end_lr", type=float, default=4e-4)
-    parser.add_argument("--warmup_steps", type=int, default=1000)
-    parser.add_argument("--end_steps", type=int, default=6000)
+    parser.add_argument("--end_lr", type=float, default=4e-5)
+    parser.add_argument("--warmup_steps", type=int, default=2000)
+    parser.add_argument("--end_steps", type=int, default=15000)
 
     parser.add_argument("--alpha", type=float, default=0.0001)
     parser.add_argument("--name", type=str, default=None, required=True)
@@ -120,7 +120,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wandb", action="store_true")
 
-    parser.add_argument("--training_steps", type=int, default=10000)
+    parser.add_argument("--training_steps", type=int, default=20000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--eval_steps", type=int, default=25)
     parser.add_argument("--inference_batch", type=int, default=1)

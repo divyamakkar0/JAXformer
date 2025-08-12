@@ -7,7 +7,7 @@ os.environ["XLA_FLAGS"] = (
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache1")
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update(
@@ -199,7 +199,7 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
 
         if load is not None:
             metrics["loss_load"] = loss_balance
-            
+
             for h in range(load.shape[0]):
                 metrics[f"load/head_{h}"] = load[h]
 
@@ -345,11 +345,15 @@ def main(config: config):
             assert wandb_id is not None, "wandb_id is None"
             wandb.init(
                 entity="waterloo2",
-                project="jaxformer-t1",
+                project="jaxformer",
                 name=config.name,
                 resume="must",
                 id=wandb_id,
                 config=asdict(config),
+            )
+            table = wandb.Table(
+                columns=["step"] + [f"tokens_{i}" for i in range(config.inference_batch * config.model.blocks * (jax.device_count() // config.model.blocks))],
+                log_mode="INCREMENTAL",
             )
     else:
         log("No checkpoint found, starting from scratch")

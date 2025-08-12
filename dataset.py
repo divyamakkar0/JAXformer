@@ -3,14 +3,10 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 import numpy as np
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 from utils import dataConfig
-import math
 from google.cloud import storage
-from gcloud.aio.storage import Storage
-import shutil
 import time
-import asyncio
 
 class Dataset:
     def __init__(
@@ -62,7 +58,6 @@ class Dataset:
         return res[1:]
 
     def download_blob_to_stream(self, bucket_name, source_blob_name, file_obj):
-        """Downloads a blob to a stream or other file-like object."""
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
 
