@@ -261,9 +261,9 @@ def main(config: config):
     )
     load = os.path.exists(checkpoint_dir)
 
-    checkpointer = ocp.PyTreeCheckpointer()
-    options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
-    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
+    path = ocp.test_utils.erase_and_create_empty("path")
+    options = ocp.CheckpointManagerOptions(max_to_keep=1)
+    checkpoint_manager = ocp.CheckpointManager(path, options=options)
 
     key = KeyState(config.seed)
     model = shardedModel.get_model(cfg=config.model)
@@ -299,10 +299,27 @@ def main(config: config):
 
     log(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
 
-    def save_checkpoint(step, wandb_id):
+    model_spec = shardedModel.get_p_spec(
+        model=model,
+        mesh=mesh,
+        config=config.model,
+    )
+
+    log("Creating model ...")
+    params = shardedModel.get_params(
+        cfg=config.model, model=model, mesh=mesh, key=key()
+    )
+    state = TrainState(params=params, tx=tx)
+    init_step = 0
+    use_wandb = config.wandb is True and jax.process_index() == 0
+    wandb_id = None
+
+    def make_save_tree(
+        step
+    ):
         model_state = {
-            "params": jax.device_get(state.params),
-            "opt_state": jax.device_get(state.opt_state),
+            "params": state.params,
+            "opt_state": state.opt_state,
         }
         save_tree = {
             "state": model_state,
@@ -314,23 +331,23 @@ def main(config: config):
             "step": step,
             "wandb_id": wandb_id,
         }
-        checkpoint_manager.save(step, save_tree)
+        return save_tree
 
-    init_step = 0
-    use_wandb = config.wandb is True and jax.process_index() == 0
-    wandb_id = None
-
-    model_spec = shardedModel.get_p_spec(
-        model=model,
-        mesh=mesh,
-        config=config.model,
-    )
-    log(model_spec)
+    def save_checkpoint(step, ):
+        save_tree = make_save_tree(step)
+        checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
 
     if load:
-        tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
+        abstract_tree_map = jax.tree.map(
+            ocp.utils.to_shape_dtype_struct,
+            make_save_tree()
+        )
+        tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step(), args=ocp.args.StandardRestore(abstract_tree_map))
+
         init_step = tree_state["step"]
         log(f"loading checkpoint @ step {init_step}")
+
+        breakpoint()
 
         key.key = tree_state["key"]
 
@@ -355,27 +372,9 @@ def main(config: config):
                 id=wandb_id,
                 config=asdict(config),
             )
-            table = wandb.Table(
-                columns=["step"]
-                + [
-                    f"tokens_{i}"
-                    for i in range(
-                        config.inference_batch
-                        * config.model.blocks
-                        * (jax.device_count() // config.model.blocks)
-                    )
-                ],
-                log_mode="INCREMENTAL",
-            )
+
     else:
-        log("No checkpoint found, starting from scratch")
-        log("Creating model ...")
-
-        params = shardedModel.get_params(
-            cfg=config.model, model=model, mesh=mesh, key=key()
-        )
-        state = TrainState(params=params, tx=tx)
-
+        log("no checkpoint found, saving init copy")
         if use_wandb:
             wandb.init(
                 entity="waterloo2",
@@ -385,20 +384,21 @@ def main(config: config):
                 config=asdict(config),
             )
             wandb_id = wandb.run.id
-            table = wandb.Table(
-                columns=["step"]
-                + [
-                    f"tokens_{i}"
-                    for i in range(
-                        config.inference_batch
-                        * config.model.blocks
-                        * (jax.device_count() // config.model.blocks)
-                    )
-                ],
-                log_mode="INCREMENTAL",
-            )
+        save_checkpoint(init_step)
 
-        # save_checkpoint(0, wandb_id)
+    if use_wandb:
+        table = wandb.Table(
+            columns=["step"]
+            + [
+                f"tokens_{i}"
+                for i in range(
+                    config.inference_batch
+                    * config.model.blocks
+                    * (jax.device_count() // config.model.blocks)
+                )
+            ],
+            log_mode="INCREMENTAL",
+        )
 
     log(f"Model parameter count: {state.n_params:,d} ")
     loss_fn = jax.tree_util.Partial(loss, model, config)
@@ -438,6 +438,7 @@ def main(config: config):
     )
 
     log("start training")
+    breakpoint()
 
     start = time.time()
     train_loss = 0.0
@@ -543,7 +544,7 @@ def main(config: config):
                 table.add_data(current_step, *samples)
                 wandb_log["inference_tokens"] = table
 
-            save_checkpoint(current_step, wandb_id)
+            save_checkpoint(current_step)
             start = time.time()
             train_loss = 0.0
 

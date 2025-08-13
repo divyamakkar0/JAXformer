@@ -17,12 +17,9 @@ class RMSNorm(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        x_dtype = x.dtype
-        x = x.astype(jnp.float32)
         rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
         rms = jax.lax.pmean(rms, "tensor")
         x = x / jnp.sqrt(rms + 1e-6)
-        x = x.astype(x_dtype)
 
         gamma = self.param(
             "gamma", nn.initializers.ones, (1, 1, x.shape[-1]), self.model_dtype
@@ -323,9 +320,9 @@ class RoPE(nn.Module):
         x_inter = x.reshape((B, T, C // 2, 2))
         x_inter_one = x_inter[..., 0]
         x_inter_two = -1 * x_inter[..., 1]
-        x_inter = jnp.stack([x_inter_two, x_inter_one], axis=-1)
-        x_inter = x_inter.reshape((B, T, C))
+        x_inter = jnp.stack([x_inter_two, x_inter_one], axis=-1).reshape((B, T, C))
 
+        x_inter = x_inter.reshape((B, T, C))
         sin_rope = x_inter * self.sin[t_start : t_start + T, :]
 
         x = cos_rope + sin_rope
@@ -1188,4 +1185,64 @@ class shardedModel:
                 current_params = layer.init(init_key, x_layer, train=False)["params"]
                 layer_params.append(current_params)
 
-            layer_params = jax.t
+            layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
+            return embedding_params, layer_params
+
+        params = init_weights(x_embed, x_layer, layer_keys)
+        params = jax.tree.map(
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
+            params,
+            out_spec,
+        )
+
+        return params
+
+    @staticmethod
+    def get_model_and_params(
+        cfg: modelConfig, mesh: jax.sharding.Mesh, key: jax.random.key
+    ) -> Tuple[Tuple[Embeddings, EncoderBlock], PyTree]:
+        model = shardedModel.get_model(cfg)
+        params = shardedModel.get_params(cfg, model, mesh, key)
+
+        return model, params
+
+
+if __name__ == "__main__":
+    import json
+    import numpy as np
+
+    def print_params(params):
+        def tree_shapes(tree):
+            return jax.tree.map(lambda x: tuple(x.shape), tree)
+
+        shapes = tree_shapes(params)
+        print(json.dumps(shapes, indent=4))
+
+    model_cfg = modelConfig(
+        model_dimension=16,
+        n_heads=4,
+        dhR=8,
+        dhR_blocks=2,
+        T=4,
+        vocab_size=32,
+        dropout=0.1,
+        blocks=2,
+        n_experts=4,
+        n_shared=2,
+        k=2,
+        moe=False,
+        latent_dim=8,
+        model_dtype="bfloat16",
+    )
+
+    key = jax.random.PRNGKey(0)
+
+    model, params = Decoder.get_model(model_cfg, key)
+    print_params(params)
+
+    devices = np.array(jax.devices()).reshape((1, 2, 2))
+    mesh = jax.sharding.Mesh(devices=devices, axis_names=("fsdp", "model", "tensor"))
+    print(mesh)
+    model, params = shardedModel.get_model_and_params(model_cfg, mesh, key)
+    print_params(params)
+    breakpoint()

@@ -8,9 +8,11 @@ from utils import dataConfig
 from google.cloud import storage
 import time
 
+
 def log(out: str):
     if jax.process_index() == 0:
         print(out)
+
 
 class Dataset:
     def __init__(

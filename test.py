@@ -13,4 +13,3 @@ if jax.process_index() == 0:
             f"  {idx} ID: {d.id}, Process: {d.process_index}, "
             f"Coords: {d.coords}, Core: {d.core_on_chip}"
         )
-
