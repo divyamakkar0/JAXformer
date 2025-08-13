@@ -71,13 +71,13 @@ class TrainState:
         self.params = params
 
         default_shard = jax.sharding.NamedSharding(mesh, P())
+
         def shard_opt_leaf(init_leaf, loaded_leaf):
             dim = np.ndim(loaded_leaf)
             sharding = init_leaf.sharding if dim != 0 else default_shard
             return jax.device_put(loaded_leaf, sharding)
 
         self.opt_state = jax.tree.map(shard_opt_leaf, self.opt_state, opt_state)
-
 
     @property
     def n_params(self):
@@ -299,9 +299,7 @@ def main(config: config):
     use_wandb = config.wandb is True and jax.process_index() == 0
     wandb_id = None
 
-    def make_save_tree(
-        step
-    ):
+    def make_save_tree(step):
         model_state = {
             "params": state.params,
             "opt_state": state.opt_state,
@@ -318,28 +316,28 @@ def main(config: config):
         }
         return save_tree
 
-    def save_checkpoint(step, ):
+    def save_checkpoint(
+        step,
+    ):
         save_tree = make_save_tree(step)
         checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
 
     if load:
         abstract_tree_map = jax.tree.map(
-            ocp.utils.to_shape_dtype_struct,
-            make_save_tree(init_step)
+            ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)
         )
-        tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step(), args=ocp.args.StandardRestore(abstract_tree_map))
+        tree_state = checkpoint_manager.restore(
+            checkpoint_manager.latest_step(),
+            args=ocp.args.StandardRestore(abstract_tree_map),
+        )
 
         init_step = tree_state["step"]
         log(f"loading checkpoint @ step {init_step}")
 
         key.key = tree_state["key"]
-        params = tree_state['state']['params']
-        opt_state = tree_state['state']['opt_state']
-        state.restore(
-            params,
-            opt_state,
-            mesh
-        )
+        params = tree_state["state"]["params"]
+        opt_state = tree_state["state"]["opt_state"]
+        state.restore(params, opt_state, mesh)
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]

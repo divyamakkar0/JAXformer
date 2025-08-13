@@ -78,6 +78,7 @@ class config:
     wandb: bool = True
     grad_clip_norm: float = 1.0
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
     parser.add_argument("--model_dimension", type=int, default=256)
