@@ -8,6 +8,9 @@ from utils import dataConfig
 from google.cloud import storage
 import time
 
+def log(out: str):
+    if jax.process_index() == 0:
+        print(out)
 
 class Dataset:
     def __init__(
@@ -43,7 +46,7 @@ class Dataset:
         try:
             os.mkdir(self.dir_name)
         except OSError as e:
-            print(f"{self.dir_name} already exists")
+            log(f"{self.dir_name} already exists")
 
         self.load_next_shard()
 
@@ -64,7 +67,7 @@ class Dataset:
 
         blob = bucket.blob(source_blob_name)
         blob.download_to_file(file_obj)
-        print(f"Downloaded blob {source_blob_name} to file-like object.")
+        log(f"Downloaded blob {source_blob_name} to file-like object.")
 
         return file_obj
 
@@ -74,29 +77,29 @@ class Dataset:
                 result = self.download_blob_to_stream(bucket_name, source_name, f)
                 return result
             except Exception as e:
-                print("Failed to download due to exception")
+                log("Failed to download due to exception")
                 time.sleep(5)
 
     def download_next(self):
-        print("Started downloading")
+        log("Started downloading")
         source_name = self.data[self.shard_idx % len(self.data)]
         self.shard_idx += 1
-        print(f" Downloading: {source_name} | Shard_idx: {self.shard_idx}")
+        log(f" Downloading: {source_name} | Shard_idx: {self.shard_idx}")
 
         self.process_path = f"{self.base_process_path}_{self.id}_{self.shard_idx}"
         with open(self.process_path, "wb") as f:
             result = self.download_bucket(self.bucket_name, source_name, f)
-            print(f"Done downloading {result}")
+            log(f"Done downloading {result}")
 
     def load_next_shard(self):
         self.download_next()
 
         def process_prev():
-            print(f"Processing shard at {self.process_path}\n\n")
+            log(f"Processing shard at {self.process_path}\n\n")
             try:
                 data = np.load(self.process_path)
             except:
-                print(f"couldn't load data\n\n")
+                log(f"couldn't load data\n\n")
             self.dataset = data[:-1]
             self.labels = data[1:]
 
@@ -123,8 +126,6 @@ class Dataset:
             self.dataset = jax.device_put(self.dataset)
             self.labels = jax.device_put(self.labels)
 
-        print("waiting for download to finish..")
-        print("download done")
         process_prev()
 
         os.remove(self.process_path)

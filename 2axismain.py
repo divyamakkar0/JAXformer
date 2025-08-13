@@ -300,8 +300,6 @@ def main(config: config):
     log(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
 
     def save_checkpoint(step, wandb_id):
-        if jax.process_index() != 0:
-            return
         model_state = {
             "params": jax.device_get(state.params),
             "opt_state": jax.device_get(state.opt_state),
@@ -327,6 +325,7 @@ def main(config: config):
         mesh=mesh,
         config=config.model,
     )
+    log(model_spec)
 
     if load:
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
@@ -399,7 +398,7 @@ def main(config: config):
                 log_mode="INCREMENTAL",
             )
 
-        save_checkpoint(0, wandb_id)
+        # save_checkpoint(0, wandb_id)
 
     log(f"Model parameter count: {state.n_params:,d} ")
     loss_fn = jax.tree_util.Partial(loss, model, config)
