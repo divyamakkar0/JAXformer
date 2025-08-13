@@ -54,12 +54,17 @@ class KeyState:
 
 
 class TrainState:
-    def __init__(self, params, tx, opt_state: Optional[PyTree] = None):
+    def __init__(self, params, tx, mesh):
         self.params = params
         self.tx = tx
-        self.opt_state = opt_state
-        if opt_state is None:
-            self.opt_state = tx.init(params)
+
+        opt_state = tx.init(params)
+        default_sharding = jax.sharding.NamedSharding(mesh, P())
+        def shard_opt_leaf(x):
+            dim = np.ndim(x)
+            return x if dim != 0 else jax.device_put(x, default_sharding)
+
+        self.opt_state = jax.tree.map(shard_opt_leaf, opt_state)
 
     def apply_gradients(self, grads):
         updates, self.opt_state = self.tx.update(grads, self.opt_state, self.params)
@@ -67,17 +72,9 @@ class TrainState:
 
         return self
 
-    def restore(self, params: PyTree, opt_state: PyTree, mesh):
+    def restore(self, params: PyTree, opt_state: PyTree):
         self.params = params
-
-        default_shard = jax.sharding.NamedSharding(mesh, P())
-
-        def shard_opt_leaf(init_leaf, loaded_leaf):
-            dim = np.ndim(loaded_leaf)
-            sharding = init_leaf.sharding if dim != 0 else default_shard
-            return jax.device_put(loaded_leaf, sharding)
-
-        self.opt_state = jax.tree.map(shard_opt_leaf, self.opt_state, opt_state)
+        self.opt_state = opt_state
 
     @property
     def n_params(self):
@@ -294,7 +291,7 @@ def main(config: config):
     params = shardedModel.get_params(
         cfg=config.model, model=model, mesh=mesh, key=key()
     )
-    state = TrainState(params=params, tx=tx)
+    state = TrainState(params=params, tx=tx, mesh=mesh)
     init_step = 0
     use_wandb = config.wandb is True and jax.process_index() == 0
     wandb_id = None
@@ -337,7 +334,7 @@ def main(config: config):
         key.key = tree_state["key"]
         params = tree_state["state"]["params"]
         opt_state = tree_state["state"]["opt_state"]
-        state.restore(params, opt_state, mesh)
+        state.restore(params, opt_state)
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]
