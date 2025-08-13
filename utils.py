@@ -81,9 +81,9 @@ class config:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
-    parser.add_argument("--model_dimension", type=int, default=768)
-    parser.add_argument("--n_heads", type=int, default=64)
-    parser.add_argument("--T", type=int, default=1024)
+    parser.add_argument("--model_dimension", type=int, default=256)
+    parser.add_argument("--n_heads", type=int, default=8)
+    parser.add_argument("--T", type=int, default=128)
     parser.add_argument("--vocab_size", type=int, default=100277)
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.2)

@@ -67,35 +67,17 @@ class TrainState:
 
         return self
 
-    @classmethod
-    def restore(cls, restored: PyTree, tx, model_spec, mesh):
-        params = jax.tree.map(
-            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
-            (*restored["params"],),
-            model_spec,
-        )
-
-        opt_state_init = tx.init(params)
-
-        opt_state = jax.tree_util.tree_unflatten(
-            jax.tree_util.tree_structure(opt_state_init),
-            jax.tree_util.tree_leaves(restored["opt_state"]),
-        )
+    def restore(self, params: PyTree, opt_state: PyTree, mesh):
+        self.params = params
 
         default_shard = jax.sharding.NamedSharding(mesh, P())
-
         def shard_opt_leaf(init_leaf, loaded_leaf):
             dim = np.ndim(loaded_leaf)
             sharding = init_leaf.sharding if dim != 0 else default_shard
             return jax.device_put(loaded_leaf, sharding)
 
-        opt_state = jax.tree.map(shard_opt_leaf, opt_state_init, opt_state)
+        self.opt_state = jax.tree.map(shard_opt_leaf, self.opt_state, opt_state)
 
-        return cls(
-            params=params,
-            tx=tx,
-            opt_state=opt_state,
-        )
 
     @property
     def n_params(self):
@@ -261,9 +243,12 @@ def main(config: config):
     )
     load = os.path.exists(checkpoint_dir)
 
-    path = ocp.test_utils.erase_and_create_empty("path")
+    if not load:
+        os.makedirs(checkpoint_dir)
+        checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
+
     options = ocp.CheckpointManagerOptions(max_to_keep=1)
-    checkpoint_manager = ocp.CheckpointManager(path, options=options)
+    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
 
     key = KeyState(config.seed)
     model = shardedModel.get_model(cfg=config.model)
@@ -340,18 +325,21 @@ def main(config: config):
     if load:
         abstract_tree_map = jax.tree.map(
             ocp.utils.to_shape_dtype_struct,
-            make_save_tree()
+            make_save_tree(init_step)
         )
         tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step(), args=ocp.args.StandardRestore(abstract_tree_map))
 
         init_step = tree_state["step"]
         log(f"loading checkpoint @ step {init_step}")
 
-        breakpoint()
-
         key.key = tree_state["key"]
-
-        state = TrainState.restore(tree_state["state"], tx, model_spec, mesh)
+        params = tree_state['state']['params']
+        opt_state = tree_state['state']['opt_state']
+        state.restore(
+            params,
+            opt_state,
+            mesh
+        )
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]
@@ -438,7 +426,6 @@ def main(config: config):
     )
 
     log("start training")
-    breakpoint()
 
     start = time.time()
     train_loss = 0.0
