@@ -1,4 +1,5 @@
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 print("initing ... ")
@@ -13,3 +14,7 @@ if jax.process_index() == 0:
             f"  {idx} ID: {d.id}, Process: {d.process_index}, "
             f"Coords: {d.coords}, Core: {d.core_on_chip}"
         )
+mesh = jax.make_mesh(jax.device_count(), ('dp'))
+a = jnp.arange(32)
+a = jax.device_put(a, jax.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')))
+

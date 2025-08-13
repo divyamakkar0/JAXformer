@@ -1,8 +1,7 @@
 #!/bin/bash
 
 SESSION="mysession"
-command="python 2axismain.py --checkpoint_steps=10 --n_device_axis 16 2 1 --train_batch_size=8 --name test1"
-
+command="python 2axismain.py --checkpoint_steps=10 --n_device_axis 16 2 1 --train_batch_size=8 --name test10"
 IPS=(
     "35.186.25.28"
     "35.186.39.76"
@@ -32,10 +31,12 @@ tmux new-window -t "$SESSION" -n "monitor" \; \
 
 for i in $(seq 0 7); do
   tmux send-keys -t "$SESSION":0.$i "ssh adityamakkar@${IPS[$i]}" C-m
-  tmux send-keys -t "$SESSION":0.$i "rm -rf ~/Jaxformer" C-m
-  tmux send-keys -t "$SESSION":0.$i "git clone https://github.com/divyamakkar0/Jaxformer" C-m
-  tmux send-keys -t "$SESSION":0.$i "cd ~/Jaxformer && bash setupTpu.sh" C-m
+  tmux send-keys -t "$SESSION":0.$i "cd ~/Jaxformer && rm -rf results" C-m
+  tmux send-keys -t "$SESSION":0.$i "git fetch origin && git reset --hard origin/main" C-m
+  tmux send-keys -t "$SESSION":0.$i "bash setupTpu.sh" C-m
   tmux send-keys -t "$SESSION":0.$i "$command" C-m
+
+
 done
 
 for i in $(seq 0 7); do

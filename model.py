@@ -239,21 +239,21 @@ class Dense(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array):
-        if not self.is_mutable_collection("params"):
-            params = self.scope.get_variable("params", "Dense_0")
-            params["kernel"] = jax.lax.all_gather(
-                params["kernel"], "fsdp", axis=-1, tiled=True
-            )
+        # if not self.is_mutable_collection("params"):
+        #     params = self.scope.get_variable("params", "Dense_0")
+        #     params["kernel"] = jax.lax.all_gather(
+        #         params["kernel"], "fsdp", axis=-1, tiled=True
+        #     )
 
-            promote_dtype = lambda x: x.astype(self.dtype)
-            x = promote_dtype(x)
-            params = jax.tree.map(lambda x: promote_dtype(x), params)
+        #     promote_dtype = lambda x: x.astype(self.dtype)
+        #     x = promote_dtype(x)
+        #     params = jax.tree.map(lambda x: promote_dtype(x), params)
 
-            x = jnp.einsum("...C, CD -> ...D", x, params["kernel"])
-            x = x + params["bias"]
+        #     x = jnp.einsum("...C, CD -> ...D", x, params["kernel"])
+        #     x = x + params["bias"]
 
-        else:
-            x = nn.Dense(features=self.features, dtype=self.dtype)(x)
+        # else:
+        x = nn.Dense(features=self.features, dtype=self.dtype)(x)
 
         x = jax.lax.psum_scatter(x, "tensor", scatter_dimension=x.ndim - 1, tiled=True)
 
@@ -1088,14 +1088,16 @@ class shardedModel:
             path = join_fn(key)
             if "moe" in path and "feedforward" in path:
                 if x.ndim == 4:
-                    return P("model", None, "tensor", "fsdp")
+                    # return P("model", None, "tensor", "fsdp")
+                    return P("model", None, "tesnor", None)
                 if x.ndim == 3:
                     return P("model", None, None)
             if "gamma" in path or "beta" in path:
                 return P("model", None, None, "tensor")
 
             if x.ndim == 3:
-                return P("model", "tensor", "fsdp")
+                # return P("model", "tensor", "fsdp")
+                return P("model", "tensor", None)
             return P("model")
 
         embed_p_spec = jax.tree.map_with_path(
@@ -1145,12 +1147,12 @@ class shardedModel:
     ) -> Tuple[PyTree, PyTree]:
         out_spec = shardedModel.get_p_spec(model, mesh, cfg)
 
-        def replace_fsdp(p: jax.sharding.PartitionSpec):
-            if p[-1] == "fsdp":
-                p = P(*p[:-1], None)
-            return p
+        # def replace_fsdp(p: jax.sharding.PartitionSpec):
+        #     if p[-1] == "fsdp":
+        #         p = P(*p[:-1], None)
+        #     return p
 
-        out_spec_no_fsdp = jax.tree.map(lambda x: replace_fsdp(x), out_spec)
+        # out_spec_no_fsdp = jax.tree.map(lambda x: replace_fsdp(x), out_spec)
 
         embedding_layer, layer = model
 
@@ -1171,7 +1173,7 @@ class shardedModel:
             jax.shard_map,
             mesh=mesh,
             in_specs=(P(None, "tensor"), P(None, None, "tensor"), P("model", "tensor")),
-            out_specs=out_spec_no_fsdp,
+            out_specs=out_spec,
         )
         def init_weights(x_embed, x_layer, layer_key):
             layer_key = layer_key[0, 0]

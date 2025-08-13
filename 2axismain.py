@@ -43,7 +43,6 @@ from jaxtyping import PyTree
 from einops import rearrange
 import numpy as np
 
-
 class KeyState:
     def __init__(self, seed: int):
         self.key = jax.random.PRNGKey(seed)
@@ -54,30 +53,38 @@ class KeyState:
 
 
 class TrainState:
-    def __init__(self, params, tx, opt_state: Optional[PyTree] = None):
+    def __init__(self, params, tx, mesh):
         self.params = params
         self.tx = tx
-        self.opt_state = opt_state
-        if opt_state is None:
-            self.opt_state = tx.init(params)
+
+        opt_state = tx.init(params)
+        default_sharding = jax.sharding.NamedSharding(mesh, P())
+
+        def shard_opt_leaf(x):
+            dim = np.ndim(x)
+            return x if dim != 0 else jax.device_put(x, default_sharding)
+
+        self.opt_state = jax.tree.map(shard_opt_leaf, opt_state)
 
     def apply_gradients(self, grads):
+        is_nan_tree = jax.tree.map(lambda g: jnp.isnan(g).any(), grads)
+        has_nan = jax.tree.util.tree_reduce(lambda x, y: x or y, is_nan_tree, False)
+        jax.debug.print("💥 Gradients contain NaNs: {has_nan}", has_nan=has_nan)
+
         updates, self.opt_state = self.tx.update(grads, self.opt_state, self.params)
         self.params = optax.apply_updates(self.params, updates)
 
+        # self.params = jax.tree.map(
+        #     lambda p, g: p - 0.001 * g,
+        #     self.params,
+        #     grads
+        # )
+
         return self
 
-    def restore(self, params: PyTree, opt_state: PyTree, mesh):
+    def restore(self, params: PyTree, opt_state: PyTree):
         self.params = params
-
-        default_shard = jax.sharding.NamedSharding(mesh, P())
-
-        def shard_opt_leaf(init_leaf, loaded_leaf):
-            dim = np.ndim(loaded_leaf)
-            sharding = init_leaf.sharding if dim != 0 else default_shard
-            return jax.device_put(loaded_leaf, sharding)
-
-        self.opt_state = jax.tree.map(shard_opt_leaf, self.opt_state, opt_state)
+        self.opt_state = opt_state
 
     @property
     def n_params(self):
@@ -94,7 +101,6 @@ def setup_devices(cfg: config):
     device_cfg = cfg.device_config
     assert 3 == len(device_cfg.n_device_axis)
 
-    jax.distributed.initialize()
     devices = np.array(jax.devices())[:, None, None]
 
     assert devices.shape[0] == np.prod(device_cfg.n_device_axis)
@@ -208,11 +214,11 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
             axes = ["model"]
             if "moe" in path and "feedforward" in path:
                 if x.ndim == 4:
-                    axes.extend(["fsdp", "tensor"])
+                    axes.extend(["tensor"])
             elif "gamma" in path or "beta" in path:
                 axes.extend(["tensor"])
             elif x.ndim == 3:
-                axes.extend(["fsdp", "tensor"])
+                axes.extend(["tensor"])
             x = jax.lax.pvary(x, axis_name=(*axes,))
             return x
 
@@ -294,7 +300,7 @@ def main(config: config):
     params = shardedModel.get_params(
         cfg=config.model, model=model, mesh=mesh, key=key()
     )
-    state = TrainState(params=params, tx=tx)
+    state = TrainState(params=params, tx=tx, mesh=mesh)
     init_step = 0
     use_wandb = config.wandb is True and jax.process_index() == 0
     wandb_id = None
@@ -337,7 +343,7 @@ def main(config: config):
         key.key = tree_state["key"]
         params = tree_state["state"]["params"]
         opt_state = tree_state["state"]["opt_state"]
-        state.restore(params, opt_state, mesh)
+        state.restore(params, opt_state)
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]
@@ -423,6 +429,8 @@ def main(config: config):
         )
     )
 
+    log("syncing devices...")
+    jax.experimental.multihost_utils.sync_global_devices("test")
     log("start training")
 
     start = time.time()
@@ -445,6 +453,9 @@ def main(config: config):
             x, y = train_dataset()
 
             grads, metrics = train_step(keys, state.params, x, y)
+
+        jax.experimental.multihost_utils.sync_global_devices("train_step")
+        log(metrics)
 
         state = state.apply_gradients(grads=grads)
         train_loss += metrics["loss"]
@@ -489,7 +500,9 @@ def main(config: config):
                     )
 
                 x, y = val_dataset()
+                log("starting eval")
                 metrics_val = eval_step(keys, state.params, x, y)
+                log("eval done")
 
             if use_wandb:
                 wandb_log["loss/val_loss"] = metrics_val["loss"]
@@ -567,5 +580,6 @@ def main(config: config):
 
 
 if __name__ == "__main__":
+    jax.distributed.initialize()
     cfg = parse_args()
     main(cfg)
