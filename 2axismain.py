@@ -102,6 +102,7 @@ class TrainState:
         param_count = sum(x.size for x in jax.tree.leaves(self.params))
         return param_count
 
+
 def log(msg: str):
     if jax.process_index() == 0:
         print(msg)
@@ -117,8 +118,9 @@ def setup_devices(cfg: config):
     assert devices.shape[0] == np.prod(device_cfg.n_device_axis)
     devices = devices.reshape(*device_cfg.n_device_axis)
 
-
-    mesh = jax.make_mesh((*device_cfg.n_device_axis,), axis_names=("fsdp", "model", "tensor"))
+    mesh = jax.make_mesh(
+        (*device_cfg.n_device_axis,), axis_names=("fsdp", "model", "tensor")
+    )
 
     count = devices.shape
     count = {
@@ -169,7 +171,11 @@ def loss(model, cfg: config, params: PyTree, key: jax.random.PRNGKey, x, y, trai
     loss_cross = jax.lax.pmean(loss_cross, axis_name="tensor")
 
     loss = loss_cross + cfg.alpha * loss_balance
-    aux_stat = (load if load is None else load["tokens_per_expert"], loss_cross, loss_balance)
+    aux_stat = (
+        load if load is None else load["tokens_per_expert"],
+        loss_cross,
+        loss_balance,
+    )
 
     return loss, aux_stat
 
@@ -213,22 +219,22 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
     if train:
         embed_grads, layer_grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
 
-        join_fn = lambda path: ' '.join(i.key for i in path).lower()
+        join_fn = lambda path: " ".join(i.key for i in path).lower()
 
         def init_vary_layer(key, x):
             path = join_fn(key)
             axes = ["model"]
-            if 'moe' in path and 'feedforward' in path:
+            if "moe" in path and "feedforward" in path:
                 if x.ndim == 4:
                     axes.extend(["fsdp", "tensor"])
-            elif 'gamma' in path or 'beta' in path:
+            elif "gamma" in path or "beta" in path:
                 axes.extend(["tensor"])
             elif x.ndim == 3:
                 axes.extend(["fsdp", "tensor"])
             x = jax.lax.pvary(x, axis_name=(*axes,))
             return x
 
-        layer_grads = jax.tree_util.tree_map_with_path(
+        layer_grads = jax.tree.map_with_path(
             init_vary_layer,
             layer_grads,
         )
@@ -246,7 +252,6 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
 
 
 def main(config: config):
-
     mesh, count = setup_devices(config)
 
     log(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
@@ -352,7 +357,15 @@ def main(config: config):
                 config=asdict(config),
             )
             table = wandb.Table(
-                columns=["step"] + [f"tokens_{i}" for i in range(config.inference_batch * config.model.blocks * (jax.device_count() // config.model.blocks))],
+                columns=["step"]
+                + [
+                    f"tokens_{i}"
+                    for i in range(
+                        config.inference_batch
+                        * config.model.blocks
+                        * (jax.device_count() // config.model.blocks)
+                    )
+                ],
                 log_mode="INCREMENTAL",
             )
     else:
@@ -374,7 +387,15 @@ def main(config: config):
             )
             wandb_id = wandb.run.id
             table = wandb.Table(
-                columns=["step"] + [f"tokens_{i}" for i in range(config.inference_batch * config.model.blocks * (jax.device_count() // config.model.blocks))],
+                columns=["step"]
+                + [
+                    f"tokens_{i}"
+                    for i in range(
+                        config.inference_batch
+                        * config.model.blocks
+                        * (jax.device_count() // config.model.blocks)
+                    )
+                ],
                 log_mode="INCREMENTAL",
             )
 
@@ -523,7 +544,6 @@ def main(config: config):
                 table.add_data(current_step, *samples)
                 wandb_log["inference_tokens"] = table
 
-
             save_checkpoint(current_step, wandb_id)
             start = time.time()
             train_loss = 0.0
@@ -536,7 +556,15 @@ def main(config: config):
 
     if use_wandb:
         table = wandb.Table(
-            columns=["step"] + [f"tokens_{i}" for i in range(config.inference_batch * config.model.blocks * (jax.device_count() // config.model.blocks))],
+            columns=["step"]
+            + [
+                f"tokens_{i}"
+                for i in range(
+                    config.inference_batch
+                    * config.model.blocks
+                    * (jax.device_count() // config.model.blocks)
+                )
+            ],
         )
         wandb.Table.MAX_ROWS = total_steps // config.checkpoint_steps
         with open(

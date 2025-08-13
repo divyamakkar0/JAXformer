@@ -8,10 +8,11 @@ from utils import dataConfig
 from google.cloud import storage
 import time
 
+
 class Dataset:
     def __init__(
         self,
-        process_path : str,
+        process_path: str,
         T: int,
         batch_size: int,
         microbatch: int,
@@ -29,7 +30,6 @@ class Dataset:
         self.dp = dp
         self.microbatch = microbatch
 
-
         self.step_idx = 0
         self.shard_idx = 0
         self.partition = partition
@@ -45,13 +45,14 @@ class Dataset:
         except OSError as e:
             print(f"{self.dir_name} already exists")
 
-
         self.load_next_shard()
 
     def return_blobs(self, bucket_name, prefix, delimiter=None):
         res = []
         storage_client = storage.Client()
-        blobs = storage_client.list_blobs(bucket_name, prefix=prefix, delimiter=delimiter)
+        blobs = storage_client.list_blobs(
+            bucket_name, prefix=prefix, delimiter=delimiter
+        )
         for blob in blobs:
             res.append(blob.name)
 
@@ -89,6 +90,7 @@ class Dataset:
 
     def load_next_shard(self):
         self.download_next()
+
         def process_prev():
             print(f"Processing shard at {self.process_path}\n\n")
             try:
@@ -101,7 +103,9 @@ class Dataset:
             len_dataset = self.dataset.shape[0]
             max_batches = len_dataset // (self.batch_size * self.T)
 
-            self.dataset = self.dataset[: max_batches * self.batch_size * self.T].reshape(
+            self.dataset = self.dataset[
+                : max_batches * self.batch_size * self.T
+            ].reshape(
                 max_batches,
                 self.dp,
                 self.microbatch,
@@ -137,7 +141,6 @@ class Dataset:
 
         os.remove(self.process_path)
 
-
     def __len__(self):
         return self.dataset.shape[0]
 
@@ -160,7 +163,6 @@ class Dataset:
         dp: int = 1,
         pp: int = 1,
     ) -> Tuple["Dataset", "Dataset"]:
-
         train_dataset = cls(
             cfg.process_path,
             cfg.T,
@@ -170,7 +172,7 @@ class Dataset:
             dp=dp,
             pp=pp,
             bucket_name=cfg.bucket_name,
-            id=cfg.train_folder_name
+            id=cfg.train_folder_name,
         )
         val_dataset = cls(
             cfg.process_path,
@@ -181,7 +183,7 @@ class Dataset:
             dp=dp,
             pp=pp,
             bucket_name=cfg.bucket_name,
-            id=cfg.val_folder_name
+            id=cfg.val_folder_name,
         )
 
         return train_dataset, val_dataset
@@ -196,21 +198,19 @@ if __name__ == "__main__":
         T=1024,
         train_batch_size=16,
     )
-    train,test = Dataset.getDataset(test_cfg, None)
+    train, test = Dataset.getDataset(test_cfg, None)
 
     train_step_id = 20
-    train_shard_id = (train.shard_idx - 1) % len(train.data),
+    train_shard_id = ((train.shard_idx - 1) % len(train.data),)
     train.load_next_shard()
 
     val_step_id = 20
-    val_shard_id = (test.shard_idx - 1) % len(test.data),
+    val_shard_id = ((test.shard_idx - 1) % len(test.data),)
     test.load_next_shard()
-
-
 
     # start = time.time()
     # train, test = Dataset.getDataset(test_cfg, None)
-    #jax.random.key(0)
+    # jax.random.key(0)
     # end = time.time()
     # print(f"time taken to load dataset: {(end - start):.2f} seconds")
     # for i in range(6104 * 4):

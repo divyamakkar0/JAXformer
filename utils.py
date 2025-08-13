@@ -97,7 +97,9 @@ def parse_args():
     parser.add_argument("--latent_dim", type=int, default=128)
 
     parser.add_argument("--bucket_name", type=str, default="10bt_gpt4")
-    parser.add_argument("--process_path", type=str, default="./bucket_downloads/processShard" )
+    parser.add_argument(
+        "--process_path", type=str, default="./bucket_downloads/processShard"
+    )
     parser.add_argument("--train_folder_name", type=str, default="train")
     parser.add_argument("--val_folder_name", type=str, default="val")
     parser.add_argument("--train_batch_size", type=int, default=16)

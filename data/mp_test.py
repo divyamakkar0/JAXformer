@@ -1,7 +1,9 @@
 import multiprocessing as mp
 
+
 def square(x):
     return x * x
+
 
 # def main():
 with mp.Pool(4) as pool:

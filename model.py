@@ -115,9 +115,7 @@ class MoE(nn.Module):
         )
 
         res_shared = shared(x)
-        res_shared = rearrange(
-            res_shared, "B T (n d) -> B T n d", n=self.n_shared
-        )
+        res_shared = rearrange(res_shared, "B T (n d) -> B T n d", n=self.n_shared)
         res_shared = jnp.sum(res_shared, axis=2)  # (B, T, n, d) -> (B, T, d)
 
         router = NoisyKGate(
@@ -148,7 +146,7 @@ class MoE(nn.Module):
             in_axes=(0),
             out_axes=(0),
             variable_axes={"params": 0},
-            split_rngs={"params": True, 'dropout': True},
+            split_rngs={"params": True, "dropout": True},
         )(expert, expert_inputs)
 
         expert_outputs = jnp.einsum("ecd,tec->td", expert_outputs, score_mask)
@@ -286,6 +284,7 @@ class FeedForward(nn.Module):
 class RoPE(nn.Module):
     T: int
     model_dim: int
+
     def setup(self):
         assert self.model_dim % 2 == 0, "model_dim must be even"
 
@@ -310,12 +309,11 @@ class RoPE(nn.Module):
 
         x = jax.lax.all_to_all(
             x,
-            axis_name='tensor',
+            axis_name="tensor",
             split_axis=x.ndim - 2,
             concat_axis=x.ndim - 1,
-            tiled=True
+            tiled=True,
         )
-
 
         cos_rope = x * self.cos[t_start : t_start + T, :]
 
@@ -332,10 +330,10 @@ class RoPE(nn.Module):
 
         x = jax.lax.all_to_all(
             x,
-            axis_name='tensor',
+            axis_name="tensor",
             split_axis=x.ndim - 1,
             concat_axis=x.ndim - 2,
-            tiled=True
+            tiled=True,
         )
 
         return x
@@ -1081,32 +1079,31 @@ class shardedModel:
             x_layer,
         )
 
-
-        join_fn = lambda path: ' '.join(i.key for i in path).lower()
+        join_fn = lambda path: " ".join(i.key for i in path).lower()
 
         def embedding_partition(*_) -> P:
             return P(None)
 
         def layer_partition(key: Tuple[str, ...], x: Array) -> P:
             path = join_fn(key)
-            if 'moe' in path and 'feedforward' in path:
+            if "moe" in path and "feedforward" in path:
                 if x.ndim == 4:
                     return P("model", None, "tensor", "fsdp")
                 if x.ndim == 3:
                     return P("model", None, None)
-            if 'gamma' in path or 'beta' in path:
+            if "gamma" in path or "beta" in path:
                 return P("model", None, None, "tensor")
 
             if x.ndim == 3:
                 return P("model", "tensor", "fsdp")
             return P("model")
 
-        embed_p_spec = jax.tree_util.tree_map_with_path(
+        embed_p_spec = jax.tree.map_with_path(
             embedding_partition,
             eval_shape[0],
         )
 
-        layer_p_spec = jax.tree_util.tree_map_with_path(
+        layer_p_spec = jax.tree.map_with_path(
             layer_partition,
             eval_shape[1],
         )
