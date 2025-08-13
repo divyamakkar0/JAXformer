@@ -120,20 +120,8 @@ class Dataset:
                 self.T,
             )
 
-            if self.partition is not None:
-                self.dataset = jax.make_array_from_callback(
-                    self.dataset.shape,
-                    sharding=self.partition,
-                    data_callback=lambda idx: self.dataset[idx],
-                )
-                self.labels = jax.make_array_from_callback(
-                    self.labels.shape,
-                    sharding=self.partition,
-                    data_callback=lambda idx: self.labels[idx],
-                )
-            else:
-                self.dataset = jax.device_put(self.dataset)
-                self.labels = jax.device_put(self.labels)
+            self.dataset = jax.device_put(self.dataset)
+            self.labels = jax.device_put(self.labels)
 
         print("waiting for download to finish..")
         print("download done")
