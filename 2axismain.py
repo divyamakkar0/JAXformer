@@ -14,14 +14,14 @@ jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
 
-DEBUG = os.getenv("DEBUG")
-if DEBUG is not None and int(DEBUG) == 1:
-    print(f" --------- DEBUGGING MODE ON -----------")
-    jax.config.update("jax_debug_nans", True)
-    jax.config.update("jax_disable_jit", True)
-else:
-    jax.config.update("jax_debug_nans", False)
-    jax.config.update("jax_disable_jit", False)
+# DEBUG = os.getenv("DEBUG")
+# if DEBUG is not None and int(DEBUG) == 1:
+#     print(f" --------- DEBUGGING MODE ON -----------")
+#     jax.config.update("jax_debug_nans", True)
+#     jax.config.update("jax_disable_jit", True)
+# else:
+#     jax.config.update("jax_debug_nans", False)
+#     jax.config.update("jax_disable_jit", False)
 
 import time
 import ast
@@ -67,9 +67,6 @@ class TrainState:
         self.opt_state = jax.tree.map(shard_opt_leaf, opt_state)
 
     def apply_gradients(self, grads):
-        is_nan_tree = jax.tree.map(lambda g: jnp.isnan(g).any(), grads)
-        has_nan = jax.tree.util.tree_reduce(lambda x, y: x or y, is_nan_tree, False)
-        jax.debug.print("💥 Gradients contain NaNs: {has_nan}", has_nan=has_nan)
 
         updates, self.opt_state = self.tx.update(grads, self.opt_state, self.params)
         self.params = optax.apply_updates(self.params, updates)
@@ -91,11 +88,9 @@ class TrainState:
         param_count = sum(x.size for x in jax.tree.leaves(self.params))
         return param_count
 
-
 def log(msg: str):
     if jax.process_index() == 0:
         print(msg)
-
 
 def setup_devices(cfg: config):
     device_cfg = cfg.device_config
@@ -131,17 +126,17 @@ def setup_devices(cfg: config):
 
     return mesh, count
 
-
 def loss(model, cfg: config, params: PyTree, key: jax.random.PRNGKey, x, y, train):
     M, B, T = x.shape
     pred, (_, load) = shardedModel.pipe_step(model, params, x, key=key, train=train)
+    log_pred = jax.nn.log_softmax(pred, axis=-1)
 
     total_tokens = M * B * T
-    log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(total_tokens, -1)
     y = y.reshape(total_tokens)
+    log_pred = log_pred.reshape(total_tokens, -1)
 
     loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
-    loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_prob, y)).mean()
+    loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_pred, y)).mean()
 
     loss_balance = 0.0
     if load is not None:
@@ -236,7 +231,7 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
         grads = jax.tree.map(lambda x: x / grad_steps, grads)
         return grads, metrics
 
-    return metrics
+    return grads, metrics
 
 
 def main(config: config):
@@ -399,18 +394,18 @@ def main(config: config):
     data_spec = P("fsdp", "model", None, "tensor")
     train_step = jax.jit(
         jax.shard_map(
-            lambda key, params, x, y: step(
-                loss_fn, config.grad_step, params, key, x, y, train=True
-            ),
-            mesh=mesh,
-            in_specs=(
-                key_spec,
-                model_spec,
-                data_spec,
-                data_spec,
-            ),
-            out_specs=(model_spec, P()),
-        )
+                lambda key, params, x, y: step(
+                    loss_fn, config.grad_step, params, key, x, y, train=True
+                ),
+                mesh=mesh,
+                in_specs=(
+                    key_spec,
+                    model_spec,
+                    data_spec,
+                    data_spec,
+                ),
+                out_specs=(model_spec, P()),
+            )
     )
 
     eval_step = jax.jit(
@@ -449,13 +444,17 @@ def main(config: config):
                     count["fsdp"], count["model"], count["tensor"], config.grad_step, 2
                 )
 
-            keys = jax.device_put(keys, jax.sharding.NamedShardin(mesh, key_spec))
+            keys = jax.device_put(keys, jax.sharding.NamedSharding(mesh, key_spec))
             x, y = train_dataset()
 
+            jax.experimental.multihost_utils.sync_global_devices("train_step")
+            log("syncing 1")
             grads, metrics = train_step(keys, state.params, x, y)
 
+        print(grads)
+        log("syncing 2")
         jax.experimental.multihost_utils.sync_global_devices("train_step")
-        log(metrics)
+
 
         state = state.apply_gradients(grads=grads)
         train_loss += metrics["loss"]
@@ -577,7 +576,6 @@ def main(config: config):
 
         wandb.log({"inference_tokens": table})
         wandb.finish()
-
 
 if __name__ == "__main__":
     jax.distributed.initialize()

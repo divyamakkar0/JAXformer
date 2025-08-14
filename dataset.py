@@ -125,8 +125,8 @@ class Dataset:
                 self.T,
             )
 
-            self.dataset = jax.device_put(self.dataset)
-            self.labels = jax.device_put(self.labels)
+            self.dataset = jax.device_put(self.dataset, self.partition)
+            self.labels = jax.device_put(self.labels, self.partition)
 
         process_prev()
 
