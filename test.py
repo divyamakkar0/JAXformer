@@ -14,7 +14,11 @@ if jax.process_index() == 0:
             f"  {idx} ID: {d.id}, Process: {d.process_index}, "
             f"Coords: {d.coords}, Core: {d.core_on_chip}"
         )
-mesh = jax.make_mesh(jax.device_count(), ('dp'))
+
+mesh = jax.make_mesh((32,), ('dp'))
 a = jnp.arange(32)
 a = jax.device_put(a, jax.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')))
+b = jax.lax.all_gather(a, 'dp', axis=0, tiled=True),
 
+print(b)
+jax.debug.visualize_array_sharding(b)

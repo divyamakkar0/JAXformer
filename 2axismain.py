@@ -449,7 +449,7 @@ def main(config: config):
                     count["fsdp"], count["model"], count["tensor"], config.grad_step, 2
                 )
 
-            keys = jax.device_put(keys, jax.sharding.NamedSharding(mesh, key_spec))
+            keys = jax.device_put(keys, jax.sharding.NamedShardin(mesh, key_spec))
             x, y = train_dataset()
 
             grads, metrics = train_step(keys, state.params, x, y)
