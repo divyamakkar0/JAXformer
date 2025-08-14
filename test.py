@@ -16,9 +16,10 @@ if jax.process_index() == 0:
         )
 
 mesh = jax.make_mesh((32,), ('dp'))
+print(mesh)
 a = jnp.arange(32)
 a = jax.device_put(a, jax.NamedSharding(mesh, jax.sharding.PartitionSpec('dp')))
-b = jax.lax.all_gather(a, 'dp', axis=0, tiled=True),
+b = jax.lax.all_gather(a, axis_name='dp', axis=0, tiled=True)
 
 print(b)
 jax.debug.visualize_array_sharding(b)
