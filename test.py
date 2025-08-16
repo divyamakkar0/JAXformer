@@ -94,7 +94,6 @@ param_count = jax.tree.reduce(
 )
 
 def step(params, x, y, key, train=True):
-    @partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
     def loss_fn(params, x, y, key):
         logits, _ = model.apply({'params': params}, x, rngs={"dropout": key})
         log_probs = jax.nn.log_softmax(logits, axis=-1)
