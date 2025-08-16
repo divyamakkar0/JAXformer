@@ -3,7 +3,7 @@ import jax.numpy as jnp
 from functools import partial
 from jax.sharding import PartitionSpec as P
 import numpy as np
-from test2 import Transformer
+from test2 import ModelConfig, shardedModel
 from dataset import Dataset
 from utils import dataConfig
 import time
@@ -11,15 +11,17 @@ import time
 MODEL_DIM = 512
 VOCAB_SIZE = 100277
 BLOCKS = 2
-LAYERS_PER_BLOCK = 5
+LAYERS_PER_BLOCK = 2
 NUM_HEADS = 2
-DATA_PARALLEL = 32
+DATA_PARALLEL = 16
+LAYER_PARALLEL = 2
 SEQ_LEN = 1024
 DROPOUT_RATE = 0.1
-DATA_FACTOR = 20
+BATCH_SIZE = 20
+MICRO_BATCH_SIZE = 4
 LATENT_DIM = 64
 DHR = 64
-MODEL_DTYPE=jnp.bfloat16
+MODEL_DTYPE = jnp.bfloat16
 
 jax.distributed.initialize()
 
@@ -32,11 +34,15 @@ if jax.process_index() == 0:
             f"Coords: {d.coords}, Core: {d.core_on_chip}"
         )
 
-mesh = jax.make_mesh((DATA_PARALLEL,), ('dp',))
+assert devices.shape == (DATA_PARALLEL * LAYER_PARALLEL,), (
+    f"Expected {DATA_PARALLEL * LAYER_PARALLEL} devices, got {devices.shape[0]}"
+)
+
+mesh = jax.make_mesh((DATA_PARALLEL, LAYER_PARALLEL), ("dp", "pp"))
 
 data_partition = jax.sharding.NamedSharding(
     mesh,
-    P(None, 'dp', None, None, None),
+    P(None, None, "dp", None),
 )
 
 data_cfg = dataConfig(
@@ -44,10 +50,10 @@ data_cfg = dataConfig(
     process_path="./bucket_downloads/processShard",
     train_folder_name="train",
     val_folder_name="val",
-    train_batch_size=DATA_PARALLEL * DATA_FACTOR,
+    train_batch_size=DATA_PARALLEL * BATCH_SIZE,
     T=SEQ_LEN,
-    val_batch_size=DATA_PARALLEL * DATA_FACTOR,
-    micro_batch_size=1,
+    val_batch_size=DATA_PARALLEL * BATCH_SIZE,
+    micro_batch_size=MICRO_BATCH_SIZE,
 )
 
 train_dataset, val_dataset = Dataset.getDataset(
@@ -56,7 +62,7 @@ train_dataset, val_dataset = Dataset.getDataset(
     dp=DATA_PARALLEL,
 )
 
-model = Transformer(
+modelCfg = ModelConfig(
     model_dimension=MODEL_DIM,
     vocab_size=VOCAB_SIZE,
     n_head=NUM_HEADS,
@@ -69,33 +75,26 @@ model = Transformer(
     model_dtype=MODEL_DTYPE,
 )
 
-@jax.jit
-@partial(
-        jax.shard_map,
-        mesh=mesh,
-        in_specs=(P('dp')),
-        out_specs=P(),
-)
-def init_weights(x):
-    params = model.init(jax.random.PRNGKey(1), x, train=False)['params']
-    sharding = jax.NamedSharding(mesh, P())
-    params = jax.tree.map(
-        lambda x: jax.device_put(x, sharding),
-        params,
-    )
-    return params
+model = shardedModel(modelCfg)
 
-x_init = jnp.ones((32, 1, SEQ_LEN), dtype=jnp.int32)
-params = init_weights(x_init)
+print("creating sharded model ...")
+params = model.init_weights(jax.random.PRNGKey(0), mesh)
 param_count = jax.tree.reduce(
     lambda x, y: x + y.size,
     params,
     0,
 )
+print(f"Total parameters: {param_count:,}")
+
 
 def step(params, x, y, key, train=True):
     def loss_fn(params, x, y, key):
-        logits, _ = model.apply({'params': params}, x, rngs={"dropout": key})
+        logits, _ = model.pipe_step(
+            params,
+            x,
+            key=key,
+            train=train,
+        )
         log_probs = jax.nn.log_softmax(logits, axis=-1)
 
         M, B, T, V = logits.shape
@@ -104,38 +103,59 @@ def step(params, x, y, key, train=True):
 
         loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
         loss = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_probs, y)).mean()
-        loss = jax.lax.pmean(loss, axis_name='dp')
+        loss = jax.lax.pmean(loss, axis_name="pp")
 
         return loss
+
     if train:
         loss_fn = jax.value_and_grad(loss_fn)
-    x,y = x[0], y[0]
+    key = key.reshape(
+        2,
+    )
+
     val = loss_fn(params, x, y, key)
-    loss, grads = val if train else (val, None)
+    grads = None
+    if train:
+        loss, grads = val
+        grads = jax.tree.map(
+            lambda g: jax.lax.pmean(g, axis_name="dp"),
+            grads,
+        )
+    else:
+        loss = val
+    loss = jax.lax.pmean(loss, axis_name="dp")
     return loss, grads
+
+
+out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, modelCfg)
+data_spec = P("pp", "dp")
+key_spec = P("dp", "pp")
 
 train_step = jax.jit(
     jax.shard_map(
-        lambda params, x, y, key: step(params, x, y, key=key[0], train=True),
+        lambda params, x, y, key: step(params, x, y, key=key, train=True),
         mesh=mesh,
-        in_specs=(P(), P('dp'), P('dp'), P('dp')),
-        out_specs=P(),
-    ),
+        in_specs=(out_spec, data_spec, data_spec, key_spec),
+        out_specs=(P(), out_spec),
+        check_vma=False,
+    )
 )
+
 eval_step = jax.jit(
     jax.shard_map(
-        lambda params, x, y, key: step(params, x, y, key=key[0], train=False),
+        lambda params, x, y, key: step(params, x, y, key=key, train=False)[0],
         mesh=mesh,
-        in_specs=(P(), P('dp'), P('dp'), P('dp')),
+        in_specs=(out_spec, data_spec, data_spec, key_spec),
         out_specs=P(),
+        check_vma=False,
     ),
 )
 
 MAX_STEPS = 10
-total_tokens = DATA_FACTOR * DATA_PARALLEL * SEQ_LEN
+total_tokens = BATCH_SIZE * DATA_PARALLEL * SEQ_LEN
 lr = 4e-3
 
-jax.experimental.multihost_utils.sync_global_devices('sync')
+jax.experimental.multihost_utils.sync_global_devices("sync")
 if jax.process_index() == 0:
     print(f"Total parameters: {param_count:,}")
     print(f"Total steps: {MAX_STEPS}")
@@ -145,25 +165,26 @@ if jax.process_index() == 0:
 key = jax.random.PRNGKey(0)
 if jax.process_index() == 0:
     start = time.time()
+
 for i in range(MAX_STEPS):
     key, train_key, eval_key = jax.random.split(key, 3)
-    train_key = jax.random.split(train_key, DATA_PARALLEL)
-    train_key = jnp.asarray(train_key)
-    eval_key = jax.random.split(eval_key, DATA_PARALLEL)
-    eval_key = jnp.asarray(eval_key)
+    train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL)
+    train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
+    eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL)
+    eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
 
     x, y = train_dataset()
     loss, grads = train_step(params, x, y, train_key)
     eval_x, eval_y = val_dataset()
-    eval_loss, _ = eval_step(params, eval_x, eval_y, eval_key)
+    eval_loss = eval_step(params, eval_x, eval_y, eval_key)
+
     params = jax.tree.map(lambda p, g: p - lr * g, params, grads)
 
-
     loss, eval_loss = loss.item(), eval_loss.item()
-    jax.experimental.multihost_utils.sync_global_devices('sync')
+    jax.experimental.multihost_utils.sync_global_devices("sync")
     if jax.process_index() == 0:
         time_per_batch = time.time() - start
         tokens_per_second = 2 * total_tokens / time_per_batch
-        log_string = f"Step {i+1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
+        log_string = f"Step {i + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
         print(log_string)
         start = time.time()

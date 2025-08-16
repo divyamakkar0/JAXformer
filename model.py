@@ -12,7 +12,6 @@ from jaxtyping import Array, PyTree
 from functools import partial
 
 
-
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
@@ -900,7 +899,6 @@ class shardedModel:
         # logits = embedding_model.apply(
         #     {"params": embedding_params}, layer_out, out=True
         # )
-
 
         logits = jnp.einsum(
             "M B T D, D V -> M B T V",

@@ -13,6 +13,9 @@ from functools import partial
 
 from dataclasses import dataclass
 
+cache_type = Tuple[Optional[Array], Optional[Array]]
+
+
 @dataclass
 class ModelConfig:
     model_dimension: int
@@ -26,6 +29,7 @@ class ModelConfig:
     dropout_rate: float = 0.1
     model_dtype: jnp.dtype = jnp.bfloat16
 
+
 class Dense(nn.Module):
     features: int
     dtype: jnp.dtype = jnp.float32
@@ -33,6 +37,7 @@ class Dense(nn.Module):
     @nn.compact
     def __call__(self, x: Array) -> Array:
         return nn.Dense(features=self.features, dtype=self.dtype)(x)
+
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -47,13 +52,13 @@ class FeedForward(nn.Module):
         x = Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
         return x
 
+
 class RMSNorm(nn.Module):
     model_dtype: jnp.dtype = jnp.float32
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-
-        x_type =x.dtype
+        x_type = x.dtype
         x = x.astype(jnp.float32)
         rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
         x = x / jnp.sqrt(rms + 1e-6)
@@ -69,6 +74,7 @@ class RMSNorm(nn.Module):
         x = x * gamma + beta
 
         return x
+
 
 class Embedding(nn.Module):
     model_dimension: int
@@ -94,7 +100,6 @@ class Embedding(nn.Module):
             x = self.embedding.attend(x)
 
         return x
-
 
 
 class RoPE(nn.Module):
@@ -138,6 +143,7 @@ class RoPE(nn.Module):
 
         return x
 
+
 class MLA(nn.Module):
     model_dimension: int
     n_heads: int
@@ -156,12 +162,11 @@ class MLA(nn.Module):
         kRT_cache: Optional[Array] = None,
         train=True,
     ) -> Tuple[Array, Tuple[Array, Array]]:
-
         use_rope = self.dhR > 0
 
         B, T, C = x.shape
 
-        x = Dense(features = 2 * self.latent_dim, dtype=self.model_dtype)(x)
+        x = Dense(features=2 * self.latent_dim, dtype=self.model_dtype)(x)
         cKVt, cqt = jnp.split(x, 2, axis=-1)
 
         if use_rope:
@@ -188,7 +193,9 @@ class MLA(nn.Module):
                 kRT_cache = kRt
 
         k, v = jnp.split(
-            Dense(features=2 * self.model_dimension, dtype=self.model_dtype)(cKVt), 2, axis=-1
+            Dense(features=2 * self.model_dimension, dtype=self.model_dtype)(cKVt),
+            2,
+            axis=-1,
         )
         q = Dense(features=self.model_dimension, dtype=self.model_dtype)(cqt)
 
@@ -204,8 +211,6 @@ class MLA(nn.Module):
         q, k, v = jnp.split(qkv, 3, axis=0)
 
         if use_rope:
-
-
             q = jnp.concatenate([q, qRt], axis=-1)
             kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
 
@@ -220,7 +225,7 @@ class MLA(nn.Module):
 
             dk = q.shape[-1]
 
-            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (dk ** -0.5)
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (dk**-0.5)
             w = jnp.where(mask == 0, -jnp.inf, w)
             w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
             output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
@@ -237,13 +242,13 @@ class MLA(nn.Module):
             )
         output = scaledDotProd(q, k, v, mask)
 
-
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
         output = Dense(features=self.model_dimension, dtype=self.model_dtype)(output)
         output = nn.Dropout(rate=self.dropout)(output, deterministic=not train)
 
         return output, (cKV_cache, kRT_cache)
+
 
 class Layer(nn.Module):
     model_dimension: int
@@ -255,7 +260,9 @@ class Layer(nn.Module):
     model_dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
-    def __call__(self, x, cache, train=True):
+    def __call__(
+        self, x, cache: Optional[cache_type] = None, train=True
+    ) -> Tuple[Array, cache_type]:
         x_res = x
 
         x = RMSNorm(model_dtype=self.model_dtype)(x)
@@ -267,7 +274,7 @@ class Layer(nn.Module):
             dhR=self.dhR,
             model_dtype=self.model_dtype,
             dropout=self.dropout_rate,
-        )(x, cKV_cache=cache[0], kRT_cache=cache[1],train=train)
+        )(x, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
 
         x = x + x_res
         x_res = x
@@ -282,6 +289,7 @@ class Layer(nn.Module):
 
         return x, cache
 
+
 class Block(nn.Module):
     layers: int
     model_dimension: int
@@ -293,8 +301,9 @@ class Block(nn.Module):
     model_dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
-    def __call__(self, x, cache:Optional[Tuple[Array, Optional[Array]]]=None, train=True):
-
+    def __call__(
+        self, x, cache: Optional[cache_type] = None, train=True
+    ) -> Tuple[Array, cache_type]:
         cKV_cache = []
         kRT_cache = []
 
@@ -312,7 +321,7 @@ class Block(nn.Module):
                 latent_dim=self.latent_dim,
                 dhR=self.dhR if i < self.layers - 1 else 0,
                 dropout_rate=self.dropout_rate,
-                model_dtype=self.model_dtype
+                model_dtype=self.model_dtype,
             )(x, current_cache, train=train)
 
             ckV, kRT = cache_out
@@ -321,19 +330,13 @@ class Block(nn.Module):
             if kRT is not None:
                 kRT_cache.append(kRT)
 
-        if len(cKV_cache) > 0:
-            cKV_cache = jnp.stack(cKV_cache, axis=0)
-        else:
-            cKV_cache = None
-
-        if len(kRT_cache) > 0:
-            kRT_cache = jnp.stack(kRT_cache, axis=0)
-        else:
-            kRT_cache = None
+        cKV_cache = jnp.stack(cKV_cache, axis=0) if len(cKV_cache) > 0 else None
+        kRT_cache = jnp.stack(kRT_cache, axis=0) if len(kRT_cache) > 0 else None
 
         out_cache = (cKV_cache, kRT_cache)
 
         return x, out_cache
+
 
 class Transformer(nn.Module):
     model_dimension: int
@@ -348,8 +351,9 @@ class Transformer(nn.Module):
     model_dtype: jnp.dtype = jnp.bfloat16
 
     @nn.compact
-    def __call__(self, x, cache=None, train=True):
-
+    def __call__(
+        self, x, cache: Optional[cache_type] = None, train=True
+    ) -> Tuple[Array, cache_type]:
         *B, T = x.shape
         x = x.reshape(-1, T)
         embedding = Embedding(
@@ -368,7 +372,7 @@ class Transformer(nn.Module):
                 layer_cache = None
             else:
                 cKV = cache[0][i]
-                kRT = cache[1][i] if i < self.blocks - 1 else None
+                kRT = cache[1][i] if cache[1] is not None else None
                 layer_cache = (cKV, kRT)
 
             x, cache_out = Block(
@@ -379,7 +383,7 @@ class Transformer(nn.Module):
                 latent_dim=self.latent_dim,
                 dhR=self.dhR,
                 dropout_rate=self.dropout_rate,
-                model_dtype=self.model_dtype
+                model_dtype=self.model_dtype,
             )(x, layer_cache, train=train)
 
             if cache_out[0] is not None:
@@ -414,289 +418,276 @@ class Transformer(nn.Module):
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
             dropout_rate=cfg.dropout_rate,
-            model_dtype=cfg.model_dtype
+            model_dtype=cfg.model_dtype,
         )
 
-    #TODO: Implement generate method
+    # TODO: Implement generate method
     def generate(self):
         return NotImplementedError()
 
-# class shardedModel:
 
-#     def __init__(self, cfg: ModelConfig):
-#         self.embedding = Embedding(
-#             vocab_size=cfg.vocab_size,
-#             model_dimension=cfg.model_dimension,
-#             model_dtype=cfg.model_dtype
-#         )
+class shardedModel:
+    def __init__(self, cfg: ModelConfig):
+        self.embedding = Embedding(
+            vocab_size=cfg.vocab_size,
+            model_dimension=cfg.model_dimension,
+            model_dtype=cfg.model_dtype,
+        )
 
-#         self.block = Block(
-#             layers=cfg.layers_per_block,
-#             model_dimension=cfg.model_dimension,
-#             n_heads=cfg.n_head,
-#             T=cfg.T,
-#             latent_dim=cfg.latent_dim,
-#             dhR=cfg.dhR,
-#             dropout_rate=cfg.dropout_rate,
-#             model_dtype=cfg.model_dtype
-#         )
+        self.block = Block(
+            layers=cfg.layers_per_block,
+            model_dimension=cfg.model_dimension,
+            n_heads=cfg.n_head,
+            T=cfg.T,
+            latent_dim=cfg.latent_dim,
+            dhR=cfg.dhR,
+            dropout_rate=cfg.dropout_rate,
+            model_dtype=cfg.model_dtype,
+        )
 
-#         self.cfg = cfg
+        self.cfg = cfg
 
-#     def init_weights(self, key, mesh):
+    def init_weights(self, key, mesh):
+        out_spec = shardedModel.get_p_spec([self.embedding, self.block], mesh, self.cfg)
 
-#         out_spec = shardedModel.get_p_spec([self.embedding, self.block], mesh, self.cfg)
+        x_embed = jnp.ones((1, self.cfg.T), dtype=jnp.int32)
+        x_layer = jnp.ones((1, self.cfg.T, self.cfg.model_dimension), dtype=jnp.float32)
 
-#         x_embed = jnp.ones((1, self.cfg.T), dtype=jnp.int32)
-#         x_layer = jnp.ones((1, self.cfg.T, self.cfg.model_dimension), dtype=jnp.float32)
+        layer_devices = mesh.devices.shape[1]
 
-#         layer_devices = mesh.devices.shape[1]
+        assert self.cfg.blocks // layer_devices
+        layers_per_device = self.cfg.blocks // layer_devices
 
-#         assert self.cfg.blocks // layer_devices
-#         layers_per_device = self.cfg.blocks // layer_devices
+        key, embed_key = jax.random.split(key, 2)
+        key, *layer_keys = jax.random.split(key, layer_devices + 1)
+        layer_keys = jnp.array(layer_keys).reshape(layer_devices, 2)
 
-#         key, embed_key = jax.random.split(key, 2)
-#         key, *layer_keys = jax.random.split(key, layer_devices + 1)
-#         layer_keys = jnp.array(layer_keys).reshape(layer_devices, 2)
+        @jax.jit
+        @partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(P(None, None), P(None, None, None), P("pp")),
+            out_specs=out_spec,
+        )
+        def init_params(x_embed, x_layer, layer_key):
+            layer_key = layer_key.reshape(
+                2,
+            )
+            embedding_params = self.embedding.init(embed_key, x_embed, out=False)[
+                "params"
+            ]
+            layer_params = []
 
-#         @jax.jit
-#         @partial(
-#             jax.shard_map,
-#             mesh=mesh,
-#             in_specs=(P(None, None), P(None, None, None), P("model")),
-#             out_specs=(),
-#         )
-#         def init_params(x_embed, x_layer, layer_key):
-#             layer_key = layer_key[0, 0]
-#             embedding_params = self.embedding.init(embed_key, x_embed, out=False)[
-#                 "params"
-#             ]
-#             layer_params = []
+            for _ in range(layers_per_device):
+                layer_key, init_key = jax.random.split(layer_key)
+                current_params = self.block.init(init_key, x_layer, train=False)[
+                    "params"
+                ]
+                layer_params.append(current_params)
+            layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
 
-#             for _ in range(layers_per_device):
-#                 layer_key, init_key = jax.random.split(layer_key)
-#                 current_params = self.block.init(init_key, x_layer, train=False)["params"]
-#                 layer_params.append(current_params)
-#             layer_params = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_params)
+            return embedding_params, layer_params
 
-#             return embedding_params, layer_params
+        params = init_params(x_embed, x_layer, layer_keys)
+        params = jax.tree.map(
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
+            params,
+            out_spec,
+        )
 
+        return params
 
-#         params = init_params(x_embed, x_layer, layer_keys)
-#         params = jax.tree.map(
-#             lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
-#             params,
-#             out_spec,
-#         )
+    def pipe_step(self, params, x, key, train, cache=None):
+        embedding_params, layer_params = params
+        embeddings = self.embedding.apply({"params": embedding_params}, x, out=False)
 
-#         return params
+        layer_fn = lambda x, params, cache, key: self.block.apply(
+            {"params": params},
+            x,
+            cache=cache,
+            train=train,
+            rngs={"dropout": key} if train else None,
+        )
 
-#     def pipe_step(self, params, x, key, train, cache=None):
-#         embedding_params, layer_params = params
+        @partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
+        def fwd_fn(state_idx, x, params, cache, key):
+            def grad_fn(stop_grad):
+                return (
+                    lambda *args: jax.lax.stop_gradient(layer_fn(*args))
+                    if stop_grad
+                    else layer_fn(*args)
+                )
 
-#         embeddings = self.embedding.apply({"params": embedding_params}, x, out=False)
-#         layer_fn = lambda x, params, cache, key: self.block.apply(
-#             {"params": params},
-#             x,
-#             cache=cache,
-#             train=train,
-#             rngs=None if not train else {"dropout": key},
-#         )
+            fns = [
+                grad_fn(stop_grad=True),
+                grad_fn(stop_grad=False),
+            ]
 
-#         @partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
-#         def fwd_fn(x, params, cKV_cache, kRT_cache, key, state_idx):
-#             fns = [
-#                 lambda x, *args: jax.lax.stop_gradient(layer_fn(x, *args)),
-#                 lambda x, *args: layer_fn(x, *args),
-#             ]
+            return jax.lax.switch(
+                state_idx,
+                fns,
+                x,
+                params,
+                cache,
+                key,
+            )
 
-#             return jax.lax.switch(
-#                 state_idx,
-#                 fns,
-#                 x,
-#                 params,
-#                 cKV_cache,
-#                 kRT_cache,
-#                 key,
-#             )
+        layer_out, out_cache = self.pipeline(fwd_fn, layer_params, embeddings, cache, key)
 
-#         layer_out, (current_cache, load) = self.layer_fn(
-#             fwd_fn, embeddings, layer_params, key, cache=cache
-#         )
+        logits = self.embedding.apply({"params": embedding_params}, layer_out, out=True)
+        return logits, (out_cache, None)
 
-#         logits = self.embedding.apply(
-#             {"params": embedding_params}, layer_out, out=True
-#         )
+    def pipeline(
+        self,
+        fn,
+        stage_params: PyTree,
+        inputs: Array,
+        cache: Optional[Tuple[Array, Optional[Array]]],
+        key: jax.random.PRNGKey,
+    ):
+        stage = jax.lax.axis_index("pp")
+        n_devices = jax.lax.axis_size("pp")
+        layers_per_device = stage_params["Layer_0"]["MLA_0"]["Dense_0"]["Dense_0"][
+            "kernel"
+        ].shape[0]
+        microbatch_per_device = inputs.shape[0]
+        microbatches = n_devices * microbatch_per_device
+        layers = layers_per_device * n_devices
+        outputs = jnp.zeros_like(inputs) * jnp.nan
+        state = (
+            jnp.zeros(
+                (
+                    layers_per_device,
+                    *inputs.shape[1:],
+                )
+            )
+            * jnp.nan
+        )
 
-#         return logits, (current_cache, load)
+        state_idx = jnp.zeros((layers_per_device,), dtype=jnp.int32)
+        perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
 
-#     def layer_fn(self, fwd_fn, x, params, key, cache=None):
-#         idx = jax.lax.axis_index("model")
-#         n_devices = jax.lax.axis_size("model")
-#         microbatch_per_device, B, T, C = x.shape
-#         microbatch = n_devices * microbatch_per_device
-#         layers_per_device = params["Block_0"]["MLA_0"]["Dense_0"]["Dense_0"][
-#             "kernel"
-#         ].shape[0]
-#         layers = layers_per_device * n_devices
-#         perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
+        ckV_cache = []
+        kRT_cache = []
+        for i in range(microbatches + layers - 1):
+            batch_idx = i % microbatch_per_device
+            layer_idx = (i - layers + 1) % microbatch_per_device
 
-#         outputs = jnp.zeros_like(x) * jnp.nan
-#         state = jnp.zeros((layers_per_device, B, T, C), dtype=x.dtype) * jnp.nan
+            state = state.at[0].set(jnp.where(stage == 0, inputs[batch_idx], state[0]))
+            state_idx = state_idx.at[0].set(jnp.where(stage == 0, 1, state_idx[0]))
 
-#         state_idx = jnp.zeros((layers_per_device,), dtype=jnp.int32)
+            key, *layer_keys = jax.random.split(key, layers_per_device + 1)
+            layer_keys = jnp.array(layer_keys)
 
-#         out_load = None
-#         out_cache = []
+            current_cache = None
+            if cache is not None:
+                current_cache = [cache[0][i], None]
+                if cache[1] is not None:
+                    current_cache[1] = cache[1][i]
 
-#         for i in range(layers + microbatch - 1):
-#             batch_idx = i % microbatch_per_device
-#             layer_idx = (i + 1 - layers) % microbatch_per_device
+            state, out_cache  = jax.vmap(fn)(
+                state_idx, state, stage_params, current_cache, layer_keys
+            )
 
-#             state = state.at[0].set(jnp.where(idx == 0, x[batch_idx], state[0]))
-#             state_idx = state_idx.at[0].set(jnp.where(idx == 0, 1, state_idx[0]))
+            if out_cache[0] is not None:
+                ckV_cache.append(out_cache[0])
+            if out_cache[1] is not None:
+                kRT_cache.append(out_cache[1])
 
-#             current_cache = cache[i] if cache is not None else None
-#             key, *dropout_key = jax.random.split(key, layers_per_device + 1)
-#             dropout_key = jnp.array(dropout_key)
+            outputs = outputs.at[layer_idx].set(
+                jnp.where(stage == n_devices - 1, state[-1], outputs[layer_idx])
+            )
 
-#             state, (layer_cache, load) = jax.vmap(fwd_fn)(
-#                 state,
-#                 params,
-#                 current_cache,
-#                 dropout_key,
-#                 state_idx,
-#             )
+            state = jnp.concat(
+                [jax.lax.ppermute(state[-1], "pp", perm)[None, ...], state[:-1]], axis=0
+            )
+            state_idx = jnp.concat(
+                [
+                    jax.lax.ppermute(state_idx[-1], "pp", perm)[None, ...],
+                    state_idx[:-1],
+                ],
+                axis=0,
+            )
+            if batch_idx == microbatch_per_device - 1:
+                inputs = jax.lax.ppermute(inputs, axis_name="pp", perm=perm)
 
-#             if layer_cache is not None:
-#                 out_cache.append(layer_cache)
-#             if load is not None:
-#                 load = jax.tree.map(
-#                     lambda x: jnp.nan_to_num(x).sum(axis=0),
-#                     load,
-#                 )
-#                 if out_load is None:
-#                     out_load = load
-#                 else:
-#                     out_load = jax.tree.map(lambda x, y: x + y, out_load, load)
+            if layer_idx == microbatch_per_device - 1:
+                outputs = jax.lax.ppermute(outputs, axis_name="pp", perm=perm)
 
-#             outputs = outputs.at[layer_idx].set(
-#                 jnp.where(
-#                     idx == (n_devices - 1),
-#                     state[-1],
-#                     outputs[layer_idx],
-#                 )
-#             )
+        outputs = jax.lax.ppermute(outputs, "pp", perm)
 
-#             state_perm = jax.lax.ppermute(
-#                 state[-1],
-#                 axis_name="model",
-#                 perm=perm,
-#             )
+        if len(ckV_cache) > 0:
+            ckV_cache = jnp.stack(ckV_cache, axis=0)
+        else:
+            ckV_cache = None
 
-#             state = jnp.roll(state, shift=1, axis=0).at[0].set(state_perm)
+        if len(kRT_cache) > 0:
+            kRT_cache = jnp.stack(kRT_cache, axis=0)
+        else:
+            kRT_cache = None
+        out_cache = (ckV_cache, kRT_cache)
 
-#             state_idx_perm = jax.lax.ppermute(
-#                 state_idx[-1],
-#                 axis_name="model",
-#                 perm=perm,
-#             )
+        return outputs, out_cache
 
-#             state_idx = jnp.roll(state_idx, shift=1, axis=0).at[0].set(state_idx_perm)
+    @staticmethod
+    def get_p_spec(
+        model: Tuple[Embedding, Block], mesh: jax.sharding.Mesh, config: ModelConfig
+    ) -> Tuple[jax.sharding.NamedSharding, jax.sharding.NamedSharding]:
+        T = config.T
+        n_blocks = mesh.devices.shape[1]
+        n_layers = config.blocks
 
-#             if batch_idx == microbatch_per_device - 1:
-#                 x = jax.lax.ppermute(
-#                     x,
-#                     axis_name="model",
-#                     perm=perm,
-#                 )
+        embed, layer = model
 
-#             if layer_idx == microbatch_per_device - 1:
-#                 outputs = jax.lax.ppermute(
-#                     outputs,
-#                     axis_name="model",
-#                     perm=perm,
-#                 )
+        x_embed = jnp.ones((1, T), dtype=jnp.int32)
+        x_layer = jnp.ones((1, T, embed.model_dimension), dtype=jnp.float32)
+        key = jax.random.PRNGKey(0)
 
-#         if len(cache) == 0:
-#             cache = None
-#         else:
+        @partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(P(None, None), P(None, None, None)),
+            out_specs=(P("pp")),
+        )
+        def get_var_spec_shard(x_embed, x_layer):
+            embed_shape = embed.init(key, x_embed)["params"]
+            layer_shape = []
+            for _ in range(n_layers // n_blocks):
+                layer_shape.append(layer.init(key, x_layer, train=False)["params"])
+            layer_shape = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_shape)
 
+            return embed_shape, layer_shape
 
-#         if out_load is not None:
-#             out_load = jax.tree.map(
-#                 lambda x: x / microbatch,
-#                 out_load,
-#             )
+        eval_shape = jax.eval_shape(
+            get_var_spec_shard,
+            x_embed,
+            x_layer,
+        )
 
-#         outputs = jax.lax.ppermute(
-#             outputs,
-#             axis_name="model",
-#             perm=perm,
-#         )
+        join_fn = lambda path: " ".join(i.key for i in path).lower()
 
-#         return outputs, (out_cache, out_load)
+        def layer_partition(key: Tuple[str, ...], x: Array) -> P:
+            path = join_fn(key)
+            if "moe" in path and "feedforward" in path:
+                if x.ndim == 4:
+                    return P("pp", None, None, None)
+                if x.ndim == 3:
+                    return P("pp", None, None)
+            if "gamma" in path or "beta" in path:
+                return P("pp", None, None, None)
 
-#     @staticmethod
-#     def get_p_spec(model: Tuple[Embedding, Block], mesh, config: ModelConfig) -> Tuple[jax.sharding.NamedSharding, jax.sharding.NamedSharding]:
-#         T = config.T
-#         n_blocks = mesh.devices.shape[1]
-#         n_layers = config.blocks
+            if x.ndim == 3:
+                return P("pp", None, None)
+            return P("pp")
 
-#         embed, layer = model
+        embed_p_spec = jax.tree.map(
+            lambda _: P(),
+            eval_shape[0],
+        )
 
-#         x_embed = jnp.ones((1, T), dtype=jnp.int32)
-#         x_layer = jnp.ones((1, T, embed.model_dimension), dtype=jnp.float32)
-#         key = jax.random.PRNGKey(0)
+        layer_p_spec = jax.tree.map_with_path(
+            layer_partition,
+            eval_shape[1],
+        )
 
-#         @partial(
-#             jax.shard_map,
-#             mesh=mesh,
-#             in_specs=(P(None, None), P(None, None, None)),
-#             out_specs=(P("model")),
-#         )
-#         def get_var_spec_shard(x_embed, x_layer):
-#             embed_shape = embed.init(key, x_embed)["params"]
-#             layer_shape = []
-#             for _ in range(n_layers // n_blocks):
-#                 layer_shape.append(layer.init(key, x_layer, train=False)["params"])
-#             layer_shape = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_shape)
-
-#             return embed_shape, layer_shape
-
-#         eval_shape = jax.eval_shape(
-#             get_var_spec_shard,
-#             x_embed,
-#             x_layer,
-#         )
-
-#         join_fn = lambda path: " ".join(i.key for i in path).lower()
-
-#         def embedding_partition(*_) -> P:
-#             return P()
-
-#         def layer_partition(key: Tuple[str, ...], x: Array) -> P:
-#             path = join_fn(key)
-#             if "moe" in path and "feedforward" in path:
-#                 if x.ndim == 4:
-#                     return P("model", None, None, None)
-#                 if x.ndim == 3:
-#                     return P("model", None, None)
-#             if "gamma" in path or "beta" in path:
-#                 return P("model", None, None, None)
-
-#             if x.ndim == 3:
-#                 return P("model", None, None)
-#             return P("model")
-
-#         embed_p_spec = jax.tree.map_with_path(
-#             embedding_partition,
-#             eval_shape[0],
-#         )
-
-#         layer_p_spec = jax.tree.map_with_path(
-#             layer_partition,
-#             eval_shape[1],
-#         )
-
-#         return embed_p_spec, layer_p_spec
+        return embed_p_spec, layer_p_spec

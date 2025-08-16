@@ -27,7 +27,9 @@ class Dataset:
         id: str,
         partition: Optional[NamedSharding] = None,
     ):
-        assert (batch_size % microbatch) == 0, "microbatch should divide batch size"
+        assert ((batch_size // dp) % microbatch) == 0, (
+            "microbatch should divide batch size per data axis"
+        )
         assert (microbatch % pp) == 0, "pp should divide microbatch size"
 
         self.T = T
@@ -112,16 +114,14 @@ class Dataset:
                 : max_batches * self.batch_size * self.T
             ].reshape(
                 max_batches,
-                self.dp,
                 self.microbatch,
-                self.batch_size // (self.dp * self.microbatch),
+                self.batch_size // self.microbatch,
                 self.T,
             )
             self.labels = self.labels[: max_batches * self.batch_size * self.T].reshape(
                 max_batches,
-                self.dp,
                 self.microbatch,
-                self.batch_size // (self.dp * self.microbatch),
+                self.batch_size // self.microbatch,
                 self.T,
             )
 

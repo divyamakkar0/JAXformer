@@ -43,6 +43,7 @@ from jaxtyping import PyTree
 from einops import rearrange
 import numpy as np
 
+
 class KeyState:
     def __init__(self, seed: int):
         self.key = jax.random.PRNGKey(seed)
@@ -67,7 +68,6 @@ class TrainState:
         self.opt_state = jax.tree.map(shard_opt_leaf, opt_state)
 
     def apply_gradients(self, grads):
-
         updates, self.opt_state = self.tx.update(grads, self.opt_state, self.params)
         self.params = optax.apply_updates(self.params, updates)
 
@@ -88,9 +88,11 @@ class TrainState:
         param_count = sum(x.size for x in jax.tree.leaves(self.params))
         return param_count
 
+
 def log(msg: str):
     if jax.process_index() == 0:
         print(msg)
+
 
 def setup_devices(cfg: config):
     device_cfg = cfg.device_config
@@ -125,6 +127,7 @@ def setup_devices(cfg: config):
     log(f"Mesh: {mesh}")
 
     return mesh, count
+
 
 def loss(model, cfg: config, params: PyTree, key: jax.random.PRNGKey, x, y, train):
     M, B, T = x.shape
@@ -394,18 +397,18 @@ def main(config: config):
     data_spec = P("fsdp", "model", None, "tensor")
     train_step = jax.jit(
         jax.shard_map(
-                lambda key, params, x, y: step(
-                    loss_fn, config.grad_step, params, key, x, y, train=True
-                ),
-                mesh=mesh,
-                in_specs=(
-                    key_spec,
-                    model_spec,
-                    data_spec,
-                    data_spec,
-                ),
-                out_specs=(model_spec, P()),
-            )
+            lambda key, params, x, y: step(
+                loss_fn, config.grad_step, params, key, x, y, train=True
+            ),
+            mesh=mesh,
+            in_specs=(
+                key_spec,
+                model_spec,
+                data_spec,
+                data_spec,
+            ),
+            out_specs=(model_spec, P()),
+        )
     )
 
     eval_step = jax.jit(
@@ -454,7 +457,6 @@ def main(config: config):
         print(grads)
         log("syncing 2")
         jax.experimental.multihost_utils.sync_global_devices("train_step")
-
 
         state = state.apply_gradients(grads=grads)
         train_loss += metrics["loss"]
@@ -576,6 +578,7 @@ def main(config: config):
 
         wandb.log({"inference_tokens": table})
         wandb.finish()
+
 
 if __name__ == "__main__":
     jax.distributed.initialize()
