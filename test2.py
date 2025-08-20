@@ -709,7 +709,7 @@ class shardedModel:
         model = shardedModel(cfg)
         out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, cfg)
         params = jax.tree.map(
-            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
+            lambda x, y: jax.device_put(jax.device_get(x), jax.sharding.NamedSharding(mesh, y)),
             params,
             out_spec,
         )
