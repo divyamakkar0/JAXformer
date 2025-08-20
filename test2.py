@@ -723,7 +723,6 @@ class shardedModel:
 
         prompt_length = out.shape[0]
         generation_length = min(max_tokens, cfg.T - prompt_length)
-        #TODO: add -1 indexing to the pipe step
 
         @jax.jit
         def sample(params, out, cache, sample_key):
@@ -773,6 +772,7 @@ class shardedModel:
                 print(f"Token {_ + 1} generated \t {1/token_time:.4f} tk/s")
             return out[None, None, ...]
 
+        key = jax.random.fold_in(key, jax.process_index())
         sample_key = jnp.array(jax.random.split(key, B)).reshape(
             n_devices, B // n_devices, 2
         )
