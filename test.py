@@ -214,12 +214,11 @@ for i in range(MAX_STEPS):
     eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
 
     x, y = train_dataset()
-    loss, grads = train_step(params, x, y, train_key)
+    params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
     eval_x, eval_y = val_dataset()
     eval_loss = eval_step(params, eval_x, eval_y, eval_key)
 
-    updates, opt_state = tx.update(grads, opt_state, params)
-    params = optax.apply_updates(params, updates)
+
 
     loss, eval_loss = loss.item(), eval_loss.item()
     jax.experimental.multihost_utils.sync_global_devices("sync")
