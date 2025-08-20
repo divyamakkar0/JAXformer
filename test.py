@@ -62,33 +62,18 @@ train_dataset, val_dataset = Dataset.getDataset(
     dp=DATA_PARALLEL,
 )
 
-# modelCfg = ModelConfig(
-#     model_dimension=MODEL_DIM,
-#     vocab_size=VOCAB_SIZE,
-#     n_head=NUM_HEADS,
-#     blocks=BLOCKS,
-#     layers_per_block=LAYERS_PER_BLOCK,
-#     T=SEQ_LEN,
-#     latent_dim=LATENT_DIM,
-#     dhR=DHR,
-#     dropout_rate=DROPOUT_RATE,
-#     model_dtype=MODEL_DTYPE,
-# )
-
 modelCfg = ModelConfig(
-    model_dimension=128,
-    vocab_size=100277,
-    n_head=8,
-    blocks=4,
-    layers_per_block=2,
-    T=128,
-    latent_dim=64,
-    dhR=32,
-    dropout_rate=0.2,
-    model_dtype=jnp.bfloat16,
+    model_dimension=MODEL_DIM,
+    vocab_size=VOCAB_SIZE,
+    n_head=NUM_HEADS,
+    blocks=BLOCKS,
+    layers_per_block=LAYERS_PER_BLOCK,
+    T=SEQ_LEN,
+    latent_dim=LATENT_DIM,
+    dhR=DHR,
+    dropout_rate=DROPOUT_RATE,
+    model_dtype=MODEL_DTYPE,
 )
-
-
 
 model = shardedModel(modelCfg)
 
@@ -182,28 +167,28 @@ key, sample_key = jax.random.split(key, 2)
 if jax.process_index() == 0:
     start = time.time()
 
-# for i in range(MAX_STEPS):
-#     key, train_key, eval_key = jax.random.split(key, 3)
-#     train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL)
-#     train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
-#     eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL)
-#     eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
+for i in range(MAX_STEPS):
+    key, train_key, eval_key = jax.random.split(key, 3)
+    train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL)
+    train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
+    eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL)
+    eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
 
-#     x, y = train_dataset()
-#     loss, grads = train_step(params, x, y, train_key)
-#     eval_x, eval_y = val_dataset()
-#     eval_loss = eval_step(params, eval_x, eval_y, eval_key)
+    x, y = train_dataset()
+    loss, grads = train_step(params, x, y, train_key)
+    eval_x, eval_y = val_dataset()
+    eval_loss = eval_step(params, eval_x, eval_y, eval_key)
 
-#     params = jax.tree.map(lambda p, g: p - lr * g, params, grads)
+    params = jax.tree.map(lambda p, g: p - lr * g, params, grads)
 
-#     loss, eval_loss = loss.item(), eval_loss.item()
-#     jax.experimental.multihost_utils.sync_global_devices("sync")
-#     if jax.process_index() == 0:
-#         time_per_batch = time.time() - start
-#         tokens_per_second = 2 * total_tokens / time_per_batch
-#         log_string = f"Step {i + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
-#         print(log_string)
-#         start = time.time()
+    loss, eval_loss = loss.item(), eval_loss.item()
+    jax.experimental.multihost_utils.sync_global_devices("sync")
+    if jax.process_index() == 0:
+        time_per_batch = time.time() - start
+        tokens_per_second = 2 * total_tokens / time_per_batch
+        log_string = f"Step {i + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
+        print(log_string)
+        start = time.time()
 
 outputs = model.generate(
     params,

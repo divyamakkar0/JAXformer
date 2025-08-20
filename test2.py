@@ -682,7 +682,6 @@ class shardedModel:
 
         return outputs, out_cache
 
-    # TODO: Implement generate method
     def generate(
         self,
         params: PyTree,
@@ -721,7 +720,7 @@ class shardedModel:
         )
         out = jnp.repeat(out[None, :], B, axis=0).reshape(n_devices, B // n_devices, -1)
 
-        prompt_length = out.shape[0]
+        prompt_length = out.shape[-1]
         generation_length = min(max_tokens, cfg.T - prompt_length)
 
         @jax.jit
@@ -754,7 +753,7 @@ class shardedModel:
                 P(),
                 P("dp", "pp"),
             ),
-            out_specs=P("dp", "pp"),
+            out_specs=P("pp", "dp"),
         )
         def generate_shard(params, out, key):
             cache = None
