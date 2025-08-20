@@ -158,7 +158,7 @@ def step(params, x, y, key, train=True):
 
 out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, modelCfg)
 opt_spec = jax.tree.map(
-    lambda x: x.sharding,
+    lambda x: x.sharding.spec,
     opt_state
 )
 data_spec = P("pp", "dp")
