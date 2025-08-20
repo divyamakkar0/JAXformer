@@ -684,6 +684,7 @@ class shardedModel:
 
     # TODO: Implement generate method
     def generate(
+        self,
         params: PyTree,
         cfg: modelConfig,
         key: jax.random.key,
