@@ -206,8 +206,8 @@ if jax.process_index() == 0:
 #         start = time.time()
 
 outputs = model.generate(
-    modelCfg,
     params,
+    modelCfg,
     key=sample_key,
     x="hello world",
     B=1,
