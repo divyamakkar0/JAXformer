@@ -699,11 +699,12 @@ class shardedModel:
     ) -> list[str]:
 
         assert B % n_devices == 0, "Batch size must be divisible by number of devices"
+        assert n_devices <= jax.local_device_count(), "Number of devices exceeds available devices"
 
         mesh = jax.make_mesh(
             (1, n_devices),
             axis_names=("dp", "pp"),
-            devices=np.array(jax.devices())[:n_devices],
+            devices=np.array(jax.local_devices())[:n_devices],
         )
 
         model = shardedModel(cfg)
@@ -779,8 +780,10 @@ class shardedModel:
 
         tokens = jax.device_get(out)
         tokens = tokens.reshape(-1, tokens.shape[-1])
+        tokens = jax.experimental.multihost_utils.process_allgather(tokens, tiled=True)
 
         outputs = [enc.decode(x) for x in tokens]
+
         return outputs
 
     @staticmethod
