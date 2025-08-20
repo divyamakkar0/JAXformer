@@ -733,6 +733,7 @@ class shardedModel:
 
             logits = logits[:, :, -1, :]
             M, B_sample, _ = logits.shape
+            logits = logits.reshape(M * B_sample, -1)
             logits, idx = jax.lax.top_k(logits, k=k)
             logits /= temperature
 
