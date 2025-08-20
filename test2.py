@@ -9,9 +9,10 @@ from utils import config, modelConfig
 import numpy as np
 from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
-from functools import partial
+from functools import cache, partial
 
 from dataclasses import dataclass
+import time
 
 cache_type = Tuple[Optional[Array], Optional[Array]]
 
@@ -192,23 +193,14 @@ class MLA(nn.Module):
                     kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
                 kRT_cache = kRt
 
-        k, v = jnp.split(
-            Dense(features=2 * self.model_dimension, dtype=self.model_dtype)(cKVt),
-            2,
-            axis=-1,
-        )
+        kv = Dense(
+            features=2 * self.model_dimension, dtype=self.model_dtype
+        )(cKVt)
+        kv = rearrange(kv, "B T (nh d) -> B nh T d", nh=self.n_heads)
+        k, v = jnp.split(kv, 2, axis=-1)
+
         q = Dense(features=self.model_dimension, dtype=self.model_dtype)(cqt)
-
-        qkv = jnp.concat([q, k, v], axis=0)
-        qkv = rearrange(
-            qkv,
-            "B T (nh dk) -> B nh T dk",
-            B=B * 3,
-            nh=self.n_heads,
-            dk=C // self.n_heads,
-        )
-
-        q, k, v = jnp.split(qkv, 3, axis=0)
+        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads)
 
         if use_rope:
             q = jnp.concatenate([q, qRt], axis=-1)
@@ -354,8 +346,12 @@ class Transformer(nn.Module):
     def __call__(
         self, x, cache: Optional[cache_type] = None, train=True
     ) -> Tuple[Array, cache_type]:
+        if cache is not None:
+            x = x[..., :1]
+
         *B, T = x.shape
         x = x.reshape(-1, T)
+
         embedding = Embedding(
             vocab_size=self.vocab_size,
             model_dimension=self.model_dimension,
@@ -421,9 +417,60 @@ class Transformer(nn.Module):
             model_dtype=cfg.model_dtype,
         )
 
-    # TODO: Implement generate method
-    def generate(self):
-        return NotImplementedError()
+    def generate(
+        self,
+        params: PyTree,
+        key: jax.random.key,
+        x: str = "",
+        *,
+        B: int = 1,
+        k: int = 10000,
+        temperature: int = 1,
+        max_tokens: int = 100,
+        use_cache=True,
+    ) -> List[str]:
+        enc = tiktoken.get_encoding("cl100k_base")
+        out = jnp.array(
+            [enc._special_tokens["<|endoftext|>"]] if x == "" else enc.encode(x),
+            dtype=jnp.int32,
+        )
+
+        prompt_length = out.shape[0]
+        generation_length = min(max_tokens, self.T - prompt_length)
+        out = jnp.repeat(out[None, :], B, axis=0)
+        cache = None
+
+        @jax.jit
+        def sample(key, params, inp, cache):
+            logits, cache = self.apply(
+                {"params": params}, inp, cache=cache, train=False
+            )
+            logits = logits[:, -1, :]
+            logits, idx = jax.lax.top_k(logits, k=k)
+            logits /= temperature
+
+            out_next_idx = jax.random.categorical(key, logits, axis=-1, shape=(B,))
+            out_next = idx[jnp.arange(B, dtype=jnp.int32), out_next_idx][:, None]
+
+            return out_next, (cache, logits)
+
+        for _ in range(generation_length):
+            start_time = time.time()
+            if not use_cache:
+                cache = None
+            key, sample_key = jax.random.split(key)
+            out_next, (cache, _logits) = sample(
+                sample_key, params, out, cache
+            )
+            out = jnp.concatenate([out, out_next], axis=-1)
+            end_time = time.time()
+            token_time = end_time - start_time
+            print(f"Token {_ + 1} generated \t {1/token_time:.4f} tk/s")
+
+        tokens = jax.device_get(out)
+        outputs = list(map(lambda x: enc.decode(x), tokens))
+
+        return outputs
 
 
 class shardedModel:
@@ -499,6 +546,10 @@ class shardedModel:
 
     def pipe_step(self, params, x, key, train, cache=None):
         embedding_params, layer_params = params
+
+        if cache is not None:
+            x = x[..., :1]
+
         embeddings = self.embedding.apply({"params": embedding_params}, x, out=False)
 
         layer_fn = lambda x, params, cache, key: self.block.apply(
@@ -532,7 +583,9 @@ class shardedModel:
                 key,
             )
 
-        layer_out, out_cache = self.pipeline(fwd_fn, layer_params, embeddings, cache, key)
+        layer_out, out_cache = self.pipeline(
+            fwd_fn, layer_params, embeddings, cache, key
+        )
 
         logits = self.embedding.apply({"params": embedding_params}, layer_out, out=True)
         return logits, (out_cache, None)
@@ -585,7 +638,7 @@ class shardedModel:
                 if cache[1] is not None:
                     current_cache[1] = cache[1][i]
 
-            state, out_cache  = jax.vmap(fn)(
+            state, out_cache = jax.vmap(fn)(
                 state_idx, state, stage_params, current_cache, layer_keys
             )
 
@@ -628,6 +681,102 @@ class shardedModel:
         out_cache = (ckV_cache, kRT_cache)
 
         return outputs, out_cache
+
+    # TODO: Implement generate method
+    def generate(
+        params: PyTree,
+        cfg: modelConfig,
+        key: jax.random.key,
+        x: str = "",
+        *,
+        B: int = 1,
+        k: int = 10000,
+        temperature: int = 1,
+        max_tokens: int = 10,
+        n_devices: int = 1,
+        use_cache=True,
+    ) -> list[str]:
+
+        assert B % n_devices == 0, "Batch size must be divisible by number of devices"
+
+        mesh = jax.make_mesh(
+            (1, n_devices),
+            axis_names=("dp", "pp"),
+            devices=np.array(jax.devices())[:n_devices],
+        )
+
+        model = shardedModel(cfg)
+        out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, cfg)
+        params = jax.tree.map(
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
+            params,
+            out_spec,
+        )
+        enc = tiktoken.get_encoding("cl100k_base")
+        out = jnp.array(
+            [enc._special_tokens["<|endoftext|>"]] if x == "" else enc.encode(x),
+            dtype=jnp.int32,
+        )
+        out = jnp.repeat(out[None, :], B, axis=0).reshape(n_devices, B // n_devices, -1)
+
+        prompt_length = out.shape[0]
+        generation_length = min(max_tokens, cfg.T - prompt_length)
+        #TODO: add -1 indexing to the pipe step
+
+        @jax.jit
+        def sample(sample_key, params, out, cache):
+            sample_key, pipe_key = jax.random.split(sample_key, 2)
+            logits, (cache, _) = shardedModel.pipe_step(
+                model, params, out, pipe_key, train=False, cache=cache
+            )
+
+            logits = logits[:, :, -1, :]
+            M, B_sample, _ = logits.shape
+            logits, idx = jax.lax.top_k(logits, k=k)
+            logits /= temperature
+
+            sample_prob = lambda key, logits, idx: idx[
+                jax.random.categorical(key, logits)
+            ]
+            sample_key = jnp.array(jax.random.split(sample_key, logits.shape[0]))
+            out_next = jax.vmap(sample_prob)(sample_key, logits, idx)
+            out_next = out_next.reshape(M, B_sample, 1)
+
+            return out_next, (cache, logits)
+
+        @partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(
+                out_spec,
+                P(),
+                P("dp", "pp"),
+            ),
+            out_specs=P("dp", "pp"),
+        )
+        def generate_shard(out, params, key):
+            cache = None
+            key = key.reshape(2,)
+            for _ in range(generation_length):
+                if not use_cache:
+                    cache = None
+                key, sample_key = jax.random.split(key)
+                out_next, (cache, _logits) = sample(sample_key, params, out, cache)
+
+                out = jnp.concatenate([out, out_next], axis=-1)
+
+            return out[None, None, ...]
+
+        sample_key = jnp.array(jax.random.split(key, B)).reshape(
+            n_devices, B // n_devices, 2
+        )
+        out = generate_shard(out, params, sample_key)
+
+        tokens = jax.device_get(out)
+        tokens = tokens.reshape(-1, tokens.shape[-1])
+
+        outputs = [enc.decode(x) for x in tokens]
+        return outputs
 
     @staticmethod
     def get_p_spec(
@@ -691,3 +840,36 @@ class shardedModel:
         )
 
         return embed_p_spec, layer_p_spec
+
+
+if __name__ == '__main__':
+
+    jax.distributed.initialize()
+    modelCfg = ModelConfig(
+        model_dimension=128,
+        vocab_size=100277,
+        n_head=8,
+        blocks=4,
+        layers_per_block=2,
+        T=128,
+        latent_dim=64,
+        dhR=32,
+        dropout_rate=0.2,
+        model_dtype=jnp.bfloat16,
+    )
+
+    model = Transformer.get_model(modelCfg)
+    params = model.init(jax.random.PRNGKey(0), jnp.ones((1, modelCfg.T), dtype=jnp.int32))['params']
+
+    out = model.generate(
+        params=params,
+        key=jax.random.PRNGKey(0),
+        x="Hello, world!",
+        B=1,
+        k=10000,
+        temperature=1,
+        max_tokens=50,
+        use_cache=False,
+    )
+
+    print(out)
