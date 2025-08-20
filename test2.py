@@ -725,7 +725,7 @@ class shardedModel:
         #TODO: add -1 indexing to the pipe step
 
         @jax.jit
-        def sample(sample_key, params, out, cache):
+        def sample(params, out, cache, sample_key):
             sample_key, pipe_key = jax.random.split(sample_key, 2)
             logits, (cache, _) = shardedModel.pipe_step(
                 model, params, out, pipe_key, train=False, cache=cache
@@ -762,7 +762,7 @@ class shardedModel:
                 if not use_cache:
                     cache = None
                 key, sample_key = jax.random.split(key)
-                out_next, (cache, _logits) = sample(sample_key, params, out, cache)
+                out_next, (cache, _logits) = sample(params, out, cache, sample_key)
 
                 out = jnp.concatenate([out, out_next], axis=-1)
 
@@ -771,7 +771,7 @@ class shardedModel:
         sample_key = jnp.array(jax.random.split(key, B)).reshape(
             n_devices, B // n_devices, 2
         )
-        out = generate_shard(out, params, sample_key)
+        out = generate_shard(params, out, sample_key)
 
         tokens = jax.device_get(out)
         tokens = tokens.reshape(-1, tokens.shape[-1])
