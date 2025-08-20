@@ -755,7 +755,7 @@ class shardedModel:
             ),
             out_specs=P("dp", "pp"),
         )
-        def generate_shard(out, params, key):
+        def generate_shard(params, out, key):
             cache = None
             key = key.reshape(2,)
             for _ in range(generation_length):
