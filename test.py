@@ -163,6 +163,7 @@ if jax.process_index() == 0:
     print(f"Learning rate: {lr}")
 
 key = jax.random.PRNGKey(0)
+key, sample_key = jax.random.split(key, 2)
 if jax.process_index() == 0:
     start = time.time()
 
@@ -188,3 +189,20 @@ for i in range(MAX_STEPS):
         log_string = f"Step {i + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
         print(log_string)
         start = time.time()
+
+outputs = model.generate(
+    modelCfg,
+    params,
+    key=sample_key,
+    x="hello world",
+    B=1,
+    k=10000,
+    temperature=1.0,
+    n_devices=1,
+    use_cache=True,
+)
+
+if jax.process_index() == 0:
+    print("Generated outputs:")
+    for output in outputs:
+        print(output)
