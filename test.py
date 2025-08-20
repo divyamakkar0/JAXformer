@@ -1,12 +1,21 @@
 import jax
 import jax.numpy as jnp
 from functools import partial
+import optax
 from jax.sharding import PartitionSpec as P
 import numpy as np
 from test2 import ModelConfig, shardedModel
 from dataset import Dataset
 from utils import dataConfig
 import time
+
+
+MIN_LR = 0.0
+MAX_LR = 4e-3
+END_LR = 4e-4
+WARMUP_STEPS = 1000
+END_STEPS = 6000
+GRAD_CLIP_NORM = 1.0
 
 MODEL_DIM = 512
 VOCAB_SIZE = 100277
@@ -79,6 +88,20 @@ model = shardedModel(modelCfg)
 
 print("creating sharded model ...")
 params = model.init_weights(jax.random.PRNGKey(0), mesh)
+
+lr_scheduler = optax.warmup_cosine_decay_schedule(
+        init_value=MIN_LR,
+        peak_value=MAX_LR,
+        warmup_steps=WARMUP_STEPS,
+        decay_steps=END_STEPS,
+        end_value=END_LR,
+)
+tx = optax.chain(
+        optax.clip_by_global_norm(GRAD_CLIP_NORM),
+        optax.inject_hyperparams(optax.adamw)(lr_scheduler),
+)
+opt_state = tx.init(params)
+
 param_count = jax.tree.reduce(
     lambda x, y: x + y.size,
     params,
@@ -179,7 +202,8 @@ for i in range(MAX_STEPS):
     eval_x, eval_y = val_dataset()
     eval_loss = eval_step(params, eval_x, eval_y, eval_key)
 
-    params = jax.tree.map(lambda p, g: p - lr * g, params, grads)
+    updates, opt_state = tx.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
 
     loss, eval_loss = loss.item(), eval_loss.item()
     jax.experimental.multihost_utils.sync_global_devices("sync")
@@ -205,4 +229,4 @@ outputs = model.generate(
 if jax.process_index() == 0:
     print("Generated outputs:")
     for output in outputs:
-        print(output)
+        print(f"\t{output}")
