@@ -760,13 +760,16 @@ class shardedModel:
             cache = None
             key = key.reshape(2,)
             for _ in range(generation_length):
+                start_time = time.time()
                 if not use_cache:
                     cache = None
                 key, sample_key = jax.random.split(key)
                 out_next, (cache, _logits) = sample(params, out, cache, sample_key)
 
                 out = jnp.concatenate([out, out_next], axis=-1)
-
+                end_time = time.time()
+                token_time = end_time - start_time
+                print(f"Token {_ + 1} generated \t {1/token_time:.4f} tk/s")
             return out[None, None, ...]
 
         sample_key = jnp.array(jax.random.split(key, B)).reshape(
