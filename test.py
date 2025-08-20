@@ -62,18 +62,33 @@ train_dataset, val_dataset = Dataset.getDataset(
     dp=DATA_PARALLEL,
 )
 
+# modelCfg = ModelConfig(
+#     model_dimension=MODEL_DIM,
+#     vocab_size=VOCAB_SIZE,
+#     n_head=NUM_HEADS,
+#     blocks=BLOCKS,
+#     layers_per_block=LAYERS_PER_BLOCK,
+#     T=SEQ_LEN,
+#     latent_dim=LATENT_DIM,
+#     dhR=DHR,
+#     dropout_rate=DROPOUT_RATE,
+#     model_dtype=MODEL_DTYPE,
+# )
+
 modelCfg = ModelConfig(
-    model_dimension=MODEL_DIM,
-    vocab_size=VOCAB_SIZE,
-    n_head=NUM_HEADS,
-    blocks=BLOCKS,
-    layers_per_block=LAYERS_PER_BLOCK,
-    T=SEQ_LEN,
-    latent_dim=LATENT_DIM,
-    dhR=DHR,
-    dropout_rate=DROPOUT_RATE,
-    model_dtype=MODEL_DTYPE,
+    model_dimension=128,
+    vocab_size=100277,
+    n_head=8,
+    blocks=4,
+    layers_per_block=2,
+    T=128,
+    latent_dim=64,
+    dhR=32,
+    dropout_rate=0.2,
+    model_dtype=jnp.bfloat16,
 )
+
+
 
 model = shardedModel(modelCfg)
 
