@@ -13,7 +13,7 @@ import time
 MIN_LR = 0.0
 MAX_LR = 4e-3
 END_LR = 4e-4
-WARMUP_STEPS = 1000
+WARMUP_STEPS = 0
 END_STEPS = 6000
 GRAD_CLIP_NORM = 1.0
 
@@ -100,7 +100,13 @@ tx = optax.chain(
         optax.clip_by_global_norm(GRAD_CLIP_NORM),
         optax.inject_hyperparams(optax.adamw)(lr_scheduler),
 )
-opt_state = tx.init(params)
+
+default_sharding = jax.sharding.NamedSharding(mesh, P())
+opt_state = jax.tree.map(
+    lambda x: x if np.ndim(x) != 0 else jax.device_put(x, default_sharding),
+    tx.init(params),
+)
+
 
 param_count = jax.tree.reduce(
     lambda x, y: x + y.size,
@@ -151,15 +157,25 @@ def step(params, x, y, key, train=True):
 
 
 out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, modelCfg)
+opt_spec = jax.tree.map(
+    lambda x: x.sharding,
+    opt_state
+)
 data_spec = P("pp", "dp")
 key_spec = P("dp", "pp")
 
+def update_params(params, opt_state, x,y, key):
+    loss, grads = step(params, x, y, key, train=True)
+    updates, opt_state = tx.update(grads, opt_state, params)
+    params = optax.apply_updates(params, updates)
+    return params, opt_state, loss
+
 train_step = jax.jit(
     jax.shard_map(
-        lambda params, x, y, key: step(params, x, y, key=key, train=True),
+        lambda params, opt_state, x, y, key: update_params(params, opt_state, x, y, key),
         mesh=mesh,
-        in_specs=(out_spec, data_spec, data_spec, key_spec),
-        out_specs=(P(), out_spec),
+        in_specs=(out_spec, opt_spec, data_spec, data_spec, key_spec),
+        out_specs=(out_spec, opt_spec, P()),
         check_vma=False,
     )
 )
