@@ -38,7 +38,7 @@ class Dense(nn.Module):
     @nn.compact
     def __call__(self, x: Array) -> Array:
         x = nn.Dense(features=self.features, dtype=self.dtype)(x)
-        x = jax.lax.psum_scatter(x, "tp", dim=x.ndim - 1, tiled=True)
+        x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
         return x
 
 class FeedForward(nn.Module):
@@ -823,8 +823,9 @@ class shardedModel:
         model: Tuple[Embedding, Block], mesh: jax.sharding.Mesh, config: ModelConfig
     ) -> Tuple[jax.sharding.NamedSharding, jax.sharding.NamedSharding]:
         T = config.T
-        n_blocks = mesh.devices.shape[1]
+        n_devices = mesh.devices.shape[1]
         n_layers = config.blocks
+        assert n_layers % n_devices == 0, "Number of layers must be divisible by number of devices"
 
         embed, layer = model
 
@@ -841,7 +842,7 @@ class shardedModel:
         def get_var_spec_shard(x_embed, x_layer):
             embed_shape = embed.init(key, x_embed)["params"]
             layer_shape = []
-            for _ in range(n_layers // n_blocks):
+            for _ in range(n_layers // n_devices):
                 layer_shape.append(layer.init(key, x_layer, train=False)["params"])
             layer_shape = jax.tree.map(lambda *x: jnp.stack(x, axis=0), *layer_shape)
 
