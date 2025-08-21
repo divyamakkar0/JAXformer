@@ -49,7 +49,7 @@ for idx in np.ndindex(devices.shape):
         f"Coords: {d.coords}, Core: {d.core_on_chip}"
     )
 
-assert devices.size == (DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL,), (
+assert devices.size == DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL, (
     f"Expected {DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL} devices, got {devices.shape[0]}"
 )
 
