@@ -100,7 +100,7 @@ class Embedding(nn.Module):
                 x, 'tp', split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
             )
             if self.is_mutable_collection("params"):
-                x = jax.lax.all_gather(x, "tensor", axis=-1, tiled=True)
+                x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
             x = jax.lax.all_to_all(
