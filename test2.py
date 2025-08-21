@@ -121,8 +121,6 @@ class RoPE(nn.Module):
     def setup(self):
 
         assert self.model_dim % 2 == 0, "model_dim must be even"
-        tp_size = jax.lax.axis_index("tp")
-        checkify.check(self.model_dim % tp_size == 0, "rope dim must be divisible by tp_size")
 
         freq = jnp.arange(self.T, dtype=jnp.float32)[:, None] + 1
 
