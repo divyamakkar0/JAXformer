@@ -9,7 +9,7 @@ from utils import config, modelConfig
 import numpy as np
 from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
-from functools import cache, partial
+from functools import partial
 
 from dataclasses import dataclass
 import time
@@ -37,8 +37,9 @@ class Dense(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        return nn.Dense(features=self.features, dtype=self.dtype)(x)
-
+        x = nn.Dense(features=self.features, dtype=self.dtype)(x)
+        x = jax.lax.psum_scatter(x, "tp", dim=x.ndim - 1, tiled=True)
+        return x
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -62,6 +63,7 @@ class RMSNorm(nn.Module):
         x_type = x.dtype
         x = x.astype(jnp.float32)
         rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
+        rms = jax.lax.pmean(rms, axis_name="tp")
         x = x / jnp.sqrt(rms + 1e-6)
         x = x.astype(x_type)
 
@@ -94,9 +96,16 @@ class Embedding(nn.Module):
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
             x = self.embedding(x)
+            x = jax.lax.all_to_all(
+                x, 'tp', split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
+            )
             if self.is_mutable_collection("params"):
+                x = jax.lax.all_gather(x, "tensor", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
+            x = jax.lax.all_to_all(
+                x, 'tp', split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
+            )
             x = self.norm(x)
             x = self.embedding.attend(x)
 
@@ -108,7 +117,11 @@ class RoPE(nn.Module):
     model_dim: int
 
     def setup(self):
+
         assert self.model_dim % 2 == 0, "model_dim must be even"
+        tp_size = jax.lax.axis_index("tp")
+        assert self.model_dim // tp_size, "rope dim must be divisible by tp_size"
+
 
         freq = jnp.arange(self.T, dtype=jnp.float32)[:, None] + 1
 
@@ -117,14 +130,16 @@ class RoPE(nn.Module):
         log_theta_base = jnp.log(10000.0)
         theta = jnp.exp(-2 * pos / self.model_dim * log_theta_base)
 
-        self.cos = jnp.cos(freq * theta)
-        self.sin = jnp.sin(freq * theta)
+        slice_factor = self.model_dim // tp_size
+        self.cos = jnp.cos(freq * theta)[:, slice_factor * tp_size : slice_factor * (tp_size + 1)]
+        self.sin = jnp.sin(freq * theta)[:, slice_factor * tp_size : slice_factor * (tp_size + 1)]
 
     def __call__(
         self,
         x: Array,
         t_start: int,
     ) -> Array:
+
         B, T, C = x.shape
         x_dtype = x.dtype
         x = x.astype(jnp.float32)
@@ -193,19 +208,33 @@ class MLA(nn.Module):
                     kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
                 kRT_cache = kRt
 
-        kv = Dense(
+        k, v = Dense(
             features=2 * self.model_dimension, dtype=self.model_dtype
-        )(cKVt)
+        )(cKVt).split(2, axis=-1)
         kv = rearrange(kv, "B T (nh d) -> B nh T d", nh=self.n_heads)
         k, v = jnp.split(kv, 2, axis=-1)
 
         q = Dense(features=self.model_dimension, dtype=self.model_dtype)(cqt)
         q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads)
 
-        if use_rope:
-            q = jnp.concatenate([q, qRt], axis=-1)
-            kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
+        q,k,v = jax.tree.map(
+            lambda x: jax.lax.all_to_all(
+                x, 'tp', split_axis=1, concat_axis=3, tiled=True
+            )
+            (q, k, v)
+        )
 
+        if use_rope:
+
+            qRt = jax.lax.all_to_all(
+                qRt, 'tp', split_axis=1, concat_axis=3, tiled=True
+            )
+            q = jnp.concatenate([q, qRt], axis=-1)
+
+            kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
+            kRt = jax.lax.all_to_all(
+                kRt, 'tp', split_axis=1, concat_axis=3, tiled=True
+            )
             k = jnp.concatenate([k, kRt], axis=-1)
 
         def scaledDotProd(q, k, v, mask):
@@ -232,8 +261,12 @@ class MLA(nn.Module):
             mask = jnp.tril(
                 jnp.ones((B, local_n_heads, q.shape[2], k.shape[2])),
             )
+
         output = scaledDotProd(q, k, v, mask)
 
+        output = jax.lax.all_to_all(
+            output, 'tp', split_axis=3, concat_axis=1, tiled=True
+        )
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
         output = Dense(features=self.model_dimension, dtype=self.model_dtype)(output)

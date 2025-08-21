@@ -55,10 +55,7 @@ assert devices.size == (DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL,), (
 
 mesh = jax.make_mesh((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL), ("dp", "pp", "tp"))
 
-data_partition = jax.sharding.NamedSharding(
-    mesh,
-    P(None, "pp", "dp", "tp"),
-)
+
 
 data_cfg = dataConfig(
     bucket_name="10bt_gpt4",
@@ -71,6 +68,10 @@ data_cfg = dataConfig(
     micro_batch_size=MICRO_BATCH_SIZE,
 )
 
+data_partition = jax.sharding.NamedSharding(
+    mesh,
+    P(None, "pp", "dp", "tp"),
+)
 train_dataset, val_dataset = Dataset.getDataset(
     data_cfg,
     partition=data_partition,
@@ -146,13 +147,10 @@ def step(params, x, y, key, train=True):
 
     if train:
         loss_fn = jax.value_and_grad(loss_fn)
-    key = key.reshape(2,)
 
+    key = key.reshape(2,)
     val = loss_fn(params, x, y, key)
-    if train:
-        loss, grads = val
-    else:
-        loss, grads = val, None
+    loss, grads = val if train else (val, None)
 
     return loss, grads
 
@@ -162,8 +160,8 @@ opt_spec = jax.tree.map(
     lambda x: x.sharding.spec,
     opt_state
 )
-data_spec = P("pp", "dp")
-key_spec = P("dp", "pp")
+data_spec = P("pp", "dp", "tp")
+key_spec = P("dp", "pp", "tp")
 
 def update_params(params, opt_state, x,y, key):
     loss, grads = step(params, x, y, key, train=True)
@@ -207,10 +205,10 @@ start = time.time()
 
 for i in range(MAX_STEPS):
     key, train_key, eval_key = jax.random.split(key, 3)
-    train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL)
-    train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
-    eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL)
-    eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, 2))
+    train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
+    train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL))
+    eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
+    eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL))
 
     x, y = train_dataset()
     params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
