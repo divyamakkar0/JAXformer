@@ -214,9 +214,9 @@ class MLA(nn.Module):
                     kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
                 kRT_cache = kRt
 
-        k, v = Dense(
+        k, v = jnp.split(Dense(
             features=2 * self.model_dimension, dtype=self.model_dtype
-        )(cKVt).split(2, axis=-1)
+        )(cKVt), 2, axis=-1)
         kv = rearrange(kv, "B T (nh d) -> B nh T d", nh=self.n_heads)
         k, v = jnp.split(kv, 2, axis=-1)
 
