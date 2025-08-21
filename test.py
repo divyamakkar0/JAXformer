@@ -30,7 +30,7 @@ LATENT_DIM = 64
 DHR = 64
 MODEL_DTYPE = jnp.bfloat16
 
-DATA_PARALLEL = 8
+DATA_PARALLEL = 16
 LAYER_PARALLEL = 2
 
 jax.distributed.initialize()
