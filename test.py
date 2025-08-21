@@ -17,17 +17,17 @@ WARMUP_STEPS = 0
 END_STEPS = 6000
 GRAD_CLIP_NORM = 1.0
 
-MODEL_DIM = 512
+MODEL_DIM = 12
 VOCAB_SIZE = 100277
 BLOCKS = 4
-LAYERS_PER_BLOCK = 2
+LAYERS_PER_BLOCK = 1
 NUM_HEADS = 2
-SEQ_LEN = 1024
+SEQ_LEN = 6
 DROPOUT_RATE = 0.1
 BATCH_SIZE = 20
 MICRO_BATCH_SIZE = 4
-LATENT_DIM = 64
-DHR = 64
+LATENT_DIM = 8
+DHR = 8
 MODEL_DTYPE = jnp.bfloat16
 
 DATA_PARALLEL = 4
@@ -153,7 +153,7 @@ def step(params, x, y, key, train=True):
     return loss, grads
 
 
-out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, modelCfg)
+param_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, modelCfg)
 opt_spec = jax.tree.map(
     lambda x: x.sharding.spec,
     opt_state
@@ -161,6 +161,7 @@ opt_spec = jax.tree.map(
 data_spec = P("pp", "dp", "tp")
 key_spec = P("dp", "pp", "tp")
 
+@jax.jit
 def update_params(params, opt_state, x,y, key):
     loss, grads = step(params, x, y, key, train=True)
     updates, opt_state = tx.update(grads, opt_state, params)
@@ -171,9 +172,9 @@ train_step = jax.jit(
     jax.shard_map(
         lambda params, opt_state, x, y, key: update_params(params, opt_state, x, y, key),
         mesh=mesh,
-        in_specs=(out_spec, opt_spec, data_spec, data_spec, key_spec),
-        out_specs=(out_spec, opt_spec, P()),
-        check_vma=False,
+        in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
+        out_specs=(param_spec, opt_spec, P()),
+        check_vma=False
     )
 )
 
@@ -181,9 +182,9 @@ eval_step = jax.jit(
     jax.shard_map(
         lambda params, x, y, key: step(params, x, y, key=key, train=False)[0],
         mesh=mesh,
-        in_specs=(out_spec, data_spec, data_spec, key_spec),
+        in_specs=(param_spec, data_spec, data_spec, key_spec),
         out_specs=P(),
-        check_vma=False,
+        check_vma=False
     ),
 )
 
@@ -210,6 +211,7 @@ for i in range(MAX_STEPS):
 
     x, y = train_dataset()
     params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
+
     eval_x, eval_y = val_dataset()
     eval_loss = eval_step(params, eval_x, eval_y, eval_key)
 

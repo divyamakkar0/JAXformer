@@ -98,14 +98,14 @@ class Embedding(nn.Module):
         if not out:
             x = self.embedding(x)
             x = jax.lax.all_to_all(
-                x, 'tp', split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
+                x, 'tp', split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
             )
             if self.is_mutable_collection("params"):
                 x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
             x = jax.lax.all_to_all(
-                x, 'tp', split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
+                x, 'tp', split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
             )
             x = self.norm(x)
             x = self.embedding.attend(x)
@@ -738,15 +738,15 @@ class shardedModel:
         assert n_devices <= jax.local_device_count(), "Number of devices exceeds available devices"
 
         mesh = jax.make_mesh(
-            (1, n_devices),
-            axis_names=("dp", "pp"),
+            (1, n_devices, 1),
+            axis_names=("dp", "pp", "tp"),
             devices=np.array(jax.local_devices())[:n_devices],
         )
 
         model = shardedModel(cfg)
         out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, cfg)
         params = jax.tree.map(
-            lambda x, y: jax.device_put(jax.device_get(x), jax.sharding.NamedSharding(mesh, y)),
+            lambda x, y: jax.device_put(jax.experimental.multihost_utils.process_allgather(x, tiled=True), jax.sharding.NamedSharding(mesh, y)),
             params,
             out_spec,
         )
@@ -788,9 +788,9 @@ class shardedModel:
             in_specs=(
                 out_spec,
                 P(),
-                P("dp", "pp"),
+                P("dp", "pp", "tp"),
             ),
-            out_specs=P("pp", "dp"),
+            out_specs=P("pp", "dp", "tp"),
         )
         def generate_shard(params, out, key):
             cache = None
