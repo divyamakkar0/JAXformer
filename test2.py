@@ -130,12 +130,14 @@ class RoPE(nn.Module):
         log_theta_base = jnp.log(10000.0)
         theta = jnp.exp(-2 * pos / self.model_dim * log_theta_base)
 
+        idx = jax.lax.axis_index("tp")
         slice_factor = self.model_dim // tp_size
+
         cos = jnp.cos(freq * theta)
         sin = jnp.sin(freq * theta)
 
-        self.cos = jax.lax.dynamic_slice(cos, (0, slice_factor * tp_size), (self.T, slice_factor))
-        self.sin = jax.lax.dynamic_slice(sin, (0, slice_factor * tp_size), (self.T, slice_factor))
+        self.cos = jax.lax.dynamic_slice(cos, (0, slice_factor * idx), (self.T, slice_factor))
+        self.sin = jax.lax.dynamic_slice(sin, (0, slice_factor * idx), (self.T, slice_factor))
 
     def __call__(
         self,
