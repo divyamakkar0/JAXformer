@@ -555,7 +555,7 @@ class shardedModel:
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P(None, None), P(None, None, None), P("pp")),
+            in_specs=(P(None, "tp"), P(None, None, "tp"), P("pp")),
             out_specs=out_spec,
         )
         def init_params(x_embed, x_layer, layer_key):
