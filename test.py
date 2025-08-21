@@ -30,29 +30,34 @@ LATENT_DIM = 64
 DHR = 64
 MODEL_DTYPE = jnp.bfloat16
 
-DATA_PARALLEL = 16
+DATA_PARALLEL = 8
 LAYER_PARALLEL = 2
+TENSOR_PARALLEL = 2
+
+def log(msg: str):
+    if jax.process_index() == 0:
+        print(msg)
+
 
 jax.distributed.initialize()
 
 devices = np.array(jax.devices())
-if jax.process_index() == 0:
-    for idx in np.ndindex(devices.shape):
-        d = devices[idx]
-        print(
-            f"  {idx} ID: {d.id}, Process: {d.process_index}, "
-            f"Coords: {d.coords}, Core: {d.core_on_chip}"
-        )
+for idx in np.ndindex(devices.shape):
+    d = devices[idx]
+    log(
+        f"  {idx} ID: {d.id}, Process: {d.process_index}, "
+        f"Coords: {d.coords}, Core: {d.core_on_chip}"
+    )
 
-assert devices.shape == (DATA_PARALLEL * LAYER_PARALLEL,), (
-    f"Expected {DATA_PARALLEL * LAYER_PARALLEL} devices, got {devices.shape[0]}"
+assert devices.size == (DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL,), (
+    f"Expected {DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL} devices, got {devices.shape[0]}"
 )
 
-mesh = jax.make_mesh((DATA_PARALLEL, LAYER_PARALLEL), ("dp", "pp"))
+mesh = jax.make_mesh((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL), ("dp", "pp", "tp"))
 
 data_partition = jax.sharding.NamedSharding(
     mesh,
-    P(None, "pp", "dp", None),
+    P(None, "pp", "dp", "tp"),
 )
 
 data_cfg = dataConfig(
@@ -87,7 +92,7 @@ modelCfg = ModelConfig(
 
 model = shardedModel(modelCfg)
 
-print("creating sharded model ...")
+log("creating sharded model ...")
 params = model.init_weights(jax.random.PRNGKey(0), mesh)
 
 lr_scheduler = optax.warmup_cosine_decay_schedule(
@@ -114,7 +119,7 @@ param_count = jax.tree.reduce(
     params,
     0,
 )
-print(f"Total parameters: {param_count:,}")
+log(f"Total parameters: {param_count:,}")
 
 
 def step(params, x, y, key, train=True):
@@ -134,26 +139,21 @@ def step(params, x, y, key, train=True):
         loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
         loss = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_probs, y)).mean()
         loss = jax.lax.pmean(loss, axis_name="pp")
+        loss = jax.lax.pmean(loss, axis_name="tp")
+        loss = jax.lax.pmean(loss, axis_name="dp")
 
         return loss
 
     if train:
         loss_fn = jax.value_and_grad(loss_fn)
-    key = key.reshape(
-        2,
-    )
+    key = key.reshape(2,)
 
     val = loss_fn(params, x, y, key)
-    grads = None
     if train:
         loss, grads = val
-        grads = jax.tree.map(
-            lambda g: jax.lax.pmean(g, axis_name="dp"),
-            grads,
-        )
     else:
-        loss = val
-    loss = jax.lax.pmean(loss, axis_name="dp")
+        loss, grads = val, None
+
     return loss, grads
 
 
@@ -196,16 +196,14 @@ total_tokens = BATCH_SIZE * DATA_PARALLEL * SEQ_LEN
 lr = 4e-3
 
 jax.experimental.multihost_utils.sync_global_devices("sync")
-if jax.process_index() == 0:
-    print(f"Total parameters: {param_count:,}")
-    print(f"Total steps: {MAX_STEPS}")
-    print(f"Total tokens per step: {total_tokens:,}")
-    print(f"Learning rate: {lr}")
+log(f"Total parameters: {param_count:,}")
+log(f"Total steps: {MAX_STEPS}")
+log(f"Total tokens per step: {total_tokens:,}")
+log(f"Learning rate: {lr}")
 
 key = jax.random.PRNGKey(0)
 key, sample_key = jax.random.split(key, 2)
-if jax.process_index() == 0:
-    start = time.time()
+start = time.time()
 
 for i in range(MAX_STEPS):
     key, train_key, eval_key = jax.random.split(key, 3)
@@ -221,12 +219,11 @@ for i in range(MAX_STEPS):
 
     loss, eval_loss = loss.item(), eval_loss.item()
     jax.experimental.multihost_utils.sync_global_devices("sync")
-    if jax.process_index() == 0:
-        time_per_batch = time.time() - start
-        tokens_per_second = 2 * total_tokens / time_per_batch
-        log_string = f"Step {i + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
-        print(log_string)
-        start = time.time()
+    time_per_batch = time.time() - start
+    tokens_per_second = 2 * total_tokens / time_per_batch
+    log_string = f"Step {i + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
+    log(log_string)
+    start = time.time()
 
 outputs = model.generate(
     params,
@@ -240,7 +237,6 @@ outputs = model.generate(
     use_cache=True,
 )
 
-if jax.process_index() == 0:
-    print("Generated outputs:")
-    for output in outputs:
-        print(f"\t{output}")
+log("Generated outputs:")
+for output in outputs:
+    log(f"\t{output}")
