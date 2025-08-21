@@ -835,7 +835,7 @@ class shardedModel:
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P(None, None), P(None, None, None)),
+            in_specs=(P(None, "tp"), P(None, None, "tp")),
             out_specs=(P("pp")),
         )
         def get_var_spec_shard(x_embed, x_layer):
@@ -859,15 +859,17 @@ class shardedModel:
             path = join_fn(key)
             if "moe" in path and "feedforward" in path:
                 if x.ndim == 4:
-                    return P("pp", None, None, None)
+                    return P("pp", None, "tp", None)
                 if x.ndim == 3:
-                    return P("pp", None, None)
+                    return P("pp", "tp", None)
+
             if "gamma" in path or "beta" in path:
-                return P("pp", None, None, None)
+                return P("pp", None, None, "tp")
 
             if x.ndim == 3:
-                return P("pp", None, None)
-            return P("pp")
+                return P("pp", "tp", None)
+
+            return P("pp", None)
 
         embed_p_spec = jax.tree.map(
             lambda _: P(),
