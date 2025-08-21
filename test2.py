@@ -217,11 +217,12 @@ class MLA(nn.Module):
         k, v = jnp.split(Dense(
             features=2 * self.model_dimension, dtype=self.model_dtype
         )(cKVt), 2, axis=-1)
-        kv = rearrange(kv, "B T (nh d) -> B nh T d", nh=self.n_heads)
-        k, v = jnp.split(kv, 2, axis=-1)
-
         q = Dense(features=self.model_dimension, dtype=self.model_dtype)(cqt)
-        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads)
+
+        q,k, v = jax.tree.map(
+            lambda x: rearrange(x,  "B T (nh d) -> B nh T d", nh=self.n_heads),
+            (q, k, v)
+        )
 
         q,k,v = jax.tree.map(
             lambda x: jax.lax.all_to_all(
