@@ -305,9 +305,6 @@ class Layer(nn.Module):
             model_dtype=self.model_dtype,
             dropout=self.dropout_rate,
         )(x, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
-
-        breakpoint()
-
         x = x + x_res
         x_res = x
 
