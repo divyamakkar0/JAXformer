@@ -22,8 +22,6 @@ VOCAB_SIZE = 100277
 BLOCKS = 2
 LAYERS_PER_BLOCK = 2
 NUM_HEADS = 2
-DATA_PARALLEL = 16
-LAYER_PARALLEL = 2
 SEQ_LEN = 1024
 DROPOUT_RATE = 0.1
 BATCH_SIZE = 20
@@ -31,6 +29,9 @@ MICRO_BATCH_SIZE = 4
 LATENT_DIM = 64
 DHR = 64
 MODEL_DTYPE = jnp.bfloat16
+
+DATA_PARALLEL = 8
+LAYER_PARALLEL = 2
 
 jax.distributed.initialize()
 
@@ -51,7 +52,7 @@ mesh = jax.make_mesh((DATA_PARALLEL, LAYER_PARALLEL), ("dp", "pp"))
 
 data_partition = jax.sharding.NamedSharding(
     mesh,
-    P(None, None, "dp", None),
+    P(None, "pp", "dp", None),
 )
 
 data_cfg = dataConfig(
@@ -217,8 +218,6 @@ for i in range(MAX_STEPS):
     params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
     eval_x, eval_y = val_dataset()
     eval_loss = eval_step(params, eval_x, eval_y, eval_key)
-
-
 
     loss, eval_loss = loss.item(), eval_loss.item()
     jax.experimental.multihost_utils.sync_global_devices("sync")
