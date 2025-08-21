@@ -123,7 +123,6 @@ class RoPE(nn.Module):
         tp_size = jax.lax.axis_index("tp")
         checkify.check(self.model_dim % tp_size == 0, "rope dim must be divisible by tp_size")
 
-
         freq = jnp.arange(self.T, dtype=jnp.float32)[:, None] + 1
 
         pos = jnp.arange(self.model_dim // 2, dtype=jnp.float32)[:, None]
@@ -132,8 +131,11 @@ class RoPE(nn.Module):
         theta = jnp.exp(-2 * pos / self.model_dim * log_theta_base)
 
         slice_factor = self.model_dim // tp_size
-        self.cos = jnp.cos(freq * theta)[:, slice_factor * tp_size : slice_factor * (tp_size + 1)]
-        self.sin = jnp.sin(freq * theta)[:, slice_factor * tp_size : slice_factor * (tp_size + 1)]
+        cos = jnp.cos(freq * theta)
+        sin = jnp.sin(freq * theta)
+
+        self.cos = jax.lax.dynamic_slice(cos, (0, slice_factor * tp_size), (self.T, slice_factor))
+        self.sin = jax.lax.dynamic_slice(sin, (0, slice_factor * tp_size), (self.T, slice_factor))
 
     def __call__(
         self,
