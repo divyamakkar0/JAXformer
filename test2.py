@@ -12,6 +12,7 @@ from jaxtyping import Array, PyTree
 from functools import partial
 
 from dataclasses import dataclass
+from jax.experimental import checkify
 import time
 
 cache_type = Tuple[Optional[Array], Optional[Array]]
@@ -120,7 +121,7 @@ class RoPE(nn.Module):
 
         assert self.model_dim % 2 == 0, "model_dim must be even"
         tp_size = jax.lax.axis_index("tp")
-        assert self.model_dim % tp_size == 0, "rope dim must be divisible by tp_size"
+        checkify.check(self.model_dim % tp_size == 0, "rope dim must be divisible by tp_size")
 
 
         freq = jnp.arange(self.T, dtype=jnp.float32)[:, None] + 1
