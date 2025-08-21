@@ -53,7 +53,7 @@ assert devices.size == DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL, (
     f"Expected {DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL} devices, got {devices.shape[0]}"
 )
 
-mesh = jax.make_mesh((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL), ("dp", "pp", "tp"), allow_split_physical_axis=True)
+mesh = jax.make_mesh((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL), ("dp", "pp", "tp"))
 
 data_cfg = dataConfig(
     bucket_name="10bt_gpt4",
