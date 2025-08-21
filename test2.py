@@ -116,6 +116,7 @@ class Embedding(nn.Module):
 class RoPE(nn.Module):
     T: int
     model_dim: int
+    tensor_size: int = 2
 
     def setup(self):
 
@@ -131,7 +132,7 @@ class RoPE(nn.Module):
         theta = jnp.exp(-2 * pos / self.model_dim * log_theta_base)
 
         idx = jax.lax.axis_index("tp")
-        slice_factor = self.model_dim // tp_size
+        slice_factor = self.model_dim // self.tensor_size
 
         cos = jnp.cos(freq * theta)
         sin = jnp.sin(freq * theta)
