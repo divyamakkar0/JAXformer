@@ -136,8 +136,8 @@ class RoPE(nn.Module):
         cos = jnp.cos(freq * theta)
         sin = jnp.sin(freq * theta)
 
-        self.cos = jax.lax.dynamic_slice(cos, (0, slice_factor * idx), (self.T, slice_factor))
-        self.sin = jax.lax.dynamic_slice(sin, (0, slice_factor * idx), (self.T, slice_factor))
+        self.cos = jax.lax.dynamic_slice_in_dim(cos, slice_factor * idx, slice_factor, axis=-1)
+        self.sin = jax.lax.dynamic_slice_in_dim(sin, slice_factor * idx, slice_factor, axis=-1)
 
     def __call__(
         self,
