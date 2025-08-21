@@ -227,7 +227,7 @@ class MLA(nn.Module):
         q,k,v = jax.tree.map(
             lambda x: jax.lax.all_to_all(
                 x, 'tp', split_axis=1, concat_axis=3, tiled=True
-            )
+            ),
             (q, k, v)
         )
 
