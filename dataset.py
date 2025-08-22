@@ -118,7 +118,7 @@ class Dataset:
                 (self.dp * self.batch_size) // self.microbatch,
                 self.T,
             )
-            self.labels = self.labels[: max_batches * self.batch_size * self.T].reshape(
+            self.labels = self.labels[: max_batches * self.batch_size * self.T * self.dp].reshape(
                 max_batches,
                 self.microbatch,
                 (self.dp * self.batch_size) // self.microbatch,
