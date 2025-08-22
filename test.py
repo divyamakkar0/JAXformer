@@ -56,6 +56,7 @@ def main(cfg: config):
     mesh = init_devices(
         axes, axes_name
     )
+    log(mesh)
 
     data_partition = jax.sharding.NamedSharding(
         mesh,
