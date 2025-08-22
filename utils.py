@@ -105,7 +105,7 @@ def parse_args():
     parser.add_argument("--train_folder_name", type=str, default="train")
     parser.add_argument("--val_folder_name", type=str, default="val")
     parser.add_argument("--train_batch_size", type=int, default=128)
-    parser.add_argument("--val_batch_size", type=int, default=16)
+    parser.add_argument("--val_batch_size", type=int, default=128)
     parser.add_argument("--micro_batch_size", type=int, default=4)
 
     parser.add_argument("--max_lr", type=float, default=6e-4)

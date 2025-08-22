@@ -127,7 +127,7 @@ class Embedding(nn.Module):
 class RoPE(nn.Module):
     T: int
     model_dim: int
-    tensor_size: int = 2
+    tensor_size: int
 
     def setup(self):
 
@@ -205,8 +205,8 @@ class MLA(nn.Module):
             x_k_r = Dense(features=self.dhR, dtype=self.model_dtype)(x)
             x_q_r = Dense(features=self.dhR * self.n_heads, dtype=self.model_dtype)(x)
 
-            rope_k = RoPE(model_dim=self.dhR, T=self.T)
-            rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T)
+            rope_k = RoPE(model_dim=self.dhR, T=self.T, tensor_size=self.dhR // x_k_r.shape[-1])
+            rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T, tensor_size=(self.dhR * self.n_heads) // x_q_r.shape[-1])
 
             kRt = rope_k(x_k_r, t_start)
 
