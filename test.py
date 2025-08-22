@@ -22,13 +22,14 @@ from dataset import Dataset
 from utils import parse_args, config
 import time
 from typing import Tuple
+import json
 
 def log(msg: str):
     if jax.process_index() == 0:
         print(msg)
 
 def init_devices(axes: Tuple[int,...], axes_name: Tuple[str,...]) -> jax.sharding.Mesh:
-    jax.distributed.initialize()
+
 
     devices = np.array(jax.devices())
     for idx in np.ndindex(devices.shape):
@@ -218,4 +219,7 @@ def main(cfg: config):
 
 
 if __name__ == "__main__":
+    jax.distributed.initialize()
     cfg = parse_args()
+    log(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
+    main(cfg)
