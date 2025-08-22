@@ -186,7 +186,7 @@ train_step = jax.jit(
         mesh=mesh,
         in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
         out_specs=(param_spec, opt_spec, P()),
-        # check_vma=False
+        check_vma=False
     )
 )
 
@@ -196,7 +196,7 @@ eval_step = jax.jit(
         mesh=mesh,
         in_specs=(param_spec, data_spec, data_spec, key_spec),
         out_specs=P(),
-        # check_vma=False
+        check_vma=False
     ),
 )
 
