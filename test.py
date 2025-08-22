@@ -17,7 +17,7 @@ jax.config.update(
 import optax
 from jax.sharding import PartitionSpec as P
 import numpy as np
-from test2 import ModelConfig, shardedModel
+from test2 import shardedModel
 from dataset import Dataset
 from utils import parse_args, config
 import time
