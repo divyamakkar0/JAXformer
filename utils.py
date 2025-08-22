@@ -82,12 +82,12 @@ class config:
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
 
-    parser.add_argument("--model_dimension", type=int, default=64)
+    parser.add_argument("--model_dimension", type=int, default=768)
     parser.add_argument("--vocab_size", type=int, default=100277)
-    parser.add_argument("--n_head", type=int, default=8)
+    parser.add_argument("--n_head", type=int, default=64)
     parser.add_argument("--blocks", type=int, default=4)
-    parser.add_argument("--layers_per_block", type=int, default=1)
-    parser.add_argument("--T", type=int, default=16)
+    parser.add_argument("--layers_per_block", type=int, default=4)
+    parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--latent_dim", type=int, default=64)
     parser.add_argument("--dhR", type=int, default=64)
     parser.add_argument("--dropout_rate", type=float, default=0.2)
@@ -104,7 +104,7 @@ def parse_args():
     )
     parser.add_argument("--train_folder_name", type=str, default="train")
     parser.add_argument("--val_folder_name", type=str, default="val")
-    parser.add_argument("--train_batch_size", type=int, default=16)
+    parser.add_argument("--train_batch_size", type=int, default=128)
     parser.add_argument("--val_batch_size", type=int, default=16)
     parser.add_argument("--micro_batch_size", type=int, default=4)
 
@@ -139,7 +139,7 @@ def parse_args():
 
     args = parser.parse_args()
 
-   
+
 
     model_cfg = modelConfig(
         model_dimension=args.model_dimension,
