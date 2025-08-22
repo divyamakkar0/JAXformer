@@ -74,11 +74,11 @@ def main(cfg: config):
     params = model.init_weights(jax.random.PRNGKey(0), mesh)
 
     lr_scheduler = optax.warmup_cosine_decay_schedule(
-        init_value=config.lr.min_lr,
-        peak_value=config.lr.max_lr,
-        warmup_steps=config.lr.warmup_steps,
-        decay_steps=config.lr.end_steps,
-        end_value=config.lr.end_lr,
+        init_value=cfg.lr.min_lr,
+        peak_value=cfg.lr.max_lr,
+        warmup_steps=cfg.lr.warmup_steps,
+        decay_steps=cfg.lr.end_steps,
+        end_value=cfg.lr.end_lr,
     )
 
     tx = optax.chain(
