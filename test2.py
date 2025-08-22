@@ -5,31 +5,42 @@ from flax import linen as nn
 from einops import rearrange
 
 import tiktoken
-from utils import config, modelConfig
+from utils import modelConfig
 import numpy as np
 from typing import Optional, Tuple, List
 from jaxtyping import Array, PyTree
 from functools import partial
 
-from dataclasses import dataclass
-from jax.experimental import checkify
 import time
 
 cache_type = Tuple[Optional[Array], Optional[Array]]
+dtype_map = {
+        "bfloat16": jnp.bfloat16,
+        "float32": jnp.float32,
+        "float16": jnp.float16,
+        "int32": jnp.int32,
+        "int64": jnp.int64,
+    }
+
+def convert_dtype(dtype_str):
+    if dtype_str in dtype_map:
+        return dtype_map[dtype_str]
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype_str}")
 
 
-@dataclass
-class ModelConfig:
-    model_dimension: int
-    vocab_size: int
-    n_head: int
-    blocks: int
-    layers_per_block: int
-    T: int
-    latent_dim: int
-    dhR: int
-    dropout_rate: float = 0.1
-    model_dtype: jnp.dtype = jnp.bfloat16
+# @dataclass
+# class modelConfig:
+#     model_dimension: int
+#     vocab_size: int
+#     n_head: int
+#     blocks: int
+#     layers_per_block: int
+#     T: int
+#     latent_dim: int
+#     dhR: int
+#     dropout_rate: float = 0.1
+#     model_dtype: jnp.dtype = jnp.bfloat16
 
 
 class Dense(nn.Module):
@@ -440,7 +451,7 @@ class Transformer(nn.Module):
         return x_out, out_cache
 
     @classmethod
-    def get_model(cls, cfg: ModelConfig) -> "Transformer":
+    def get_model(cls, cfg: modelConfig) -> "Transformer":
         return cls(
             model_dimension=cfg.model_dimension,
             vocab_size=cfg.vocab_size,
@@ -451,7 +462,7 @@ class Transformer(nn.Module):
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
             dropout_rate=cfg.dropout_rate,
-            model_dtype=cfg.model_dtype,
+            model_dtype=convert_dtype(cfg.model_dtype),
         )
 
     def generate(
@@ -511,11 +522,12 @@ class Transformer(nn.Module):
 
 
 class shardedModel:
-    def __init__(self, cfg: ModelConfig):
+    def __init__(self, cfg: modelConfig):
+        self.dtype = convert_dtype(cfg.model_dtype)
         self.embedding = Embedding(
             vocab_size=cfg.vocab_size,
             model_dimension=cfg.model_dimension,
-            model_dtype=cfg.model_dtype,
+            model_dtype=self.dtype,
         )
 
         self.block = Block(
@@ -526,7 +538,7 @@ class shardedModel:
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
             dropout_rate=cfg.dropout_rate,
-            model_dtype=cfg.model_dtype,
+            model_dtype=self.dtype
         )
 
         self.cfg = cfg
@@ -535,7 +547,7 @@ class shardedModel:
         out_spec = shardedModel.get_p_spec([self.embedding, self.block], mesh, self.cfg)
 
         x_embed = jnp.ones((1, self.cfg.T), dtype=jnp.int32)
-        x_layer = jnp.ones((1, self.cfg.T, self.cfg.model_dimension), dtype=jnp.float32)
+        x_layer = jnp.ones((1, self.cfg.T, self.cfg.model_dimension), dtype=self.dtype)
 
         layer_devices = mesh.devices.shape[1]
 
@@ -824,7 +836,7 @@ class shardedModel:
 
     @staticmethod
     def get_p_spec(
-        model: Tuple[Embedding, Block], mesh: jax.sharding.Mesh, config: ModelConfig
+        model: Tuple[Embedding, Block], mesh: jax.sharding.Mesh, config: modelConfig
     ) -> Tuple[jax.sharding.NamedSharding, jax.sharding.NamedSharding]:
         T = config.T
         n_devices = mesh.devices.shape[1]
@@ -892,7 +904,7 @@ class shardedModel:
 if __name__ == '__main__':
 
     jax.distributed.initialize()
-    modelCfg = ModelConfig(
+    modelCfg = modelConfig(
         model_dimension=128,
         vocab_size=100277,
         n_head=8,

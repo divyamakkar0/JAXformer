@@ -11,20 +11,20 @@ class modelConfig:
     """model config class"""
 
     model_dimension: int
-    n_heads: int
-    T: int
-    dhR: int
-    dhR_blocks: int
     vocab_size: int
-    dropout: float
+    n_head: int
     blocks: int
+    layers_per_block: int
+    T: int
+    latent_dim: int
+    dhR: int
+    dropout_rate: float = 0.1
+    model_dtype: str = "bfloat16"
     moe: bool = False
     k: int = 0
     n_experts: int = 0
     n_shared: int = 0
     capacity_factor: float = 1.0
-    latent_dim: int = 0
-    model_dtype: str = "bfloat16"
 
 
 @dataclass
@@ -61,8 +61,8 @@ class deviceConfig:
 class config:
     """class for keeping track of model args"""
 
-    model: modelConfig
-    data: dataConfig
+    model_config: modelConfig
+    data_config: dataConfig
     lr: LRConfig
     training_steps: int
     name: str
@@ -81,22 +81,24 @@ class config:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
+
     parser.add_argument("--model_dimension", type=int, default=64)
-    parser.add_argument("--n_heads", type=int, default=8)
-    parser.add_argument("--T", type=int, default=16)
     parser.add_argument("--vocab_size", type=int, default=100277)
+    parser.add_argument("--n_head", type=int, default=8)
     parser.add_argument("--blocks", type=int, default=4)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--layers_per_block", type=int, default=1)
+    parser.add_argument("--T", type=int, default=16)
+    parser.add_argument("--latent_dim", type=int, default=64)
     parser.add_argument("--dhR", type=int, default=64)
-    parser.add_argument("--dhR_blocks", type=int, default=4)
+    parser.add_argument("--dropout_rate", type=float, default=0.2)
+    parser.add_argument("--model_dtype", type=str, default="bfloat16")
     parser.add_argument("--moe", action="store_true")
-    parser.add_argument("--n_experts", type=int, default=8)
     parser.add_argument("--k", type=int, default=2)
+    parser.add_argument("--n_experts", type=int, default=8)
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--capacity_factor", type=float, default=1.5)
-    parser.add_argument("--latent_dim", type=int, default=64)
 
-    parser.add_argument("--bucket_name", type=str, default="10bt_gpt4")
+    parser.add_argument("--bucket_name", type=str, default="10bt_gpt4", help="Name of the data bucket")
     parser.add_argument(
         "--process_path", type=str, default="./bucket_downloads/processShard"
     )
@@ -126,7 +128,6 @@ def parse_args():
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--eval_steps", type=int, default=25)
     parser.add_argument("--inference_batch", type=int, default=1)
-    parser.add_argument("--model_dtype", type=str, default="bfloat16")
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 
     parser.add_argument(
@@ -138,22 +139,24 @@ def parse_args():
 
     args = parser.parse_args()
 
+   
+
     model_cfg = modelConfig(
         model_dimension=args.model_dimension,
-        n_heads=args.n_heads,
-        T=args.T,
-        dhR=args.dhR,
-        dhR_blocks=args.dhR_blocks,
         vocab_size=args.vocab_size,
-        dropout=args.dropout,
+        n_head=args.n_head,
         blocks=args.blocks,
+        layers_per_block=args.layers_per_block,
+        T=args.T,
+        latent_dim=args.latent_dim,
+        dhR=args.dhR,
+        dropout_rate=args.dropout_rate,
+        model_dtype=args.model_dtype,
+        moe=args.moe,
+        k=args.k,
         n_experts=args.n_experts,
         n_shared=args.n_shared,
-        k=args.k,
         capacity_factor=args.capacity_factor,
-        moe=args.moe,
-        latent_dim=args.latent_dim,
-        model_dtype=args.model_dtype,
     )
 
     data_cfg = dataConfig(
@@ -180,8 +183,8 @@ def parse_args():
     )
 
     cfg = config(
-        model=model_cfg,
-        data=data_cfg,
+        model_config=model_cfg,
+        data_config=data_cfg,
         lr=lr_cfg,
         name=args.name,
         output_dir=args.output_dir,

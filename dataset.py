@@ -108,20 +108,20 @@ class Dataset:
             self.labels = data[1:]
 
             len_dataset = self.dataset.shape[0]
-            max_batches = len_dataset // (self.batch_size * self.T)
+            max_batches = len_dataset // (self.batch_size * self.T * self.dp)
 
             self.dataset = self.dataset[
-                : max_batches * self.batch_size * self.T
+                : max_batches * self.batch_size * self.T * self.dp
             ].reshape(
                 max_batches,
                 self.microbatch,
-                self.batch_size // self.microbatch,
+                (self.dp * self.batch_size) // self.microbatch,
                 self.T,
             )
             self.labels = self.labels[: max_batches * self.batch_size * self.T].reshape(
                 max_batches,
                 self.microbatch,
-                self.batch_size // self.microbatch,
+                (self.dp * self.batch_size) // self.microbatch,
                 self.T,
             )
 
@@ -179,6 +179,9 @@ class Dataset:
 
         return train_dataset, val_dataset
 
+    @property
+    def tokens_per_step(self):
+        return self.dp * self.batch_size * self.T
 
 if __name__ == "__main__":
     test_cfg = dataConfig(
