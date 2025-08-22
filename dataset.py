@@ -27,7 +27,7 @@ class Dataset:
         id: str,
         partition: Optional[NamedSharding] = None,
     ):
-        assert ((batch_size // dp) % microbatch) == 0, (
+        assert (batch_size  % microbatch) == 0, (
             "microbatch should divide batch size per data axis"
         )
         assert (microbatch % pp) == 0, "pp should divide microbatch size"
