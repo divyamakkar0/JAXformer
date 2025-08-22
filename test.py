@@ -164,18 +164,6 @@ key_spec = P("dp", "pp", "tp")
 @jax.jit
 def update_params(params, opt_state, x,y, key):
     loss, grads = step(params, x, y, key, train=True)
-    grads = jax.tree.map(
-        lambda g: jax.lax.pmean(g, axis_name="pp"),
-        grads,
-    )
-    grads = jax.tree.map(
-        lambda g: jax.lax.pmean(g, axis_name="tp"),
-        grads,
-    )
-    grads = jax.tree.map(
-        lambda g: jax.lax.pmean(g, axis_name="dp"),
-        grads,
-    )
     updates, opt_state = tx.update(grads, opt_state, params)
     params = optax.apply_updates(params, updates)
     return params, opt_state, loss
