@@ -181,7 +181,7 @@ def main(cfg: config):
     init_step = 0
     start = time.time()
 
-    for i in range(init_step, total_steps):
+    for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)
         train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
         train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2))
@@ -191,16 +191,19 @@ def main(cfg: config):
         x, y = train_dataset()
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
 
-        eval_x, eval_y = val_dataset()
-        eval_loss = eval_step(params, eval_x, eval_y, eval_key)
+        if current_step % config.checkpoint_steps == 0:
 
-        loss, eval_loss = loss.item(), eval_loss.item()
-        jax.experimental.multihost_utils.sync_global_devices("sync")
-        time_per_batch = time.time() - start
-        tokens_per_second = 2 * total_tokens / time_per_batch
-        log_string = f"Step {i + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
-        log(log_string)
-        start = time.time()
+
+            eval_x, eval_y = val_dataset()
+            eval_loss = eval_step(params, eval_x, eval_y, eval_key)
+
+            loss, eval_loss = loss.item(), eval_loss.item()
+            jax.experimental.multihost_utils.sync_global_devices("sync")
+            time_per_batch = time.time() - start
+            tokens_per_second = 2 * total_tokens / time_per_batch
+            log_string = f"Step {current_step + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
+            log(log_string)
+            start = time.time()
 
     outputs = model.generate(
         params,
