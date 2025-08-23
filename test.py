@@ -186,7 +186,7 @@ def main(cfg: config):
                 config=asdict(cfg),
             )
             wandb_id = wandb.run.id
-        save_checkpoint(init_step)
+        # save_checkpoint(init_step)
 
     if use_wandb:
         table = wandb.Table(
@@ -276,7 +276,6 @@ def main(cfg: config):
     total_tokens = train_dataset.tokens_per_step
 
     jax.experimental.multihost_utils.sync_global_devices("sync")
-    log(f"Total parameters: {param_count:,}")
     log(f"Total steps: {total_steps}")
     log(f"Total tokens per step: {total_tokens:,}")
 
@@ -329,7 +328,7 @@ def main(cfg: config):
             tokens_per_second =  cfg.checkpoint_steps * total_tokens / time_per_batch
             log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
-            save_checkpoint(current_step)
+            # save_checkpoint(current_step)
 
             start = time.time()
             train_loss = []
