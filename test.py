@@ -115,6 +115,7 @@ def main(cfg: config):
     init_step = 0
     use_wandb = cfg.wandb is True and jax.process_index() == 0
     wandb_id = None
+
     def make_save_tree(step):
         model_state = {
             "params": params,
@@ -209,7 +210,7 @@ def main(cfg: config):
     log(f"Total parameters: {param_count:,}")
 
 
-    def step(params, x, y, key, train=True):
+    def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
             logits, _ = model.pipe_step(
                 params,
@@ -231,17 +232,14 @@ def main(cfg: config):
 
             return loss
 
-        if train:
-            loss_fn = jax.value_and_grad(loss_fn)
-
         key = key.reshape(2,)
-        val = loss_fn(params, x, y, key)
-        loss, grads = val if train else (val, None)
+        loss = loss_fn(params, x, y, key)
 
-        return loss, grads
+        return loss
 
     def update_params(params, opt_state, x,y, key):
-        loss, grads = step(params, x, y, key, train=True)
+        step_fn = jax.value_and_grad(step)
+        loss, grads = step_fn(params, x, y, key, train=True)
         updates, opt_state = tx.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
         return params, opt_state, loss
@@ -266,7 +264,7 @@ def main(cfg: config):
 
     eval_step = jax.jit(
         jax.shard_map(
-            lambda params, x, y, key: step(params, x, y, key=key, train=False)[0],
+            lambda params, x, y, key: step(params, x, y, key=key, train=False),
             mesh=mesh,
             in_specs=(param_spec, data_spec, data_spec, key_spec),
             out_specs=P(),
