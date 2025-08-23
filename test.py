@@ -284,14 +284,16 @@ def main(cfg: config):
     start = time.time()
     train_loss = []
 
-    key, train_key, eval_key = jax.random.split(key, 3)
-    train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
-    train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2))
-    eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
-    eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2))
-    x, y = train_dataset()
+
 
     for current_step in range(init_step, total_steps):
+        key, train_key, eval_key = jax.random.split(key, 3)
+        train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
+        train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2))
+        eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
+        eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2))
+        x, y = train_dataset()
+
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
         print(f"step: {current_step + 1} \t loss: {loss.item()}")
         continue
