@@ -51,7 +51,7 @@ def init_devices(axes: Tuple[int,...], axes_name: Tuple[str,...]) -> jax.shardin
     return mesh
 
 def main(cfg: config):
-
+    key = jax.random.PRNGKey(0)
     DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL = cfg.device_config.n_device_axis
 
     axes = (*cfg.device_config.n_device_axis,)
@@ -89,7 +89,8 @@ def main(cfg: config):
     model = shardedModel(cfg.model_config)
 
     log("creating sharded model ...")
-    params = model.init_weights(jax.random.PRNGKey(0), mesh)
+    key, init_key = jax.random.split(key, 2)
+    params = model.init_weights(init_key, mesh)
 
     lr_scheduler = optax.warmup_cosine_decay_schedule(
         init_value=cfg.lr.min_lr,
@@ -114,6 +115,8 @@ def main(cfg: config):
     init_step = 0
     use_wandb = config.wandb is True and jax.process_index() == 0
     wandb_id = None
+
+    print("use wandb:", use_wandb)
 
     def make_save_tree(step):
         model_state = {
@@ -282,7 +285,7 @@ def main(cfg: config):
     log(f"Total steps: {total_steps}")
     log(f"Total tokens per step: {total_tokens:,}")
 
-    key = jax.random.PRNGKey(0)
+
     key, sample_key = jax.random.split(key, 2)
     start = time.time()
     train_loss = []
