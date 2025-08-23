@@ -314,7 +314,7 @@ def main(cfg: config):
             eval_loss = eval_step(params, eval_x, eval_y, eval_key)
 
             eval_loss = eval_loss.item()
-            train_loss = np.mean(jax.device_get(jnp.array(train_loss)))
+            train_loss = np.mean(jax.device_get(jnp.array(train_loss))).item()
 
             if use_wandb:
                 wandb_log["loss/val_loss"] = metrics_val["loss"]
