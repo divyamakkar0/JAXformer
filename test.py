@@ -63,7 +63,7 @@ def main(cfg: config):
     log(mesh)
 
     checkpoint_dir = os.path.join(
-        os.path.abspath(config.output_dir), config.name, "checkpoints"
+        os.path.abspath(cfg.output_dir), cfg.name, "checkpoints"
     )
     load = os.path.exists(checkpoint_dir)
     if not load:

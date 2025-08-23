@@ -71,7 +71,6 @@ class config:
     alpha: float = 0.001
     output_dir: str = "./results/"
     checkpoint_steps: int = 10
-    checkpoint_manager: str = "./checkpoints/manager/"
     inference_batch: int = 1
     eval_steps: int = 25
     seed: int = 0
@@ -118,9 +117,6 @@ def parse_args():
     parser.add_argument("--name", type=str, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="./results/")
     parser.add_argument("--checkpoint_steps", type=int, default=100)
-    parser.add_argument(
-        "--checkpoint_manager", type=str, default="./checkpoints/manager/"
-    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wandb", action="store_true")
 
@@ -190,7 +186,6 @@ def parse_args():
         output_dir=args.output_dir,
         device_config=device_cfg,
         checkpoint_steps=args.checkpoint_steps,
-        checkpoint_manager=args.checkpoint_manager,
         seed=args.seed,
         training_steps=args.training_steps,
         grad_step=args.grad_step,
