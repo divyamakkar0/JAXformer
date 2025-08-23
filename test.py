@@ -180,9 +180,9 @@ def main(cfg: config):
             wandb.init(
                 entity="waterloo2",
                 project="jaxformer",
-                name=config.name,
+                name=cfg.name,
                 resume="allow",
-                config=asdict(config),
+                config=asdict(cfg),
             )
             wandb_id = wandb.run.id
         save_checkpoint(init_step)
@@ -193,9 +193,9 @@ def main(cfg: config):
             + [
                 f"tokens_{i}"
                 for i in range(
-                    config.inference_batch
-                    * config.model.blocks
-                    * (jax.device_count() // config.model.blocks)
+                    cfg.inference_batch
+                    * cfg.model.blocks
+                    * (jax.device_count() // cfg.model.blocks)
                 )
             ],
             log_mode="INCREMENTAL",
@@ -305,12 +305,12 @@ def main(cfg: config):
                 "loss/train_cross_entropy_loss": metrics["loss_cross"],
                 "lr": opt_state[1].hyperparams["learning_rate"],
             }
-            if config.model.moe:
+            if cfg.model.moe:
                 wandb_log["loss/load_loss"] = metrics["loss_load"]
-                for h in range(config.model.n_experts):
+                for h in range(cfg.model.n_experts):
                     wandb_log[f"load/head_{h}"] = metrics[f"load/head_{h}"]
 
-        if current_step % config.checkpoint_steps == 0:
+        if current_step % cfg.checkpoint_steps == 0:
             time_per_batch = time.time() - start
             eval_x, eval_y = val_dataset()
             eval_loss = eval_step(params, eval_x, eval_y, eval_key)
@@ -321,14 +321,14 @@ def main(cfg: config):
             if use_wandb:
                 wandb_log["loss/val_loss"] = metrics_val["loss"]
                 wandb_log["loss/val_cross_entropy_loss"] = metrics_val["loss_cross"]
-                if config.model.moe:
+                if cfg.model.moe:
                     wandb_log["loss/val_load_loss"] = metrics_val["loss_load"]
-                    for h in range(config.model.n_experts):
+                    for h in range(cfg.model.n_experts):
                         wandb_log[f"load/head_{h}"] = metrics_val[f"load/head_{h}"]
 
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
-            tokens_per_second =  config.checkpoint_steps * total_tokens / time_per_batch
+            tokens_per_second =  cfg.checkpoint_steps * total_tokens / time_per_batch
             log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
             save_checkpoint(current_step)
