@@ -23,6 +23,10 @@ from utils import parse_args, config
 import time
 from typing import Tuple
 import json
+import wandb
+from dataclasses import asdict
+import orbax.checkpoint as ocp
+
 
 def log(msg: str):
     if jax.process_index() == 0:
@@ -57,6 +61,19 @@ def main(cfg: config):
         axes, axes_name
     )
     log(mesh)
+
+    checkpoint_dir = os.path.join(
+        os.path.abspath(config.output_dir), config.name, "checkpoints"
+    )
+    load = os.path.exists(checkpoint_dir)
+    if not load:
+        os.makedirs(checkpoint_dir)
+        checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
+
+    options = ocp.CheckpointManagerOptions(max_to_keep=1)
+    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
+
+
 
     data_partition = jax.sharding.NamedSharding(
         mesh,
@@ -94,6 +111,95 @@ def main(cfg: config):
         tx.init(params),
     )
 
+    init_step = 0
+    use_wandb = config.wandb is True and jax.process_index() == 0
+    wandb_id = None
+
+    def make_save_tree(step):
+        model_state = {
+            "params": params,
+            "opt_state": opt_state,
+        }
+        save_tree = {
+            "state": model_state,
+            "key": jax.device_get(key),
+            "train_step_idx": train_dataset.step_idx,
+            "train_shard_idx": (train_dataset.shard_idx - 1) % len(train_dataset.data),
+            "val_step_idx": val_dataset.step_idx,
+            "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data),
+            "step": step,
+            "wandb_id": wandb_id,
+        }
+        return save_tree
+
+    def save_checkpoint(
+        step,
+    ):
+        save_tree = make_save_tree(step)
+        checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
+
+    if load:
+        abstract_tree_map = jax.tree.map(
+            ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)
+        )
+        tree_state = checkpoint_manager.restore(
+            checkpoint_manager.latest_step(),
+            args=ocp.args.StandardRestore(abstract_tree_map),
+        )
+
+        init_step = tree_state["step"]
+        log(f"loading checkpoint @ step {init_step}")
+
+        key.key = tree_state["key"]
+        params = tree_state["state"]["params"]
+        opt_state = tree_state["state"]["opt_state"]
+
+        train_dataset.step_idx = tree_state["train_step_idx"]
+        train_dataset.shard_idx = tree_state["train_shard_idx"]
+        train_dataset.load_next_shard()
+
+        val_dataset.step_idx = tree_state["val_step_idx"]
+        val_dataset.shard_idx = tree_state["val_shard_idx"]
+        val_dataset.load_next_shard()
+
+        wandb_id = tree_state["wandb_id"]
+        if use_wandb:
+            assert wandb_id is not None, "wandb_id is None"
+            wandb.init(
+                entity="waterloo2",
+                project="jaxformer",
+                name=config.name,
+                resume="must",
+                id=wandb_id,
+                config=asdict(config),
+            )
+
+    else:
+        log("no checkpoint found, saving init copy")
+        if use_wandb:
+            wandb.init(
+                entity="waterloo2",
+                project="jaxformer",
+                name=config.name,
+                resume="allow",
+                config=asdict(config),
+            )
+            wandb_id = wandb.run.id
+        save_checkpoint(init_step)
+
+    if use_wandb:
+        table = wandb.Table(
+            columns=["step"]
+            + [
+                f"tokens_{i}"
+                for i in range(
+                    config.inference_batch
+                    * config.model.blocks
+                    * (jax.device_count() // config.model.blocks)
+                )
+            ],
+            log_mode="INCREMENTAL",
+        )
 
     param_count = jax.tree.reduce(
         lambda x, y: x + y.size,
@@ -178,8 +284,8 @@ def main(cfg: config):
 
     key = jax.random.PRNGKey(0)
     key, sample_key = jax.random.split(key, 2)
-    init_step = 0
     start = time.time()
+    train_loss = []
 
     for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)
@@ -190,19 +296,48 @@ def main(cfg: config):
 
         x, y = train_dataset()
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
+        train_loss.append(loss)
+
+        if use_wandb:
+            wandb_log = {
+                "step": current_step,
+                "loss/train_loss": metrics["loss"],
+                "loss/train_cross_entropy_loss": metrics["loss_cross"],
+                "lr": opt_state[1].hyperparams["learning_rate"],
+            }
+            if config.model.moe:
+                wandb_log["loss/load_loss"] = metrics["loss_load"]
+                for h in range(config.model.n_experts):
+                    wandb_log[f"load/head_{h}"] = metrics[f"load/head_{h}"]
 
         if current_step % config.checkpoint_steps == 0:
             time_per_batch = time.time() - start
             eval_x, eval_y = val_dataset()
             eval_loss = eval_step(params, eval_x, eval_y, eval_key)
 
-            loss, eval_loss = loss.item(), eval_loss.item()
+            eval_loss = eval_loss.item()
+            train_loss = np.mean(jax.device_get(jnp.array(train_loss)))
+
+            if use_wandb:
+                wandb_log["loss/val_loss"] = metrics_val["loss"]
+                wandb_log["loss/val_cross_entropy_loss"] = metrics_val["loss_cross"]
+                if config.model.moe:
+                    wandb_log["loss/val_load_loss"] = metrics_val["loss_load"]
+                    for h in range(config.model.n_experts):
+                        wandb_log[f"load/head_{h}"] = metrics_val[f"load/head_{h}"]
+
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
             tokens_per_second =  config.checkpoint_steps * total_tokens / time_per_batch
-            log_string = f"Step {current_step + 1}, Loss: {loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
+            log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
+            save_checkpoint(current_step)
+
             start = time.time()
+            train_loss = []
+
+        if use_wandb:
+            wandb.log(data=wandb_log, step=current_step)
 
     outputs = model.generate(
         params,
@@ -220,6 +355,31 @@ def main(cfg: config):
     for output in outputs:
         log(f"\t{output}")
 
+    if use_wandb:
+        table = wandb.Table(
+            columns=["step"]
+            + [
+                f"tokens_{i}"
+                for i in range(
+                    config.inference_batch
+                    * config.model.blocks
+                    * (jax.device_count() // config.model.blocks)
+                )
+            ],
+        )
+        wandb.Table.MAX_ROWS = total_steps // config.checkpoint_steps
+        with open(
+            os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"),
+            "r",
+        ) as f:
+            lines = f.readlines()
+        for i, line in enumerate(lines):
+            tokens = line.split("|")[1]
+            tokens = ast.literal_eval(tokens)
+            table.add_data(i, *tokens)
+
+        wandb.log({"inference_tokens": table})
+        wandb.finish()
 
 if __name__ == "__main__":
     jax.distributed.initialize()
