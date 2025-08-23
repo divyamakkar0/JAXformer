@@ -113,7 +113,7 @@ def main(cfg: config):
     )
 
     init_step = 0
-    use_wandb = config.wandb is True and jax.process_index() == 0
+    use_wandb = cfg.wandb is True and jax.process_index() == 0
     wandb_id = None
 
     print("use wandb:", use_wandb)
