@@ -291,6 +291,67 @@ class MLA(nn.Module):
         return output, (cKV_cache, kRT_cache)
 
 
+class AttentionBasic(nn.Module):
+    model_dimension: int
+    n_heads: int
+    model_dtype: jnp.dtype
+    dropout: float = 0.0
+
+    @nn.compact
+    def __call__(self, x: Array, train=True) -> Array:
+        B, T, C = x.shape
+
+        qkv = Dense(features=3 * self.model_dimension, dtype=self.model_dtype)(x)
+        q, k, v = jnp.split(qkv, 3, axis=-1)
+
+        q, k, v = jax.tree.map(
+            lambda x: rearrange(x, "B T (nh d) -> B nh T d", nh=self.n_heads),
+            (q, k, v)
+        )
+
+        q, k, v = jax.tree.map(
+            lambda x: jax.lax.all_to_all(
+                x, 'tp', split_axis=1, concat_axis=3, tiled=True
+            ),
+            (q, k, v)
+        )
+
+        def scaledDotProd(q, k, v):
+            input_dtype = q.dtype
+
+            q = q.astype(jnp.float32)
+            k = k.astype(jnp.float32)
+            v = v.astype(jnp.float32)
+
+            dk = q.shape[-1]
+
+            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (dk**-0.5)
+            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
+            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
+
+            output = output.astype(input_dtype)
+            return output
+
+        local_n_heads = q.shape[1]
+        if T == 1:
+            mask = jnp.ones((B, local_n_heads, 1, k.shape[2]))
+        else:
+            mask = jnp.tril(
+                jnp.ones((B, local_n_heads, q.shape[2], k.shape[2])),
+            )
+
+        output = scaledDotProd(q, k, v)
+        output = jax.lax.all_to_all(
+            output, 'tp', split_axis=3, concat_axis=1, tiled=True
+        )
+        output = rearrange(output, "B nh T dk -> B T (nh dk)")
+
+        output = Dense(features=self.model_dimension, dtype=self.model_dtype)(output)
+        # output = nn.Dropout(rate=self.dropout)(output, deterministic=not train)
+
+        return output, (None, None)
+
+
 class Layer(nn.Module):
     model_dimension: int
     n_heads: int
@@ -307,15 +368,21 @@ class Layer(nn.Module):
         x_res = x
 
         x = RMSNorm(model_dtype=self.model_dtype)(x)
-        x, cache = MLA(
+        # x, cache = MLA(
+        #     model_dimension=self.model_dimension,
+        #     n_heads=self.n_heads,
+        #     T=self.T,
+        #     latent_dim=self.latent_dim,
+        #     dhR=self.dhR,
+        #     model_dtype=self.model_dtype,
+        #     dropout=self.dropout_rate,
+        # )(x, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
+        x, cache = AttentionBasic(
             model_dimension=self.model_dimension,
             n_heads=self.n_heads,
-            T=self.T,
-            latent_dim=self.latent_dim,
-            dhR=self.dhR,
             model_dtype=self.model_dtype,
             dropout=self.dropout_rate,
-        )(x, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
+        )(x, train=train)
         x = x + x_res
         x_res = x
 

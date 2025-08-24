@@ -135,8 +135,6 @@ def parse_args():
 
     args = parser.parse_args()
 
-
-
     model_cfg = modelConfig(
         model_dimension=args.model_dimension,
         vocab_size=args.vocab_size,
