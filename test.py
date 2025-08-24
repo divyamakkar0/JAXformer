@@ -102,7 +102,7 @@ def main(cfg: config):
 
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.inject_hyperparams(optax.adamw)(lr_scheduler),
+        optax.inject_hyperparams(optax.adamw)(learning_rate=4e-3),
     )
 
 

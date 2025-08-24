@@ -83,9 +83,9 @@ def parse_args():
 
     parser.add_argument("--model_dimension", type=int, default=768)
     parser.add_argument("--vocab_size", type=int, default=100277)
-    parser.add_argument("--n_head", type=int, default=64)
+    parser.add_argument("--n_head", type=int, default=12)
     parser.add_argument("--blocks", type=int, default=4)
-    parser.add_argument("--layers_per_block", type=int, default=4)
+    parser.add_argument("--layers_per_block", type=int, default=3)
     parser.add_argument("--T", type=int, default=1024)
     parser.add_argument("--latent_dim", type=int, default=64)
     parser.add_argument("--dhR", type=int, default=64)
