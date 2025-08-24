@@ -295,59 +295,30 @@ class AttentionBasic(nn.Module):
     model_dimension: int
     n_heads: int
     model_dtype: jnp.dtype
+    T: int
     dropout: float = 0.0
+
+    def setup(self):
+        self.mask = jnp.tril(jnp.ones((1, 1, self.T, self.T)))
+
 
     @nn.compact
     def __call__(self, x: Array, train=True) -> Array:
-        B, T, C = x.shape
 
         qkv = Dense(features=3 * self.model_dimension, dtype=self.model_dtype)(x)
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
-        q, k, v = jax.tree.map(
-            lambda x: rearrange(x, "B T (nh d) -> B nh T d", nh=self.n_heads),
-            (q, k, v)
-        )
+        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads)
+        k = rearrange(k, "B T (nh d) -> B nh d T", nh=self.n_heads)
+        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads)
 
-        q, k, v = jax.tree.map(
-            lambda x: jax.lax.all_to_all(
-                x, 'tp', split_axis=1, concat_axis=3, tiled=True
-            ),
-            (q, k, v)
-        )
+        att = (q @ k) * (q.shape[-1]**-0.5)
+        att = jnp.where(self.mask == 0, -jnp.inf, att)
+        att = jax.nn.softmax(att, axis=-1)
 
-        def scaledDotProd(q, k, v):
-            input_dtype = q.dtype
-
-            q = q.astype(jnp.float32)
-            k = k.astype(jnp.float32)
-            v = v.astype(jnp.float32)
-
-            dk = q.shape[-1]
-
-            w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (dk**-0.5)
-            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
-            output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
-
-            output = output.astype(input_dtype)
-            return output
-
-        local_n_heads = q.shape[1]
-        if T == 1:
-            mask = jnp.ones((B, local_n_heads, 1, k.shape[2]))
-        else:
-            mask = jnp.tril(
-                jnp.ones((B, local_n_heads, q.shape[2], k.shape[2])),
-            )
-
-        output = scaledDotProd(q, k, v)
-        output = jax.lax.all_to_all(
-            output, 'tp', split_axis=3, concat_axis=1, tiled=True
-        )
-        output = rearrange(output, "B nh T dk -> B T (nh dk)")
-
+        output = att @ v
+        output = rearrange(output, "B nh T d -> B T (nh d)")
         output = Dense(features=self.model_dimension, dtype=self.model_dtype)(output)
-        # output = nn.Dropout(rate=self.dropout)(output, deterministic=not train)
 
         return output, (None, None)
 
@@ -381,6 +352,7 @@ class Layer(nn.Module):
             model_dimension=self.model_dimension,
             n_heads=self.n_heads,
             model_dtype=self.model_dtype,
+            T=self.T,
             dropout=self.dropout_rate,
         )(x, train=train)
         x = x + x_res
