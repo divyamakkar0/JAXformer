@@ -114,8 +114,9 @@ class Embedding(nn.Module):
 
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
+            *_, T = x.shape
             x = self.embedding(x)
-            pos_emb = self.pos_embedding(jnp.arange(x.shape[1]))
+            pos_emb = self.pos_embedding(jnp.arange(T))
             x = x + pos_emb
             x = jax.lax.all_to_all(
                 x, 'tp', split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
