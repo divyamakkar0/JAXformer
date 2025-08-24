@@ -196,6 +196,8 @@ if __name__ == "__main__":
 
     train_step_id = 20
     train_shard_id = ((train.shard_idx - 1) % len(train.data),)
+
+    breakpoint()
     train.load_next_shard()
 
     val_step_id = 20
