@@ -302,6 +302,7 @@ class AttentionBasic(nn.Module):
 
     def setup(self):
         self.mask = jnp.tril(jnp.ones((1, 1, self.T, self.T)))
+        print(self.mask)
 
     @nn.compact
     def __call__(self, x: Array, train=True) -> Array:
