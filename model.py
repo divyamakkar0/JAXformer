@@ -888,7 +888,7 @@ class shardedModel:
         embedding_params, layer_params = params
 
         embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
-        print(x.shape)
+        print(f"embeddings shape: {embeddings.shape}")
         layer_fn = lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
             {"params": params},
             x,
