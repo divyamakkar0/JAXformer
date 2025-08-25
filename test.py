@@ -329,7 +329,7 @@ def main(cfg: config):
         end_time = time.time()
         tks_per_second = total_tokens / (end_time - start)
 
-        print(
+        log(
             f"step: {current_step + 1} \t loss: {loss.item()} \t tks/s: {tks_per_second:.2f}s"
         )
         start = time.time()
