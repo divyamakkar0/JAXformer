@@ -1,4 +1,7 @@
+from functools import partial
 import os
+
+from main import step
 
 os.environ["XLA_FLAGS"] = (
     "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true "
@@ -26,15 +29,17 @@ import json
 import wandb
 from dataclasses import asdict
 import orbax.checkpoint as ocp
+from einops import rearrange
 
 
 def log(msg: str):
     if jax.process_index() == 0:
         print(msg)
 
-def init_devices(axes: Tuple[int,...], axes_name: Tuple[str,...]) -> jax.sharding.Mesh:
 
-
+def init_devices(
+    axes: Tuple[int, ...], axes_name: Tuple[str, ...]
+) -> jax.sharding.Mesh:
     devices = np.array(jax.devices())
     for idx in np.ndindex(devices.shape):
         d = devices[idx]
@@ -47,8 +52,9 @@ def init_devices(axes: Tuple[int,...], axes_name: Tuple[str,...]) -> jax.shardin
         f"Expected {np.prod(axes)} devices, got {devices.shape[0]}"
     )
 
-    mesh = jax.make_mesh((*axes, ), (*axes_name, ))
+    mesh = jax.make_mesh((*axes,), (*axes_name,))
     return mesh
+
 
 def main(cfg: config):
     key = jax.random.PRNGKey(0)
@@ -57,9 +63,7 @@ def main(cfg: config):
     axes = (*cfg.device_config.n_device_axis,)
     axes_name = ("dp", "pp", "tp")
 
-    mesh = init_devices(
-        axes, axes_name
-    )
+    mesh = init_devices(axes, axes_name)
     log(mesh)
 
     checkpoint_dir = os.path.join(
@@ -73,12 +77,8 @@ def main(cfg: config):
     options = ocp.CheckpointManagerOptions(max_to_keep=1)
     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
 
-
-
-    data_partition = jax.sharding.NamedSharding(
-        mesh,
-        P(None, "pp", "dp", "tp"),
-    )
+    data_spec = P(None, "pp", "dp", "tp")
+    data_partition = jax.sharding.NamedSharding(mesh, data_spec)
 
     train_dataset, val_dataset = Dataset.getDataset(
         cfg.data_config,
@@ -102,9 +102,8 @@ def main(cfg: config):
 
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.inject_hyperparams(optax.adamw)(learning_rate=4e-3),
+        optax.inject_hyperparams(optax.adamw)(learning_rate=lr_scheduler),
     )
-
 
     default_sharding = jax.sharding.NamedSharding(mesh, P())
     opt_state = jax.tree.map(
@@ -209,7 +208,6 @@ def main(cfg: config):
     )
     log(f"Total parameters: {param_count:,}")
 
-
     def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
             logits, _ = model.pipe_step(
@@ -226,51 +224,72 @@ def main(cfg: config):
 
             loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
             loss = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_probs, y)).mean()
-            loss = jax.lax.pmean(loss, axis_name="pp")
-            loss = jax.lax.pmean(loss, axis_name="tp")
-            loss = jax.lax.pmean(loss, axis_name="dp")
-
             return loss
 
-        key = key.reshape(2,)
         loss = loss_fn(params, x, y, key)
+
+        loss = jax.lax.pmean(loss, axis_name="pp")
+        loss = jax.lax.pmean(loss, axis_name="tp")
+        loss = jax.lax.pmean(loss, axis_name="dp")
 
         return loss
 
-    def update_params(params, opt_state, x,y, key):
-        step_fn = jax.value_and_grad(step)
-        loss, grads = step_fn(params, x, y, key, train=True)
-        updates, opt_state = tx.update(grads, opt_state, params)
-        params = optax.apply_updates(params, updates)
-        return params, opt_state, loss
-
-    param_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, cfg.model_config)
-    opt_spec = jax.tree.map(
-        lambda x: x.sharding.spec,
-        opt_state
+    param_spec = shardedModel.get_p_spec(
+        [model.embedding, model.block], mesh, cfg.model_config
     )
-    data_spec = P("pp", "dp", "tp")
+    opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
     key_spec = P("dp", "pp", "tp")
 
-    train_step = jax.jit(
-        jax.shard_map(
-            lambda params, opt_state, x, y, key: update_params(params, opt_state, x, y, key),
-            mesh=mesh,
-            in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
-            out_specs=(param_spec, opt_spec, P()),
-            check_vma=False
-        )
+    @jax.jit
+    @partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
+        out_specs=(param_spec, opt_spec, P()),
+        check_vma=False,
     )
+    def train_step(params, opt_state, x, y, key):
+        step_fn = jax.value_and_grad(step)
 
-    eval_step = jax.jit(
-        jax.shard_map(
-            lambda params, x, y, key: step(params, x, y, key=key, train=False),
-            mesh=mesh,
-            in_specs=(param_spec, data_spec, data_spec, key_spec),
-            out_specs=P(),
-            check_vma=False
-        ),
+        def single_step(grads, batch):
+            x, y, key = batch
+            loss, grads_current = step_fn(params, x, y, key, train=True)
+            grads = jax.tree.map(lambda a, b: a + b, grads, grads_current)
+            return grads, loss
+
+        grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
+        key = rearrange(key, "1 1 1 g n -> g n", g=cfg.grad_step, n=2)
+
+        loss, grads = jax.lax.scan(
+            lambda carry, batch: single_step(carry, batch),
+            grads,
+            (x, y, key),
+        )
+
+        grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
+        updates, opt_state = tx.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+
+        loss = loss.mean()
+        return params, opt_state, loss
+
+    @jax.jit
+    @partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(param_spec, data_spec, data_spec, key_spec),
+        out_specs=P(),
+        check_vma=False,
     )
+    def eval_step(params, x, y, key):
+
+        def single_step(loss, x, y, key):
+            loss += step(params, x, y, key, train=False)
+            return loss, None
+
+        loss = jax.lax.scan(single_step, 0, (x, y, key))
+        loss = loss / config.eval_steps
+        return loss
 
     total_steps = cfg.training_steps
     total_tokens = train_dataset.tokens_per_step
@@ -279,20 +298,25 @@ def main(cfg: config):
     log(f"Total steps: {total_steps}")
     log(f"Total tokens per step: {total_tokens:,}")
 
-
     key, sample_key = jax.random.split(key, 2)
     start = time.time()
     train_loss = []
 
-
-
     for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)
-        train_key = jax.random.split(train_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
-        train_key = jnp.asarray(train_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2))
-        eval_key = jax.random.split(eval_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
-        eval_key = jnp.asarray(eval_key).reshape((DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2))
-        x, y = train_dataset()
+        train_key = jax.random.split(
+            train_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * cfg.grad_step
+        )
+        train_key = jnp.asarray(train_key).reshape(
+            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, cfg.grad_step, 2)
+        )
+        eval_key = jax.random.split(
+            eval_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * cfg.eval_steps
+        )
+        eval_key = jnp.asarray(eval_key).reshape(
+            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, cfg.eval_steps, 2)
+        )
+        x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
         print(f"step: {current_step + 1} \t loss: {loss.item()}")
@@ -328,7 +352,7 @@ def main(cfg: config):
 
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
-            tokens_per_second =  cfg.checkpoint_steps * total_tokens / time_per_batch
+            tokens_per_second = cfg.checkpoint_steps * total_tokens / time_per_batch
             log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
             # save_checkpoint(current_step)
@@ -380,6 +404,7 @@ def main(cfg: config):
 
         wandb.log({"inference_tokens": table})
         wandb.finish()
+
 
 if __name__ == "__main__":
     jax.distributed.initialize()

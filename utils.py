@@ -97,7 +97,9 @@ def parse_args():
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--capacity_factor", type=float, default=1.5)
 
-    parser.add_argument("--bucket_name", type=str, default="10bt_gpt4", help="Name of the data bucket")
+    parser.add_argument(
+        "--bucket_name", type=str, default="10bt_gpt4", help="Name of the data bucket"
+    )
     parser.add_argument(
         "--process_path", type=str, default="./bucket_downloads/processShard"
     )

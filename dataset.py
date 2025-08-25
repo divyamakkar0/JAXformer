@@ -27,7 +27,7 @@ class Dataset:
         id: str,
         partition: Optional[NamedSharding] = None,
     ):
-        assert (batch_size  % microbatch) == 0, (
+        assert (batch_size % microbatch) == 0, (
             "microbatch should divide batch size per data axis"
         )
         assert (microbatch % pp) == 0, "pp should divide microbatch size"
@@ -118,7 +118,9 @@ class Dataset:
                 (self.dp * self.batch_size) // self.microbatch,
                 self.T,
             )
-            self.labels = self.labels[: max_batches * self.batch_size * self.T * self.dp].reshape(
+            self.labels = self.labels[
+                : max_batches * self.batch_size * self.T * self.dp
+            ].reshape(
                 max_batches,
                 self.microbatch,
                 (self.dp * self.batch_size) // self.microbatch,
@@ -135,14 +137,14 @@ class Dataset:
     def __len__(self):
         return self.dataset.shape[0]
 
-    def __call__(self):
-        x = self.dataset[self.step_idx]
-        y = self.labels[self.step_idx]
-        self.step_idx += 1
-
-        if self.step_idx >= self.dataset.shape[0]:
+    def __call__(self, step=1):
+        if self.step_idx + step > self.dataset.shape[0]:
             self.step_idx = 0
             self.load_next_shard()
+
+        x = self.dataset[self.step_idx : self.step_idx + step]
+        y = self.labels[self.step_idx : self.step_idx + step]
+        self.step_idx += step
 
         return x, y
 
@@ -182,6 +184,7 @@ class Dataset:
     @property
     def tokens_per_step(self):
         return self.dp * self.batch_size * self.T
+
 
 if __name__ == "__main__":
     test_cfg = dataConfig(

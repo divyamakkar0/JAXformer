@@ -15,12 +15,13 @@ import time
 
 cache_type = Tuple[Optional[Array], Optional[Array]]
 dtype_map = {
-        "bfloat16": jnp.bfloat16,
-        "float32": jnp.float32,
-        "float16": jnp.float16,
-        "int32": jnp.int32,
-        "int64": jnp.int64,
-    }
+    "bfloat16": jnp.bfloat16,
+    "float32": jnp.float32,
+    "float16": jnp.float16,
+    "int32": jnp.int32,
+    "int64": jnp.int64,
+}
+
 
 def convert_dtype(dtype_str):
     if dtype_str in dtype_map:
@@ -52,6 +53,7 @@ class Dense(nn.Module):
         x = nn.Dense(features=self.features, dtype=self.dtype)(x)
         x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
         return x
+
 
 class FeedForward(nn.Module):
     model_dimension: int
@@ -119,14 +121,14 @@ class Embedding(nn.Module):
             pos_emb = self.pos_embedding(jnp.arange(T))
             x = x + pos_emb
             x = jax.lax.all_to_all(
-                x, 'tp', split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
+                x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
             )
             if self.is_mutable_collection("params"):
                 x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
             x = jax.lax.all_to_all(
-                x, 'tp', split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
+                x, "tp", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
             )
             x = self.norm(x)
             x = self.embedding.attend(x)
@@ -140,7 +142,6 @@ class RoPE(nn.Module):
     tensor_size: int
 
     def setup(self):
-
         assert self.model_dim % 2 == 0, "model_dim must be even"
 
         freq = jnp.arange(self.T, dtype=jnp.float32)[:, None] + 1
@@ -156,15 +157,18 @@ class RoPE(nn.Module):
         cos = jnp.cos(freq * theta)
         sin = jnp.sin(freq * theta)
 
-        self.cos = jax.lax.dynamic_slice_in_dim(cos, slice_factor * idx, slice_factor, axis=-1)
-        self.sin = jax.lax.dynamic_slice_in_dim(sin, slice_factor * idx, slice_factor, axis=-1)
+        self.cos = jax.lax.dynamic_slice_in_dim(
+            cos, slice_factor * idx, slice_factor, axis=-1
+        )
+        self.sin = jax.lax.dynamic_slice_in_dim(
+            sin, slice_factor * idx, slice_factor, axis=-1
+        )
 
     def __call__(
         self,
         x: Array,
         t_start: int,
     ) -> Array:
-
         B, T, C = x.shape
         x_dtype = x.dtype
         x = x.astype(jnp.float32)
@@ -215,8 +219,14 @@ class MLA(nn.Module):
             x_k_r = Dense(features=self.dhR, dtype=self.model_dtype)(x)
             x_q_r = Dense(features=self.dhR * self.n_heads, dtype=self.model_dtype)(x)
 
-            rope_k = RoPE(model_dim=self.dhR, T=self.T, tensor_size=self.dhR // x_k_r.shape[-1])
-            rope_q = RoPE(model_dim=self.dhR * self.n_heads, T=self.T, tensor_size=(self.dhR * self.n_heads) // x_q_r.shape[-1])
+            rope_k = RoPE(
+                model_dim=self.dhR, T=self.T, tensor_size=self.dhR // x_k_r.shape[-1]
+            )
+            rope_q = RoPE(
+                model_dim=self.dhR * self.n_heads,
+                T=self.T,
+                tensor_size=(self.dhR * self.n_heads) // x_q_r.shape[-1],
+            )
 
             kRt = rope_k(x_k_r, t_start)
 
@@ -233,34 +243,30 @@ class MLA(nn.Module):
                     kRt = jnp.concatenate([kRT_cache, kRt], axis=1)
                 kRT_cache = kRt
 
-        k, v = jnp.split(Dense(
-            features=2 * self.model_dimension, dtype=self.model_dtype
-        )(cKVt), 2, axis=-1)
+        k, v = jnp.split(
+            Dense(features=2 * self.model_dimension, dtype=self.model_dtype)(cKVt),
+            2,
+            axis=-1,
+        )
         q = Dense(features=self.model_dimension, dtype=self.model_dtype)(cqt)
 
-        q,k, v = jax.tree.map(
-            lambda x: rearrange(x,  "B T (nh d) -> B nh T d", nh=self.n_heads),
-            (q, k, v)
+        q, k, v = jax.tree.map(
+            lambda x: rearrange(x, "B T (nh d) -> B nh T d", nh=self.n_heads), (q, k, v)
         )
 
-        q,k,v = jax.tree.map(
+        q, k, v = jax.tree.map(
             lambda x: jax.lax.all_to_all(
-                x, 'tp', split_axis=1, concat_axis=3, tiled=True
+                x, "tp", split_axis=1, concat_axis=3, tiled=True
             ),
-            (q, k, v)
+            (q, k, v),
         )
 
         if use_rope:
-
-            qRt = jax.lax.all_to_all(
-                qRt, 'tp', split_axis=1, concat_axis=3, tiled=True
-            )
+            qRt = jax.lax.all_to_all(qRt, "tp", split_axis=1, concat_axis=3, tiled=True)
             q = jnp.concatenate([q, qRt], axis=-1)
 
             kRt = jnp.repeat(kRt[:, None, :, :], self.n_heads, axis=1)
-            kRt = jax.lax.all_to_all(
-                kRt, 'tp', split_axis=1, concat_axis=3, tiled=True
-            )
+            kRt = jax.lax.all_to_all(kRt, "tp", split_axis=1, concat_axis=3, tiled=True)
             k = jnp.concatenate([k, kRt], axis=-1)
 
         def scaledDotProd(q, k, v, mask):
@@ -291,7 +297,7 @@ class MLA(nn.Module):
         output = scaledDotProd(q, k, v, mask)
 
         output = jax.lax.all_to_all(
-            output, 'tp', split_axis=3, concat_axis=1, tiled=True
+            output, "tp", split_axis=3, concat_axis=1, tiled=True
         )
         output = rearrange(output, "B nh T dk -> B T (nh dk)")
 
@@ -311,10 +317,8 @@ class AttentionBasic(nn.Module):
     def setup(self):
         self.mask = jnp.tril(jnp.ones((1, 1, self.T, self.T)))
 
-
     @nn.compact
     def __call__(self, x: Array, train=True) -> Array:
-
         qkv = Dense(features=3 * self.model_dimension, dtype=self.model_dtype)(x)
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
@@ -322,7 +326,7 @@ class AttentionBasic(nn.Module):
         k = rearrange(k, "B T (nh d) -> B nh d T", nh=self.n_heads)
         v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads)
 
-        att = (q @ k) * (q.shape[-1]**-0.5)
+        att = (q @ k) * (q.shape[-1] ** -0.5)
         att = jnp.where(self.mask == 0, -jnp.inf, att)
         att = jax.nn.softmax(att, axis=-1)
 
@@ -556,13 +560,11 @@ class Transformer(nn.Module):
             if not use_cache:
                 cache = None
             key, sample_key = jax.random.split(key)
-            out_next, (cache, _logits) = sample(
-                sample_key, params, out, cache
-            )
+            out_next, (cache, _logits) = sample(sample_key, params, out, cache)
             out = jnp.concatenate([out, out_next], axis=-1)
             end_time = time.time()
             token_time = end_time - start_time
-            print(f"Token {_ + 1} generated \t {1/token_time:.4f} tk/s")
+            print(f"Token {_ + 1} generated \t {1 / token_time:.4f} tk/s")
 
         tokens = jax.device_get(out)
         outputs = list(map(lambda x: enc.decode(x), tokens))
@@ -575,7 +577,7 @@ class shardedModel:
         self.dtype = convert_dtype(cfg.model_dtype)
         self.embedding = Embedding(
             vocab_size=cfg.vocab_size,
-            T = cfg.T,
+            T=cfg.T,
             model_dimension=cfg.model_dimension,
             model_dtype=self.dtype,
         )
@@ -588,7 +590,7 @@ class shardedModel:
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
             dropout_rate=cfg.dropout_rate,
-            model_dtype=self.dtype
+            model_dtype=self.dtype,
         )
 
         self.cfg = cfg
@@ -699,9 +701,9 @@ class shardedModel:
     ):
         stage = jax.lax.axis_index("pp")
         n_devices = jax.lax.axis_size("pp")
-        layers_per_device = stage_params["Layer_0"]["AttentionBasic_0"]["Dense_0"]["Dense_0"][
-            "kernel"
-        ].shape[0]
+        layers_per_device = stage_params["Layer_0"]["AttentionBasic_0"]["Dense_0"][
+            "Dense_0"
+        ]["kernel"].shape[0]
         microbatch_per_device = inputs.shape[0]
         microbatches = n_devices * microbatch_per_device
         layers = layers_per_device * n_devices
@@ -795,9 +797,10 @@ class shardedModel:
         n_devices: int = 1,
         use_cache=True,
     ) -> list[str]:
-
         assert B % n_devices == 0, "Batch size must be divisible by number of devices"
-        assert n_devices <= jax.local_device_count(), "Number of devices exceeds available devices"
+        assert n_devices <= jax.local_device_count(), (
+            "Number of devices exceeds available devices"
+        )
 
         mesh = jax.make_mesh(
             (1, n_devices, 1),
@@ -808,7 +811,10 @@ class shardedModel:
         model = shardedModel(cfg)
         out_spec = shardedModel.get_p_spec([model.embedding, model.block], mesh, cfg)
         params = jax.tree.map(
-            lambda x, y: jax.device_put(jax.experimental.multihost_utils.process_allgather(x, tiled=True), jax.sharding.NamedSharding(mesh, y)),
+            lambda x, y: jax.device_put(
+                jax.experimental.multihost_utils.process_allgather(x, tiled=True),
+                jax.sharding.NamedSharding(mesh, y),
+            ),
             params,
             out_spec,
         )
@@ -856,7 +862,9 @@ class shardedModel:
         )
         def generate_shard(params, out, key):
             cache = None
-            key = key.reshape(2,)
+            key = key.reshape(
+                2,
+            )
             for _ in range(generation_length):
                 start_time = time.time()
                 if not use_cache:
@@ -867,7 +875,7 @@ class shardedModel:
                 out = jnp.concatenate([out, out_next], axis=-1)
                 end_time = time.time()
                 token_time = end_time - start_time
-                print(f"Token {_ + 1} generated \t {1/token_time:.4f} tk/s")
+                print(f"Token {_ + 1} generated \t {1 / token_time:.4f} tk/s")
             return out[None, None, ...]
 
         key = jax.random.fold_in(key, jax.process_index())
@@ -891,7 +899,9 @@ class shardedModel:
         T = config.T
         n_devices = mesh.devices.shape[1]
         n_layers = config.blocks
-        assert n_layers % n_devices == 0, "Number of layers must be divisible by number of devices"
+        assert n_layers % n_devices == 0, (
+            "Number of layers must be divisible by number of devices"
+        )
 
         embed, layer = model
 
@@ -951,8 +961,7 @@ class shardedModel:
         return embed_p_spec, layer_p_spec
 
 
-if __name__ == '__main__':
-
+if __name__ == "__main__":
     jax.distributed.initialize()
     modelCfg = modelConfig(
         model_dimension=128,
@@ -968,7 +977,9 @@ if __name__ == '__main__':
     )
 
     model = Transformer.get_model(modelCfg)
-    params = model.init(jax.random.PRNGKey(0), jnp.ones((1, modelCfg.T), dtype=jnp.int32))['params']
+    params = model.init(
+        jax.random.PRNGKey(0), jnp.ones((1, modelCfg.T), dtype=jnp.int32)
+    )["params"]
 
     out = model.generate(
         params=params,
