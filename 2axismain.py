@@ -442,7 +442,7 @@ def main(config: config):
                 )
 
             keys = jax.device_put(keys, jax.sharding.NamedSharding(mesh, key_spec))
-            x, y = train_dataset()
+            x, y = train_dataset(step=config.grad_step)
             breakpoint()
 
             jax.experimental.multihost_utils.sync_global_devices("train_step")
@@ -495,7 +495,7 @@ def main(config: config):
                         2,
                     )
 
-                x, y = val_dataset()
+                x, y = val_dataset(config.eval_steps)
                 log("starting eval")
                 metrics_val = eval_step(keys, state.params, x, y)
                 log("eval done")
