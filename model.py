@@ -20,7 +20,7 @@ class RMSNorm(nn.Module):
         x_type = x.dtype
         x = x.astype(jnp.float32)
         rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        rms = jax.lax.pmean(rms, axis_name="tp")
+        rms = jax.lax.pmean(rms, axis_name="tensor")
         x = x / jnp.sqrt(rms + 1e-6)
         x = x.astype(x_type)
 
