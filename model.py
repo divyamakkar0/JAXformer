@@ -51,6 +51,7 @@ class Embeddings(nn.Module):
 
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
+            x = self.embedding(x)
             axis = x.ndim - 1
             x = jax.lax.all_to_all(
                 x, "tensor", split_axis=axis, concat_axis=axis - 1, tiled=True
