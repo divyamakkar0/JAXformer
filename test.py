@@ -258,13 +258,15 @@ def main(cfg: config):
 
         grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         loss = 0.0
-        key = key.reshape(2,)
+        key = key.reshape(
+            2,
+        )
 
         for i in range(cfg.grad_step):
             key, subkey = jax.random.split(key)
             batch = (x[i], y[i], subkey)
             grads_step, loss_step = single_step(batch)
-            grads  = jax.tree.map(lambda a, b: a + b, grads, grads_step)
+            grads = jax.tree.map(lambda a, b: a + b, grads, grads_step)
             loss += loss_step
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
@@ -283,7 +285,6 @@ def main(cfg: config):
         check_vma=False,
     )
     def eval_step(params, x, y, key):
-
         def single_step(loss, x, y, key):
             loss += step(params, x, y, key, train=False)
             return loss, None
@@ -322,7 +323,9 @@ def main(cfg: config):
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
         loss.block_until_ready()
         end_time = time.time()
-        print(f"step: {current_step + 1} \t loss: {loss.item()} \t time: {end_time - start:.2f}s")
+        print(
+            f"step: {current_step + 1} \t loss: {loss.item()} \t time: {end_time - start:.2f}s"
+        )
         continue
 
         if use_wandb:
