@@ -261,7 +261,7 @@ def main(cfg: config):
 
         for i in range(cfg.grad_step):
             key, subkey = jax.random.split(key)
-            batch = (x[i], y[i], subkey[i])
+            batch = (x[i], y[i], subkey)
             grads_step, loss_step = single_step(batch)
             grads  = jax.tree_map(lambda a, b: a + b, grads, grads_step)
             loss += loss_step
