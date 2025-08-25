@@ -82,7 +82,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="model training")
 
     parser.add_argument("--model_dimension", type=int, default=768)
-    parser.add_argument("--vocab_size", type=int, default=100277)
+    parser.add_argument("--vocab_size", type=int, default=50257)
     parser.add_argument("--n_head", type=int, default=12)
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--layers_per_block", type=int, default=3)
