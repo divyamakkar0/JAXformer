@@ -319,15 +319,16 @@ def main(cfg: config):
         key, train_key, eval_key = jax.random.split(key, 3)
         train_key = make_sharded_key(train_key)
         eval_key = make_sharded_key(eval_key)
-        print(train_key.shape, eval_key.shape)
 
         x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
         loss.block_until_ready()
         end_time = time.time()
+        tks_per_second = total_tokens / (end_time - start)
+
         print(
-            f"step: {current_step + 1} \t loss: {loss.item()} \t time: {end_time - start:.2f}s"
+            f"step: {current_step + 1} \t loss: {loss.item()} \t tks/s: {tks_per_second:.2f}s"
         )
         continue
 
