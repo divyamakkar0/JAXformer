@@ -314,7 +314,7 @@ class AttentionBasic(nn.Module):
             jnp.split(qkv, 3, axis=-1)
         )
 
-        att = jnp.einsum('bhtd, bhTd -> bhtT') * (q.shape[-1] ** -0.5)
+        att = jnp.einsum('bhtd, bhTd -> bhtT', q, k) * (q.shape[-1] ** -0.5)
         att = jnp.where(self.mask == 0, -jnp.inf, att)
         att = jax.nn.softmax(att, axis=-1)
 
