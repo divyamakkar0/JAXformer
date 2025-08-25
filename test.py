@@ -10,7 +10,7 @@ os.environ["XLA_FLAGS"] = (
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_compilation_cache_dir", "~/ax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update(
@@ -256,18 +256,21 @@ def main(cfg: config):
             loss, grads = step_fn(params, x, y, key, train=True)
             return grads, loss
 
-        grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-        loss = 0.0
+
+        # grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
+        # loss = 0.0
         key = key.reshape(
             2,
         )
+        batch = (x[0], y[0], key)
+        grads, loss = single_step(batch)
 
-        for i in range(cfg.grad_step):
-            key, subkey = jax.random.split(key)
-            batch = (x[i], y[i], subkey)
-            grads_step, loss_step = single_step(batch)
-            grads = jax.tree.map(lambda a, b: a + b, grads, grads_step)
-            loss += loss_step
+        # for i in range(cfg.grad_step):
+        #     key, subkey = jax.random.split(key)
+        #     batch = (x[i], y[i], subkey)
+        #     grads_step, loss_step = single_step(batch)
+        #     grads = jax.tree.map(lambda a, b: a + b, grads, grads_step)
+        #     loss += loss_step
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
         updates, opt_state = tx.update(grads, opt_state, params)
