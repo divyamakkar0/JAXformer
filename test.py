@@ -251,20 +251,19 @@ def main(cfg: config):
     def train_step(params, opt_state, x, y, key):
         step_fn = jax.value_and_grad(step)
 
-        def single_step(grads, batch):
+        def single_step(batch):
             x, y, key = batch
-            loss, grads_current = step_fn(params, x, y, key, train=True)
-            grads = jax.tree.map(lambda a, b: a + b, grads, grads_current)
+            loss, grads = step_fn(params, x, y, key, train=True)
             return grads, loss
 
         grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-        key = rearrange(key, "1 1 1 g n -> g n", g=cfg.grad_step, n=2)
+        key = key.reshape(2,)
 
-        grads, loss = jax.lax.scan(
-            lambda carry, batch: single_step(carry, batch),
-            grads,
-            (x, y, key),
-        )
+        for i in range(cfg.grad_step):
+            key, subkey = jax.random.split(key)
+            grads_step, loss_step = single_step(grads, (x[i], y[i], subkey[i]))
+            grads  = jax.tree_map(lambda a, b: a + b, grads, grads_step)
+            loss += loss_step
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
         updates, opt_state = tx.update(grads, opt_state, params)
@@ -302,24 +301,25 @@ def main(cfg: config):
     start = time.time()
     train_loss = []
 
+    @jax.jit
+    def make_sharded_key(key):
+        key = jax.random.split(key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
+        key = jnp.asarray(key).reshape(
+            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2)
+        )
+        return key
+
     for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)
-        train_key = jax.random.split(
-            train_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * cfg.grad_step
-        )
-        train_key = jnp.asarray(train_key).reshape(
-            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, cfg.grad_step, 2)
-        )
-        eval_key = jax.random.split(
-            eval_key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * cfg.eval_steps
-        )
-        eval_key = jnp.asarray(eval_key).reshape(
-            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, cfg.eval_steps, 2)
-        )
+        train_key = make_sharded_key(jnp.array(train_key))
+        eval_key = make_sharded_key(jnp.array(eval_key))
+
         x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
-        print(f"step: {current_step + 1} \t loss: {loss.item()}")
+        loss.block_until_ready()
+        end_time = time.time()
+        print(f"step: {current_step + 1} \t loss: {loss.item()} \t time: {end_time - start:.2f}s")
         continue
 
         if use_wandb:
