@@ -402,6 +402,7 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=(model_spec, P()),
+            check_vma=True
         )
     )
 
@@ -418,6 +419,7 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=P(),
+            check_vma=False
         )
     )
 
