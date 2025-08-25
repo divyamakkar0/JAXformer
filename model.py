@@ -350,6 +350,9 @@ class MLA(nn.Module):
     model_dtype: jnp.dtype
     dropout: float = 0.0
 
+    def setup(self):
+        self.rope = (self.dhR != 0)
+
     @nn.compact
     def __call__(
         self,
