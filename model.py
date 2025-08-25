@@ -1126,7 +1126,7 @@ class shardedModel:
             T=cfg.T,
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
-            dhR_blocks=cfg.dhR_blocks,
+            dhR_blocks=cfg.layers_per_block,
             moe=cfg.moe,
             n_experts=cfg.n_experts,
             n_shared=cfg.n_shared,
