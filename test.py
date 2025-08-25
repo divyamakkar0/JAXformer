@@ -423,5 +423,5 @@ def main(cfg: config):
 if __name__ == "__main__":
     jax.distributed.initialize()
     cfg = parse_args()
-    log(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
+    print(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
     main(cfg)
