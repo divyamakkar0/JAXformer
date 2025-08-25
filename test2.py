@@ -302,16 +302,17 @@ class AttentionBasic(nn.Module):
 
     def setup(self):
         self.mask = jnp.tril(jnp.ones((1, 1, self.T, self.T)))
-        print(self.mask)
 
     @nn.compact
     def __call__(self, x: Array, train=True) -> Array:
-        qkv = Dense(features=3 * self.model_dimension, dtype=self.model_dtype)(x)
-        q, k, v = jnp.split(qkv, 3, axis=-1)
 
-        q = rearrange(q, "B T (nh d) -> B nh T d", nh=self.n_heads)
-        k = rearrange(k, "B T (nh d) -> B nh d T", nh=self.n_heads)
-        v = rearrange(v, "B T (nh d) -> B nh T d", nh=self.n_heads)
+        base_dtype = x.dtype
+
+        qkv = Dense(features=3 * self.model_dimension, dtype=self.model_dtype)(x)
+        q, k ,v = jax.tree.map(
+            lambda x: rearrange(x.astype(jnp.float32), "B T (nh d) -> B nh T d", nh=self.n_heads),
+            jnp.split(qkv, 3, axis=-1)
+        )
 
         att = (q @ k) * (q.shape[-1] ** -0.5)
         att = jnp.where(self.mask == 0, -jnp.inf, att)
@@ -320,6 +321,7 @@ class AttentionBasic(nn.Module):
         output = att @ v
         output = rearrange(output, "B nh T d -> B T (nh d)")
         output = Dense(features=self.model_dimension, dtype=self.model_dtype)(output)
+        output = output.astype(base_dtype)
 
         return output, (None, None)
 
