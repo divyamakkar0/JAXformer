@@ -312,8 +312,9 @@ def main(cfg: config):
 
     for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)
-        train_key = make_sharded_key(jnp.array(train_key))
-        eval_key = make_sharded_key(jnp.array(eval_key))
+        train_key = make_sharded_key(train_key)
+        eval_key = make_sharded_key(eval_key)
+        print(train_key.shape, eval_key.shape)
 
         x, y = train_dataset(step=cfg.grad_step)
 
