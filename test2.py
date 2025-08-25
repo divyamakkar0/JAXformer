@@ -30,20 +30,6 @@ def convert_dtype(dtype_str):
         raise ValueError(f"Unsupported dtype: {dtype_str}")
 
 
-# @dataclass
-# class modelConfig:
-#     model_dimension: int
-#     vocab_size: int
-#     n_head: int
-#     blocks: int
-#     layers_per_block: int
-#     T: int
-#     latent_dim: int
-#     dhR: int
-#     dropout_rate: float = 0.1
-#     model_dtype: jnp.dtype = jnp.bfloat16
-
-
 class Dense(nn.Module):
     features: int
     dtype: jnp.dtype = jnp.float32
@@ -63,9 +49,9 @@ class FeedForward(nn.Module):
     @nn.compact
     def __call__(self, x: Array, train=True) -> Array:
         x = Dense(features=self.model_dimension * 4, dtype=self.model_dtype)(x)
-        x = nn.selu(x)
-        x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not train)
+        x = nn.gelu(x)
         x = Dense(features=self.model_dimension, dtype=self.model_dtype)(x)
+        x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=not train)
         return x
 
 

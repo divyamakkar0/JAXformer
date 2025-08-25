@@ -12,6 +12,29 @@ from jaxtyping import Array, PyTree
 from functools import partial
 
 
+class RMSNorm(nn.Module):
+    model_dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x: Array) -> Array:
+        x_type = x.dtype
+        x = x.astype(jnp.float32)
+        rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
+        rms = jax.lax.pmean(rms, axis_name="tp")
+        x = x / jnp.sqrt(rms + 1e-6)
+        x = x.astype(x_type)
+
+        gamma = self.param(
+            "gamma", nn.initializers.ones, (1, 1, x.shape[-1]), self.model_dtype
+        )
+        beta = self.param(
+            "beta", nn.initializers.zeros, (1, 1, x.shape[-1]), self.model_dtype
+        )
+
+        x = x * gamma + beta
+
+        return x
+
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
@@ -24,26 +47,25 @@ class Embeddings(nn.Module):
             dtype=self.model_dtype,
         )
 
-        # self.norm = RMSNorm(model_dtype=self.model_dtype)
+        self.norm = RMSNorm(model_dtype=self.model_dtype)
 
     def __call__(self, x: Array, out: bool = False) -> Array:
-        # if not out:
-        return self.embedding(x)
-        #     axis = x.ndim - 1
-        #     x = jax.lax.all_to_all(
-        #         x, "tensor", split_axis=axis, concat_axis=axis - 1, tiled=True
-        #     )
-        #     if self.is_mutable_collection("params"):
-        #         x = jax.lax.all_gather(x, "tensor", axis=-1, tiled=True)
-        #         _ = self.norm(x)
-        # else:
-        #     x = jax.lax.all_to_all(
-        #         x, "tensor", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
-        #     )
-        #     x = self.norm(x)
-        #     x = self.embedding.attend(x)
+        if not out:
+            axis = x.ndim - 1
+            x = jax.lax.all_to_all(
+                x, "tensor", split_axis=axis, concat_axis=axis - 1, tiled=True
+            )
+            if self.is_mutable_collection("params"):
+                x = jax.lax.all_gather(x, "tensor", axis=-1, tiled=True)
+                _ = self.norm(x)
+        else:
+            x = jax.lax.all_to_all(
+                x, "tensor", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
+            )
+            x = self.norm(x)
+            x = self.embedding.attend(x)
 
-        # return x
+        return x
 
 
 class NoisyKGate(nn.Module):
@@ -862,53 +884,41 @@ class shardedModel:
         embedding_model, layer_model = model
         embedding_params, layer_params = params
 
-        second_weight = jax.random.normal(
-            key, (layer_model.model_dimension, embedding_model.vocab_size)
-        )
-
         embeddings = embedding_model.apply({"params": embedding_params}, x, out=False)
-        # layer_fn = lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
-        #     {"params": params},
-        #     x,
-        #     cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
-        #     train=train,
-        #     rngs=None if not train else {"dropout": key},
-        # )
-
-        # @partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
-        # def fwd_fn(x, params, cKV_cache, kRT_cache, key, state_idx):
-        #     fns = [
-        #         lambda x, *args: jax.lax.stop_gradient(layer_fn(x, *args)),
-        #         lambda x, *args: layer_fn(x, *args),
-        #     ]
-
-        #     return jax.lax.switch(
-        #         state_idx,
-        #         fns,
-        #         x,
-        #         params,
-        #         cKV_cache,
-        #         kRT_cache,
-        #         key,
-        #     )
-
-        # layer_out, (current_cache, load) = shardedModel.layer_fn(
-        #     fwd_fn, embeddings, layer_params, key, cache=cache
-        # )
-
-        # logits = embedding_model.apply(
-        #     {"params": embedding_params}, layer_out, out=True
-        # )
-
-        logits = jnp.einsum(
-            "M B T D, D V -> M B T V",
-            embeddings,
-            second_weight,
+        layer_fn = lambda x, params, cKV_cache, kRT_cache, key: layer_model.apply(
+            {"params": params},
+            x,
+            cache=None if cKV_cache is None else (cKV_cache, kRT_cache),
+            train=train,
+            rngs=None if not train else {"dropout": key},
         )
 
-        return logits, (None, None)
+        @partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
+        def fwd_fn(x, params, cKV_cache, kRT_cache, key, state_idx):
+            fns = [
+                lambda x, *args: jax.lax.stop_gradient(layer_fn(x, *args)),
+                lambda x, *args: layer_fn(x, *args),
+            ]
 
-        # return logits, (current_cache, load)
+            return jax.lax.switch(
+                state_idx,
+                fns,
+                x,
+                params,
+                cKV_cache,
+                kRT_cache,
+                key,
+            )
+
+        layer_out, (current_cache, load) = shardedModel.layer_fn(
+            fwd_fn, embeddings, layer_params, key, cache=cache
+        )
+
+        logits = embedding_model.apply(
+            {"params": embedding_params}, layer_out, out=True
+        )
+
+        return logits, (current_cache, load)
 
     @staticmethod
     def layer_fn(fwd_fn, x, params, key, cache=None):
