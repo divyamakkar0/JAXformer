@@ -315,6 +315,7 @@ def main(cfg: config):
         )
         return key
 
+
     for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)
         train_key = make_sharded_key(train_key)
@@ -330,6 +331,7 @@ def main(cfg: config):
         print(
             f"step: {current_step + 1} \t loss: {loss.item()} \t tks/s: {tks_per_second:.2f}s"
         )
+        start = time.time()
         continue
 
         if use_wandb:
