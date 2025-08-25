@@ -421,9 +421,13 @@ def main(config: config):
         )
     )
 
-    log("syncing devices...")
+
     jax.experimental.multihost_utils.sync_global_devices("test")
+    tokens_per_step = train_dataset.tokens_per_step * config.grad_step
+    log("devices synced")
     log("start training")
+    log(f"total steps: {total_steps}, starting from {init_step}")
+    log(f"tokens per step: {tokens_per_step}")
 
     start = time.time()
     train_loss = 0.0
@@ -470,9 +474,7 @@ def main(config: config):
         if current_step % config.checkpoint_steps == 0:
             end = time.time()
             total_time = end - start
-            tokens_per_second = (
-                config.data.train_batch_size * config.model.T * config.checkpoint_steps
-            ) / total_time
+            tokens_per_second = (tokens_per_step * config.checkpoint_steps) / total_time
             train_loss = (
                 (train_loss / config.checkpoint_steps)
                 if current_step > 0
