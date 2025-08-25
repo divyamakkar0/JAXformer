@@ -260,7 +260,7 @@ def main(cfg: config):
         grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         key = rearrange(key, "1 1 1 g n -> g n", g=cfg.grad_step, n=2)
 
-        loss, grads = jax.lax.scan(
+        grads, loss = jax.lax.scan(
             lambda carry, batch: single_step(carry, batch),
             grads,
             (x, y, key),
