@@ -281,7 +281,7 @@ def main(config: config):
         train_dataset,
         val_dataset,
     ) = Dataset.getDataset(
-        config.data, partition=data_partition, dp=count["fsdp"], pp=count["model"]
+        config.data_config, partition=data_partition, dp=count["fsdp"], pp=count["model"]
     )
     model_spec = shardedModel.get_p_spec(
         model=model,
