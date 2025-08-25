@@ -2,7 +2,7 @@
 
 SESSION="mysession"
 # command="python 2axismain.p:wqy "
-command="python 2axismain.py --checkpoint_steps=10 --n_device_axis 16 2 1 --name test10"
+command="python test.py --checkpoint_steps=10 --n_device_axis 16 2 1 --name test10"
 IPS=(
     "35.186.25.28"
     "35.186.39.76"
