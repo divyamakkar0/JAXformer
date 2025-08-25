@@ -1121,7 +1121,7 @@ class shardedModel:
         )
         layer = EncoderBlock(
             model_dimension=cfg.model_dimension,
-            n_heads=cfg.n_heads,
+            n_heads=cfg.n_head,
             dropout=cfg.dropout,
             T=cfg.T,
             latent_dim=cfg.latent_dim,
