@@ -443,6 +443,7 @@ def main(config: config):
 
             keys = jax.device_put(keys, jax.sharding.NamedSharding(mesh, key_spec))
             x, y = train_dataset()
+            breakpoint()
 
             jax.experimental.multihost_utils.sync_global_devices("train_step")
             log("syncing 1")
