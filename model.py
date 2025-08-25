@@ -1112,7 +1112,7 @@ class shardedModel:
         return embed_p_spec, layer_p_spec
 
     @staticmethod
-    def get_model(cfg) -> Tuple[Embeddings, EncoderBlock]:
+    def get_model(cfg: modelConfig) -> Tuple[Embeddings, EncoderBlock]:
         dtype = jnp.bfloat16 if (cfg.model_dtype == "bfloat16") else jnp.float32
         embedding_layer = Embeddings(
             model_dimension=cfg.model_dimension,
@@ -1122,7 +1122,7 @@ class shardedModel:
         layer = EncoderBlock(
             model_dimension=cfg.model_dimension,
             n_heads=cfg.n_head,
-            dropout=cfg.dropout,
+            dropout=cfg.dropout_rate,
             T=cfg.T,
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
