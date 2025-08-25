@@ -70,13 +70,6 @@ class TrainState:
     def apply_gradients(self, grads):
         updates, self.opt_state = self.tx.update(grads, self.opt_state, self.params)
         self.params = optax.apply_updates(self.params, updates)
-
-        # self.params = jax.tree.map(
-        #     lambda p, g: p - 0.001 * g,
-        #     self.params,
-        #     grads
-        # )
-
         return self
 
     def restore(self, params: PyTree, opt_state: PyTree):
@@ -197,8 +190,8 @@ def step(loss_fn, grad_steps, params, key, x, y, train):
 
         return grads, metrics
 
-    x = rearrange(x, "1 m (g b) t -> g m b t", g=grad_steps)
-    y = rearrange(y, "1 m (g b) t -> g m b t", g=grad_steps)
+    # x = rearrange(x, "1 m (g b) t -> g m b t", g=grad_steps)
+    # y = rearrange(y, "1 m (g b) t -> g m b t", g=grad_steps)
     key = rearrange(key, "1 1 1 g s -> g s", g=grad_steps, s=2)
 
     grads = None
@@ -255,7 +248,7 @@ def main(config: config):
     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
 
     key = KeyState(config.seed)
-    model = shardedModel.get_model(cfg=config.model)
+    model = shardedModel.get_model(cfg=config.model_config)
 
     lr_scheduler = optax.warmup_cosine_decay_schedule(
         init_value=config.lr.min_lr,
@@ -271,32 +264,34 @@ def main(config: config):
     )
 
     total_steps = config.training_steps
-    config.data.train_batch_size *= count["fsdp"] * config.grad_step
-    config.data.val_batch_size *= count["fsdp"] * config.eval_steps
+    # config.data.train_batch_size *= count["fsdp"] * config.grad_step
+    # config.data.val_batch_size *= count["fsdp"] * config.eval_steps
 
     log("setting up dataset")
 
+    data_spec = P(None, "model", "fsdp", "tensor")
     data_partition = jax.sharding.NamedSharding(
-        mesh, P(None, "fsdp", "model", None, "tensor")
+        mesh, data_spec
     )
+
+    # data_partition = jax.sharding.NamedSharding(
+    #     mesh, P(None, "fsdp", "model", None, "tensor")
+    # )
     (
         train_dataset,
         val_dataset,
     ) = Dataset.getDataset(
         config.data, partition=data_partition, dp=count["fsdp"], pp=count["model"]
     )
-
-    log(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
-
     model_spec = shardedModel.get_p_spec(
         model=model,
         mesh=mesh,
-        config=config.model,
+        config=config.model_config,
     )
 
     log("Creating model ...")
     params = shardedModel.get_params(
-        cfg=config.model, model=model, mesh=mesh, key=key()
+        cfg=config.model_config, model=model, mesh=mesh, key=key()
     )
     state = TrainState(params=params, tx=tx, mesh=mesh)
     init_step = 0
@@ -374,7 +369,7 @@ def main(config: config):
                 config=asdict(config),
             )
             wandb_id = wandb.run.id
-        save_checkpoint(init_step)
+        # save_checkpoint(init_step)
 
     if use_wandb:
         table = wandb.Table(
@@ -394,7 +389,6 @@ def main(config: config):
     loss_fn = jax.tree_util.Partial(loss, model, config)
 
     key_spec = P("fsdp", "model", "tensor")
-    data_spec = P("fsdp", "model", None, "tensor")
     train_step = jax.jit(
         jax.shard_map(
             lambda key, params, x, y: step(
@@ -543,7 +537,7 @@ def main(config: config):
                 table.add_data(current_step, *samples)
                 wandb_log["inference_tokens"] = table
 
-            save_checkpoint(current_step)
+            # save_checkpoint(current_step)
             start = time.time()
             train_loss = 0.0
 
