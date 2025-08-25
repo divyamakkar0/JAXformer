@@ -325,6 +325,7 @@ def main(cfg: config):
 
         params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
         loss.block_until_ready()
+        jax.experimental.multihost_utils.sync_global_devices("sync")
         end_time = time.time()
         tks_per_second = total_tokens / (end_time - start)
 
