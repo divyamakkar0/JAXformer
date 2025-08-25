@@ -257,6 +257,7 @@ def main(cfg: config):
             return grads, loss
 
         grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
+        loss = 0.0
         key = key.reshape(2,)
 
         for i in range(cfg.grad_step):
