@@ -112,7 +112,7 @@ def parse_args():
     parser.add_argument("--max_lr", type=float, default=4e-3)
     parser.add_argument("--min_lr", type=float, default=0)
     parser.add_argument("--end_lr", type=float, default=4e-5)
-    parser.add_argument("--warmup_steps", type=int, default=2000)
+    parser.add_argument("--warmup_steps", type=int, default=715)
     parser.add_argument("--end_steps", type=int, default=15000)
 
     parser.add_argument("--alpha", type=float, default=0.0001)
