@@ -36,8 +36,26 @@ class Dense(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        x = nn.Dense(features=self.features, dtype=self.dtype)(x)
+        kernel = self.param(
+            "kernel",
+            nn.initializers.lecun_normal(),
+            (x.shape[-1], self.features),
+            jnp.float32
+        )
+
+        bias = self.param(
+            "bias", nn.initializers.zeros, (self.features,), jnp.float32
+        )
+
+        x, kernel, bias = jax.tree.map(
+            lambda x: x.astype(self.dtype), (x, kernel, bias)
+        )
+
+        x = jnp.einsum("...d,df->...f", x, kernel)
         x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
+        tensor_size = jax.lax.psum(1, axis_name="tp")
+        x = x + (1/tensor_size) * bias
+
         return x
 
 
@@ -62,16 +80,23 @@ class RMSNorm(nn.Module):
     def __call__(self, x: Array) -> Array:
         x_type = x.dtype
         x = x.astype(jnp.float32)
-        rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        rms = jax.lax.pmean(rms, axis_name="tp")
+
+        rms = jnp.sum(jnp.square(x), axis=-1, keepdims=True)
+        rms = jax.lax.psum(rms, axis_name="tp")
+        rms = rms / jax.lax.psum(x.shape[-1], axis_name="tp")
+
         x = x / jnp.sqrt(rms + 1e-6)
         x = x.astype(x_type)
 
         gamma = self.param(
-            "gamma", nn.initializers.ones, (1, 1, x.shape[-1]), self.model_dtype
+            "gamma", nn.initializers.ones, (1, 1, x.shape[-1]), jnp.float32
         )
         beta = self.param(
-            "beta", nn.initializers.zeros, (1, 1, x.shape[-1]), self.model_dtype
+            "beta", nn.initializers.zeros, (1, 1, x.shape[-1]), jnp.float32
+        )
+
+        x, gamma, beta = jax.tree.map(
+            lambda x: x.astype(self.model_dtype), (x, gamma, beta)
         )
 
         x = x * gamma + beta
