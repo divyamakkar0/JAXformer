@@ -244,7 +244,6 @@ def main(cfg: config):
     key_spec = P("dp", "pp", "tp")
 
     @jax.jit
-
     def train_step(params, opt_state, x, y, key):
         step_fn = jax.value_and_grad(step)
 
