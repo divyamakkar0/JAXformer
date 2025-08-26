@@ -249,7 +249,7 @@ def main(cfg: config):
         mesh=mesh,
         in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
         out_specs=(param_spec, opt_spec, P()),
-        check_vma=False,
+        check_vma=True,
     )
     def train_step(params, opt_state, x, y, key):
         step_fn = jax.value_and_grad(step)
