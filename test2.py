@@ -81,7 +81,6 @@ class RMSNorm(nn.Module):
 
 class Embedding(nn.Module):
     model_dimension: int
-    # T: int
     vocab_size: int
     model_dtype: jnp.dtype
 
@@ -91,26 +90,17 @@ class Embedding(nn.Module):
             features=self.model_dimension,
             dtype=self.model_dtype,
         )
-
-        # self.pos_embedding = nn.Embed(
-        #     num_embeddings=self.T,
-        #     features=self.model_dimension,
-        #     dtype=self.model_dtype,
-        # )
-
         self.norm = RMSNorm(model_dtype=self.model_dtype)
 
     def __call__(self, x: Array, out: bool = False) -> Array:
         if not out:
             *_, T = x.shape
             x = self.embedding(x)
-            # pos_emb = self.pos_embedding(jnp.arange(T))
-            # x = x + pos_emb
             x = jax.lax.all_to_all(
                 x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
             )
             if self.is_mutable_collection("params"):
-                # x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
+                x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
             x = jax.lax.all_to_all(
@@ -292,52 +282,6 @@ class MLA(nn.Module):
 
         return output, (cKV_cache, kRT_cache)
 
-
-class AttentionBasic(nn.Module):
-    model_dimension: int
-    n_heads: int
-    model_dtype: jnp.dtype
-    T: int
-    dropout: float
-
-    def setup(self):
-        self.mask = jnp.tril(jnp.ones((1, 1, self.T, self.T), dtype=bool))
-
-    @nn.compact
-    def __call__(self, x: Array, train=True) -> Array:
-        base_dtype = x.dtype
-
-        qkv = Dense(features=3 * self.model_dimension, dtype=self.model_dtype)(x)
-        q, k, v = jnp.split(qkv, 3, axis=-1)
-
-        q, k, v = map(
-            lambda t: rearrange(
-                t.astype(jnp.float32), "B T (h d) -> B h T d", h=self.n_heads
-            ),
-            (q, k, v),
-        )
-
-        att = jnp.einsum("bhtd,bhsd->bhts", q, k)
-        att = att / jnp.sqrt(q.shape[-1])
-
-        mask = self.mask  # (1, 1, T, T)
-        att = jnp.where(mask, att, -1e9)
-
-        att = jax.nn.softmax(att, axis=-1)
-
-        if self.dropout > 0 and train:
-            att = nn.Dropout(self.dropout, deterministic=not train)(att)
-
-        out = jnp.einsum("bhts,bhsd->bhtd", att, v)
-
-        out = rearrange(out, "B h T d -> B T (h d)")
-
-        out = Dense(features=self.model_dimension, dtype=self.model_dtype)(out)
-        out = out.astype(base_dtype)
-
-        return out, (None, None)
-
-
 class Layer(nn.Module):
     model_dimension: int
     n_heads: int
@@ -363,13 +307,6 @@ class Layer(nn.Module):
             model_dtype=self.model_dtype,
             dropout=self.dropout_rate,
         )(x, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
-        # x, cache = AttentionBasic(
-        #     model_dimension=self.model_dimension,
-        #     n_heads=self.n_heads,
-        #     model_dtype=self.model_dtype,
-        #     T=self.T,
-        #     dropout=self.dropout_rate,
-        # )(x, train=train)
         x = x + x_res
         x_res = x
 
