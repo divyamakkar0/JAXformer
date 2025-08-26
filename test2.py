@@ -37,7 +37,7 @@ class Dense(nn.Module):
     @nn.compact
     def __call__(self, x: Array) -> Array:
         x = nn.Dense(features=self.features, dtype=self.dtype)(x)
-        x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
+        # x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
         return x
 
 
@@ -63,7 +63,7 @@ class RMSNorm(nn.Module):
         x_type = x.dtype
         x = x.astype(jnp.float32)
         rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        rms = jax.lax.pmean(rms, axis_name="tp")
+        # rms = jax.lax.pmean(rms, axis_name="tp")
         x = x / jnp.sqrt(rms + 1e-6)
         x = x.astype(x_type)
 
@@ -106,16 +106,16 @@ class Embedding(nn.Module):
             x = self.embedding(x)
             pos_emb = self.pos_embedding(jnp.arange(T))
             x = x + pos_emb
-            x = jax.lax.all_to_all(
-                x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
-            )
+            # x = jax.lax.all_to_all(
+            #     x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
+            # )
             if self.is_mutable_collection("params"):
-                x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
+                # x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
-            x = jax.lax.all_to_all(
-                x, "tp", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
-            )
+            # x = jax.lax.all_to_all(
+            #     x, "tp", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
+            # )
             x = self.norm(x)
             x = self.embedding.attend(x)
 
