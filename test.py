@@ -50,9 +50,10 @@ def init_devices(
     assert devices.size == np.prod(axes), (
         f"Expected {np.prod(axes)} devices, got {devices.shape[0]}"
     )
-
-    # mesh = jax.make_mesh((*axes,), (*axes_name,))
-    mesh = jax.sharding.Mesh(devices.reshape(axes), axes_name)
+    try:
+        mesh = jax.make_mesh((*axes,), (*axes_name,))
+    except:
+        mesh = jax.sharding.Mesh(devices.reshape(axes), axes_name)
     return mesh
 
 
