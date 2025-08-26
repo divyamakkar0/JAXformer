@@ -839,7 +839,7 @@ class shardedModel:
             ),
             out_specs=P("pp", "dp", "tp"),
         )
-        def generate_shard(params, out, key):
+        def generate_shard(params, generation_buffer, key):
             cache = None
             key = key.reshape(
                 2,
@@ -848,12 +848,12 @@ class shardedModel:
                 if not use_cache:
                     cache = None
                 key, sample_key = jax.random.split(key)
-                out = jax.lax.dynamic_slice_in_dim(generation, 0, prompt_length + current_idx + 1, axis=-1)
+                out = jax.lax.dynamic_slice_in_dim(generation_buffer, 0, prompt_length + current_idx + 1, axis=-1)
                 out_next, (cache, _logits) = sample(params, out, cache, sample_key)
 
-                generation = generation.at[:, :, prompt_length + current_idx].set(out_next)
+                generation_buffer = generation_buffer.at[:, :, prompt_length + current_idx].set(out_next)
 
-            return out[None, None, ...]
+            return generation_buffer[None, None, ...]
 
         key = jax.random.fold_in(key, jax.process_index())
         sample_key = jnp.array(jax.random.split(key, B)).reshape(
