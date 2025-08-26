@@ -467,6 +467,7 @@ class Transformer(nn.Module):
         embedding = Embedding(
             vocab_size=self.vocab_size,
             model_dimension=self.model_dimension,
+            T=self.T,
             model_dtype=self.model_dtype,
         )
 
