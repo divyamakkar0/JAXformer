@@ -37,7 +37,7 @@ class Dense(nn.Module):
     @nn.compact
     def __call__(self, x: Array) -> Array:
         x = nn.Dense(features=self.features, dtype=self.dtype)(x)
-        # x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
+        x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
         return x
 
 
@@ -63,7 +63,7 @@ class RMSNorm(nn.Module):
         x_type = x.dtype
         x = x.astype(jnp.float32)
         rms = jnp.mean(jnp.square(x), axis=-1, keepdims=True)
-        # rms = jax.lax.pmean(rms, axis_name="tp")
+        rms = jax.lax.pmean(rms, axis_name="tp")
         x = x / jnp.sqrt(rms + 1e-6)
         x = x.astype(x_type)
 
@@ -106,16 +106,16 @@ class Embedding(nn.Module):
             x = self.embedding(x)
             pos_emb = self.pos_embedding(jnp.arange(T))
             x = x + pos_emb
-            # x = jax.lax.all_to_all(
-            #     x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
-            # )
+            x = jax.lax.all_to_all(
+                x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
+            )
             if self.is_mutable_collection("params"):
                 # x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
-            # x = jax.lax.all_to_all(
-            #     x, "tp", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
-            # )
+            x = jax.lax.all_to_all(
+                x, "tp", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
+            )
             x = self.norm(x)
             x = self.embedding.attend(x)
 
@@ -301,18 +301,15 @@ class AttentionBasic(nn.Module):
     dropout: float
 
     def setup(self):
-        # causal mask [1, 1, T, T] with lower triangle = 1
         self.mask = jnp.tril(jnp.ones((1, 1, self.T, self.T), dtype=bool))
 
     @nn.compact
     def __call__(self, x: Array, train=True) -> Array:
         base_dtype = x.dtype
 
-        # project to q, k, v
         qkv = Dense(features=3 * self.model_dimension, dtype=self.model_dtype)(x)
         q, k, v = jnp.split(qkv, 3, axis=-1)
 
-        # reshape to (B, n_heads, T, head_dim)
         q, k, v = map(
             lambda t: rearrange(
                 t.astype(jnp.float32), "B T (h d) -> B h T d", h=self.n_heads
@@ -320,28 +317,21 @@ class AttentionBasic(nn.Module):
             (q, k, v),
         )
 
-        # scaled dot-product attention: (B, h, T, T)
         att = jnp.einsum("bhtd,bhsd->bhts", q, k)
         att = att / jnp.sqrt(q.shape[-1])
 
-        # apply causal mask
         mask = self.mask  # (1, 1, T, T)
         att = jnp.where(mask, att, -1e9)
 
-        # softmax
         att = jax.nn.softmax(att, axis=-1)
 
-        # optional dropout on attention weights
         if self.dropout > 0 and train:
             att = nn.Dropout(self.dropout, deterministic=not train)(att)
 
-        # weighted sum over values
         out = jnp.einsum("bhts,bhsd->bhtd", att, v)
 
-        # merge heads back: (B, T, d_model)
         out = rearrange(out, "B h T d -> B T (h d)")
 
-        # final projection
         out = Dense(features=self.model_dimension, dtype=self.model_dtype)(out)
         out = out.astype(base_dtype)
 
