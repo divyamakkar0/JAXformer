@@ -380,6 +380,22 @@ def main(cfg: config):
             log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
 
+            outputs = model.generate(
+                params,
+                cfg.model_config,
+                key=sample_key,
+                x="hello world",
+                B=cfg.inference_batch,
+                k=10000,
+                temperature=1.0,
+                n_devices=1,
+                use_cache=True,
+            )
+
+            log("Generated outputs:")
+            for output in outputs:
+                log(f"\t{output}")
+
             # save_checkpoint(current_step)
 
             start = time.time()
@@ -388,21 +404,7 @@ def main(cfg: config):
         if use_wandb:
             wandb.log(data=wandb_log, step=current_step)
 
-    outputs = model.generate(
-        params,
-        cfg.model_config,
-        key=sample_key,
-        x="hello world",
-        B=1,
-        k=10000,
-        temperature=1.0,
-        n_devices=1,
-        use_cache=True,
-    )
 
-    log("Generated outputs:")
-    for output in outputs:
-        log(f"\t{output}")
 
     if use_wandb:
         table = wandb.Table(
