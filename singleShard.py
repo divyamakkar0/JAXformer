@@ -60,7 +60,7 @@ def main(cfg: config):
     key = jax.random.PRNGKey(0)
     DATA_PARALLEL = cfg.device_config.n_device_axis
 
-    axes = (*cfg.device_config.n_device_axis,)
+    axes = (DATA_PARALLEL,)
     axes_name = ("dp", )
 
     mesh = init_devices(axes, axes_name)
