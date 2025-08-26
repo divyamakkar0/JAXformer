@@ -212,13 +212,13 @@ def main(cfg: config):
 
     def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
-            logits, _ = model.pipe_step(
+            logits, (_, load) = model.pipe_step(
                 params,
                 x,
                 key=key,
                 train=train,
             )
-            logits = logits.astype(jnp.float32)
+            logits = logits.astype(jnp.bfloat16)
             log_probs = jax.nn.log_softmax(logits, axis=-1)
 
             M, B, T, V = logits.shape
@@ -226,16 +226,34 @@ def main(cfg: config):
             log_probs = log_probs.reshape(M * B * T, V)
 
             loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
-            loss = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_probs, y)).mean()
-            return loss
+            loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_probs, y)).mean()
 
-        loss = loss_fn(params, x, y, key)
+            loss_cross = jax.lax.pmean(loss_cross, axis_name="dp")
+            loss_cross = jax.lax.pmean(loss_cross, axis_name="tp")
+            loss_cross = jax.lax.pmean(loss_cross, axis_name="pp")
 
-        loss = jax.lax.pmean(loss, axis_name="pp")
-        loss = jax.lax.pmean(loss, axis_name="tp")
-        loss = jax.lax.pmean(loss, axis_name="dp")
+            loss_balance = 0.0
 
-        return loss
+            #TODO: fix experts load balancing
+            if load is not None:
+                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="dp"), load)
+                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="tp"), load)
+                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="pp"), load)
+
+                f, p = load["f"], load["p"]
+                loss_balance = (cfg.model.n_experts / cfg.model.k) * (f * p).sum()
+
+            loss = loss_cross + cfg.alpha * loss_balance
+
+            metrics = {
+                "loss": loss,
+                "loss_cross": loss_cross,
+                "loss_balance": loss_balance,
+                "load_expert": load["tokens_per_expert"] if load else None,
+            }
+            return loss, metrics
+        return loss_fn(params, x, y, key)
+
 
     param_spec = shardedModel.get_p_spec(
         [model.embedding, model.block], mesh, cfg.model_config
@@ -252,35 +270,31 @@ def main(cfg: config):
         check_vma=False,
     )
     def train_step(params, opt_state, x, y, key):
-        step_fn = jax.value_and_grad(step)
+        step_fn = jax.value_and_grad(step, has_aux=True)
 
-        def single_step(batch):
-            x, y, key = batch
-            loss, grads = step_fn(params, x, y, key, train=True)
-            return grads, loss
+        def single_step(grads, batch):
+            (_, metrics), grads_current = step_fn(params, *batch, train=True)
+            grads = jax.tree.map(lambda x, y: x + y, grads, grads_current)
+            return grads, metrics
 
-
-        # grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-        # loss = 0.0
+        grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         key = key.reshape(
-            2,
+            cfg.grad_step, 2
         )
-        batch = (x[0], y[0], key)
-        grads, loss = single_step(batch)
 
-        # for i in range(cfg.grad_step):
-        #     key, subkey = jax.random.split(key)
-        #     batch = (x[i], y[i], subkey)
-        #     grads_step, loss_step = single_step(batch)
-        #     grads = jax.tree.map(lambda a, b: a + b, grads, grads_step)
-        #     loss += loss_step
+        grads, metrics = jax.lax.scan(
+            single_step,
+            grads,
+            (x, y, key),
+        )
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
+        metrics = jax.tree.map(lambda x: x.mean(), metrics)
+
         updates, opt_state = tx.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
 
-        loss = loss.mean()
-        return params, opt_state, loss
+        return params, opt_state, metrics
 
     @jax.jit
     @partial(
@@ -291,13 +305,13 @@ def main(cfg: config):
         check_vma=False,
     )
     def eval_step(params, x, y, key):
-        def single_step(loss, x, y, key):
-            loss += step(params, x, y, key, train=False)
-            return loss, None
+        def single_step(_, batch):
+            loss, metrics = step(params, *batch, key=key, train=False)
+            return loss, metrics
 
-        loss = jax.lax.scan(single_step, 0, (x, y, key))
-        loss = loss / config.eval_steps
-        return loss
+        metrics = jax.lax.scan(single_step, 0, (x, y))
+        metrics = jax.tree.map(lambda x: x.mean(), metrics)
+        return metrics
 
     total_steps = cfg.training_steps
     total_tokens = train_dataset.tokens_per_step
@@ -311,32 +325,22 @@ def main(cfg: config):
     train_loss = []
 
     @jax.jit
-    def make_sharded_key(key):
-        key = jax.random.split(key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
+    def make_sharded_key(key, steps=1):
+        key = jax.random.split(key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * steps)
         key = jnp.asarray(key).reshape(
-            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2)
+            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, steps, 2)
         )
         return key
 
-
     for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)
-        train_key = make_sharded_key(train_key)
-        eval_key = make_sharded_key(eval_key)
+        train_key = make_sharded_key(train_key, steps=cfg.grad_step)
+        eval_key = make_sharded_key(eval_key, steps=cfg.eval_steps)
 
         x, y = train_dataset(step=cfg.grad_step)
 
-        params, opt_state, loss = train_step(params, opt_state, x, y, train_key)
-        loss.block_until_ready()
-        jax.experimental.multihost_utils.sync_global_devices("sync")
-        end_time = time.time()
-        tks_per_second = total_tokens / (end_time - start)
-
-        log(
-            f"step: {current_step + 1} \t loss: {loss.item()} \t tks/s: {tks_per_second:.2f}s"
-        )
-        start = time.time()
-        continue
+        params, opt_state, metrics = train_step(params, opt_state, x, y, train_key)
+        breakpoint()
 
         if use_wandb:
             wandb_log = {
@@ -346,31 +350,29 @@ def main(cfg: config):
                 "lr": opt_state[1].hyperparams["learning_rate"],
             }
             if cfg.model.moe:
-                wandb_log["loss/load_loss"] = metrics["loss_load"]
+                wandb_log["loss/load_loss"] = metrics["loss_balance"]
                 for h in range(cfg.model.n_experts):
-                    wandb_log[f"load/head_{h}"] = metrics[f"load/head_{h}"]
+                    wandb_log[f"load/head_{h}"] = metrics[f"load_expert"][h]
 
         if current_step % cfg.checkpoint_steps == 0:
             time_per_batch = time.time() - start
             eval_x, eval_y = val_dataset()
-            eval_loss = eval_step(params, eval_x, eval_y, eval_key)
-
-            eval_loss = eval_loss.item()
-            train_loss = np.mean(jax.device_get(jnp.array(train_loss))).item()
+            val_metrics = eval_step(params, eval_x, eval_y, eval_key)
 
             if use_wandb:
-                wandb_log["loss/val_loss"] = metrics_val["loss"]
-                wandb_log["loss/val_cross_entropy_loss"] = metrics_val["loss_cross"]
+                wandb_log["loss/val_loss"] = val_metrics["loss"]
+                wandb_log["loss/val_cross_entropy_loss"] = val_metrics["loss_cross"]
                 if cfg.model.moe:
-                    wandb_log["loss/val_load_loss"] = metrics_val["loss_load"]
+                    wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
                     for h in range(cfg.model.n_experts):
-                        wandb_log[f"load/head_{h}"] = metrics_val[f"load/head_{h}"]
+                        wandb_log[f"load/head_{h}"] = val_metrics[f"load_expert"][h]
 
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
             tokens_per_second = cfg.checkpoint_steps * total_tokens / time_per_batch
-            log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
+            log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {val_metrics['loss']:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
+
             # save_checkpoint(current_step)
 
             start = time.time()

@@ -81,7 +81,7 @@ class RMSNorm(nn.Module):
 
 class Embedding(nn.Module):
     model_dimension: int
-    T: int
+    # T: int
     vocab_size: int
     model_dtype: jnp.dtype
 
@@ -92,11 +92,11 @@ class Embedding(nn.Module):
             dtype=self.model_dtype,
         )
 
-        self.pos_embedding = nn.Embed(
-            num_embeddings=self.T,
-            features=self.model_dimension,
-            dtype=self.model_dtype,
-        )
+        # self.pos_embedding = nn.Embed(
+        #     num_embeddings=self.T,
+        #     features=self.model_dimension,
+        #     dtype=self.model_dtype,
+        # )
 
         self.norm = RMSNorm(model_dtype=self.model_dtype)
 
@@ -104,8 +104,8 @@ class Embedding(nn.Module):
         if not out:
             *_, T = x.shape
             x = self.embedding(x)
-            pos_emb = self.pos_embedding(jnp.arange(T))
-            x = x + pos_emb
+            # pos_emb = self.pos_embedding(jnp.arange(T))
+            # x = x + pos_emb
             x = jax.lax.all_to_all(
                 x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
             )
@@ -354,22 +354,22 @@ class Layer(nn.Module):
         x_res = x
 
         x = RMSNorm(model_dtype=self.model_dtype)(x)
-        # x, cache = MLA(
-        #     model_dimension=self.model_dimension,
-        #     n_heads=self.n_heads,
-        #     T=self.T,
-        #     latent_dim=self.latent_dim,
-        #     dhR=self.dhR,
-        #     model_dtype=self.model_dtype,
-        #     dropout=self.dropout_rate,
-        # )(x, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
-        x, cache = AttentionBasic(
+        x, cache = MLA(
             model_dimension=self.model_dimension,
             n_heads=self.n_heads,
-            model_dtype=self.model_dtype,
             T=self.T,
+            latent_dim=self.latent_dim,
+            dhR=self.dhR,
+            model_dtype=self.model_dtype,
             dropout=self.dropout_rate,
-        )(x, train=train)
+        )(x, cKV_cache=cache[0], kRT_cache=cache[1], train=train)
+        # x, cache = AttentionBasic(
+        #     model_dimension=self.model_dimension,
+        #     n_heads=self.n_heads,
+        #     model_dtype=self.model_dtype,
+        #     T=self.T,
+        #     dropout=self.dropout_rate,
+        # )(x, train=train)
         x = x + x_res
         x_res = x
 
@@ -457,7 +457,7 @@ class Transformer(nn.Module):
         embedding = Embedding(
             vocab_size=self.vocab_size,
             model_dimension=self.model_dimension,
-            T=self.T,
+            # T=self.T,
             model_dtype=self.model_dtype,
         )
 
@@ -597,7 +597,7 @@ class shardedModel:
         self.dtype = convert_dtype(cfg.model_dtype)
         self.embedding = Embedding(
             vocab_size=cfg.vocab_size,
-            T=cfg.T,
+            # T=cfg.T,
             model_dimension=cfg.model_dimension,
             model_dtype=self.dtype,
         )
