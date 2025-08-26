@@ -374,7 +374,8 @@ def main(cfg: config):
 
             tokens_per_second = cfg.checkpoint_steps * total_tokens / time_per_batch
             train_loss = jnp.array(train_loss).mean().item()
-            log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {val_metrics['loss']:.4f}, tk/s: {tokens_per_second:,.2f}"
+            eval_loss = val_metrics["loss"].item()
+            log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
 
             # save_checkpoint(current_step)
