@@ -306,7 +306,7 @@ def main(cfg: config):
     )
     def eval_step(params, x, y, key):
         def single_step(_, batch):
-            loss, metrics = step(params, *batch, key=key, train=False)
+            loss, metrics = step(params, *batch, key=key, train=False) # Key does not matter
             return loss, metrics
 
         metrics = jax.lax.scan(single_step, 0, (x, y))
