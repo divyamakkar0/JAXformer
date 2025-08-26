@@ -52,9 +52,10 @@ class Dense(nn.Module):
         )
 
         x = jnp.einsum("...d,df->...f", x, kernel)
-        x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
         tensor_size = jax.lax.psum(1, axis_name="tp")
         x = x + (1/tensor_size) * bias
+        x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
+       
 
         return x
 
