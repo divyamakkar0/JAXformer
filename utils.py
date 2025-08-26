@@ -82,7 +82,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="model training")
 
     parser.add_argument("--model_dimension", type=int, default=768)
-    parser.add_argument("--vocab_size", type=int, default=50257)
+    parser.add_argument("--vocab_size", type=int, default=50304)
     parser.add_argument("--n_head", type=int, default=12)
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--layers_per_block", type=int, default=3)
@@ -109,9 +109,9 @@ def parse_args():
     parser.add_argument("--val_batch_size", type=int, default=16)
     parser.add_argument("--micro_batch_size", type=int, default=4)
 
-    parser.add_argument("--max_lr", type=float, default=4e-3)
+    parser.add_argument("--max_lr", type=float, default=6e-4)
     parser.add_argument("--min_lr", type=float, default=0)
-    parser.add_argument("--end_lr", type=float, default=4e-5)
+    parser.add_argument("--end_lr", type=float, default=6e-5)
     parser.add_argument("--warmup_steps", type=int, default=715)
     parser.add_argument("--end_steps", type=int, default=15000)
 
