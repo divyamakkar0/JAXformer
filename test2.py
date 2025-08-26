@@ -844,14 +844,16 @@ class shardedModel:
             key = key.reshape(
                 2,
             )
-            for current_idx in range(generation_length):
+            for idx in range(generation_length):
                 if not use_cache:
                     cache = None
                 key, sample_key = jax.random.split(key)
-                out = jax.lax.dynamic_slice_in_dim(generation_buffer, 0, prompt_length + current_idx + 1, axis=-1)
+                current_idx = prompt_length + idx
+                out = jax.lax.dynamic_slice_in_dim(generation_buffer, 0, current_idx + 1, axis=-1)
                 out_next, (cache, _logits) = sample(params, out, cache, sample_key)
 
-                generation_buffer = generation_buffer.at[:, :, prompt_length + current_idx].set(out_next)
+
+                generation_buffer = generation_buffer.at[:, :, current_idx: current_idx + 1].set(out_next)
 
             return generation_buffer[None, None, ...]
 
