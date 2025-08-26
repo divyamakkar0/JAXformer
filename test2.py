@@ -514,6 +514,9 @@ class Transformer(nn.Module):
 
         return x_out, out_cache
 
+    def init_weights(self, key: jax.random.KeyArray) -> PyTree:
+        return self.init(key, jnp.ones((1, self.T), dtype=jnp.int32), train=False)['params']
+
     @classmethod
     def get_model(cls, cfg: modelConfig) -> "Transformer":
         return cls(
