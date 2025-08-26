@@ -29,7 +29,6 @@ import json
 import wandb
 from dataclasses import asdict
 import orbax.checkpoint as ocp
-from einops import rearrange
 
 
 def log(msg: str):

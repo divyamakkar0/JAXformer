@@ -140,7 +140,6 @@ class Embedding(nn.Module):
 class RoPE(nn.Module):
     T: int
     model_dim: int
-    tensor_size: int
 
     def setup(self):
         assert self.model_dim % 2 == 0, "model_dim must be even"
@@ -153,7 +152,8 @@ class RoPE(nn.Module):
         theta = jnp.exp(-2 * pos / self.model_dim * log_theta_base)
 
         idx = jax.lax.axis_index("tp")
-        slice_factor = self.model_dim // self.tensor_size
+        tensor_size = jax.lax.psum(1, axis_name="tp")
+        slice_factor = self.model_dim // tensor_size
 
         cos = jnp.cos(freq * theta)
         sin = jnp.sin(freq * theta)
