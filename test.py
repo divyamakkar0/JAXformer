@@ -337,9 +337,8 @@ def main(cfg: config):
         return key
 
     for current_step in range(init_step, total_steps):
-        key, train_key, eval_key = jax.random.split(key, 3)
+        key, train_key = jax.random.split(key, 3)
         train_key = make_sharded_key(train_key, steps=cfg.grad_step)
-        eval_key = make_sharded_key(eval_key, steps=cfg.eval_steps)
 
         x, y = train_dataset(step=cfg.grad_step)
 
@@ -361,7 +360,7 @@ def main(cfg: config):
         if current_step % cfg.checkpoint_steps == 0:
             time_per_batch = time.time() - start
             eval_x, eval_y = val_dataset(step=cfg.eval_steps)
-            val_metrics = eval_step(params, eval_x, eval_y, eval_key)
+            val_metrics = eval_step(params, eval_x, eval_y)
 
             if use_wandb:
                 wandb_log["loss/val_loss"] = val_metrics["loss"]
