@@ -58,10 +58,10 @@ def init_devices(
 
 def main(cfg: config):
     key = jax.random.PRNGKey(0)
-    DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL = cfg.device_config.n_device_axis
+    DATA_PARALLEL = cfg.device_config.n_device_axis
 
     axes = (*cfg.device_config.n_device_axis,)
-    axes_name = ("dp", "pp", "tp")
+    axes_name = ("dp", )
 
     mesh = init_devices(axes, axes_name)
     log(mesh)
@@ -84,8 +84,6 @@ def main(cfg: config):
         cfg.data_config,
         partition=data_partition,
         dp=DATA_PARALLEL,
-        pp=LAYER_PARALLEL,
-        tp=TENSOR_PARALLEL,
     )
 
     model = shardedModel(cfg.model_config)

@@ -155,7 +155,9 @@ class Dataset:
         partition: Optional[NamedSharding] = None,
         dp: int = 1,
         pp: int = 1,
+        tp: int = 1,
     ) -> Tuple["Dataset", "Dataset"]:
+        assert (cfg.T % tp) == 0, "T should be divisible by tensor parallelism"
         train_dataset = cls(
             cfg.process_path,
             cfg.T,
