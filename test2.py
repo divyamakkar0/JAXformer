@@ -272,15 +272,12 @@ class MLA(nn.Module):
         def scaledDotProd(q, k, v, mask):
             input_dtype = q.dtype
 
-            q = q.astype(jnp.float32)
-            k = k.astype(jnp.float32)
-            v = v.astype(jnp.float32)
-
+            q, k ,v = jax.tree.map(lambda x: x.astype(jnp.float32), (q, k, v))
             dk = q.shape[-1]
 
             w = jnp.einsum("B n T d, B n t d -> B n T t", q, k) * (dk**-0.5)
             w = jnp.where(mask == 0, -jnp.inf, w)
-            w = jax.nn.softmax(w, axis=-1).astype(self.model_dtype)
+            w = jax.nn.softmax(w, axis=-1)
             output = jnp.einsum("B n T t, B n t d -> B n T d", w, v)
 
             output = output.astype(input_dtype)
