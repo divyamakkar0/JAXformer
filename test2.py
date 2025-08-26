@@ -140,6 +140,7 @@ class Embedding(nn.Module):
 class RoPE(nn.Module):
     T: int
     model_dim: int
+    tensor_size: int
 
     def setup(self):
         assert self.model_dim % 2 == 0, "model_dim must be even"
