@@ -340,7 +340,7 @@ def main(cfg: config):
         x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, metrics = train_step(params, opt_state, x, y, train_key)
-        breakpoint()
+        train_loss.append(metrics["loss"])
 
         if use_wandb:
             wandb_log = {
@@ -370,7 +370,7 @@ def main(cfg: config):
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
             tokens_per_second = cfg.checkpoint_steps * total_tokens / time_per_batch
-            log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {val_metrics['loss']:.4f}, tk/s: {tokens_per_second:,.2f}"
+            log_string = f"Step {current_step + 1}, Loss: {np.mean(train_loss):.4f}, Eval Loss: {val_metrics['loss']:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
 
             # save_checkpoint(current_step)
