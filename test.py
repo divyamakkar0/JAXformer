@@ -359,7 +359,7 @@ def main(cfg: config):
 
         if current_step % cfg.checkpoint_steps == 0:
             time_per_batch = time.time() - start
-            eval_x, eval_y = val_dataset(steps=cfg.eval_steps)
+            eval_x, eval_y = val_dataset(step=cfg.eval_steps)
             val_metrics = eval_step(params, eval_x, eval_y, eval_key)
 
             if use_wandb:
