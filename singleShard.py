@@ -230,15 +230,13 @@ def main(cfg: config):
 
         loss = loss_fn(params, x, y, key)
 
-        loss = jax.lax.pmean(loss, axis_name="pp")
-        loss = jax.lax.pmean(loss, axis_name="tp")
+        # loss = jax.lax.pmean(loss, axis_name="pp")
+        # loss = jax.lax.pmean(loss, axis_name="tp")
         loss = jax.lax.pmean(loss, axis_name="dp")
 
         return loss
 
-    param_spec = shardedModel.get_p_spec(
-        [model.embedding, model.block], mesh, cfg.model_config
-    )
+    param_spec = Transformer.get_p_spec(params)
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
     key_spec = P("dp", "pp", "tp")
 
@@ -248,7 +246,7 @@ def main(cfg: config):
         mesh=mesh,
         in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
         out_specs=(param_spec, opt_spec, P()),
-        check_vma=False,
+        check_vma=True,
     )
     def train_step(params, opt_state, x, y, key):
         step_fn = jax.value_and_grad(step)

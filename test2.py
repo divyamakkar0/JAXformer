@@ -514,8 +514,16 @@ class Transformer(nn.Module):
 
         return x_out, out_cache
 
-    def init_weights(self, key: jax.random.KeyArray) -> PyTree:
-        return self.init(key, jnp.ones((1, self.T), dtype=jnp.int32), train=False)['params']
+    def init_weights(self, key: jax.random.key, mesh: jax.sharding.Mesh) -> PyTree:
+        params = self.init(key, jnp.ones((1, self.T), dtype=jnp.int32), train=False)['params']
+        p_spec = Transformer.get_p_spec(params)
+        params = jax.tree.map(
+            lambda x, y: jax.device_put(x, jax.sharding.NamedSharding(mesh, y)),
+            params,
+            p_spec,
+        )
+        return params
+
 
     @classmethod
     def get_model(cls, cfg: modelConfig) -> "Transformer":
@@ -530,6 +538,13 @@ class Transformer(nn.Module):
             dhR=cfg.dhR,
             dropout_rate=cfg.dropout_rate,
             model_dtype=convert_dtype(cfg.model_dtype),
+        )
+
+    @staticmethod
+    def get_p_spec(params: PyTree):
+        return jax.tree.map(
+            lambda _: P(),
+            params,
         )
 
     def generate(
