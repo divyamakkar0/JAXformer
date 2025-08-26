@@ -78,7 +78,7 @@ def main(cfg: config):
     options = ocp.CheckpointManagerOptions(max_to_keep=1)
     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
 
-    data_spec = P(None, "dp")
+    data_spec = P(None, None, "dp", None)
     data_partition = jax.sharding.NamedSharding(mesh, data_spec)
 
     train_dataset, val_dataset = Dataset.getDataset(
@@ -264,7 +264,8 @@ def main(cfg: config):
         key = key.reshape(
             2,
         )
-        batch = (x[0], y[0], key)
+        x, y = x.reshape(-1, cfg.data_config.T), y.reshape(-1, cfg.data_config.T)
+        batch = (x, y, key)
         grads, loss = single_step(batch)
 
         # for i in range(cfg.grad_step):
