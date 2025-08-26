@@ -255,17 +255,16 @@ def main(cfg: config):
             check_vma=True,
         )
         def single_step(params, x, y, key):
+            key = key.reshape(2,)
             loss, grads = step_fn(params, x, y, key, train=True)
             return grads, loss
 
 
         # grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         # loss = 0.0
-        key = key.reshape(
-            2,
-        )
+
         batch = (x[0], y[0], key)
-        grads, loss = single_step(batch)
+        grads, loss = single_step(params, *batch)
 
         # for i in range(cfg.grad_step):
         #     key, subkey = jax.random.split(key)
