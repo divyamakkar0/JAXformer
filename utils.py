@@ -43,11 +43,11 @@ class dataConfig:
 class LRConfig:
     """class for keeping track of learning rate args"""
 
-    max_lr: float = 6e-4
-    min_lr: float = 0
-    end_lr: float = 6e-5
-    warmup_steps: int = 1000
-    end_steps: int = 6000
+    max_lr: float
+    min_lr: float
+    end_lr: float
+    warmup_steps: int
+    end_steps: int
 
 
 @dataclass
@@ -113,7 +113,7 @@ def parse_args():
     parser.add_argument("--min_lr", type=float, default=0)
     parser.add_argument("--end_lr", type=float, default=6e-5)
     parser.add_argument("--warmup_steps", type=int, default=715)
-    parser.add_argument("--end_steps", type=int, default=15000)
+    parser.add_argument("--end_steps", type=int, default=1973)
 
     parser.add_argument("--alpha", type=float, default=0.0001)
     parser.add_argument("--name", type=str, default=None, required=True)
