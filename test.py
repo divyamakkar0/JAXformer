@@ -324,7 +324,10 @@ def main(cfg: config):
     start = time.time()
     train_loss = []
 
-    @jax.jit
+    @partial(
+        jax.jit,
+        static_argnames=["steps"]
+    )
     def make_sharded_key(key, steps=1):
         key = jax.random.split(key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * steps)
         key = jnp.asarray(key).reshape(
