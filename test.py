@@ -337,7 +337,7 @@ def main(cfg: config):
         return key
 
     for current_step in range(init_step, total_steps):
-        key, train_key = jax.random.split(key, 3)
+        key, train_key = jax.random.split(key)
         train_key = make_sharded_key(train_key, steps=cfg.grad_step)
 
         x, y = train_dataset(step=cfg.grad_step)
