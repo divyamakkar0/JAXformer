@@ -105,7 +105,7 @@ def parse_args():
     )
     parser.add_argument("--train_folder_name", type=str, default="train")
     parser.add_argument("--val_folder_name", type=str, default="val")
-    parser.add_argument("--train_batch_size", type=int, default=32)
+    parser.add_argument("--train_batch_size", type=int, default=16)
     parser.add_argument("--val_batch_size", type=int, default=16)
     parser.add_argument("--micro_batch_size", type=int, default=4)
 
@@ -113,7 +113,7 @@ def parse_args():
     parser.add_argument("--min_lr", type=float, default=0)
     parser.add_argument("--end_lr", type=float, default=6e-5)
     parser.add_argument("--warmup_steps", type=int, default=715)
-    parser.add_argument("--end_steps", type=int, default=1973)
+    parser.add_argument("--end_steps", type=int, default=19073)
 
     parser.add_argument("--alpha", type=float, default=0.0001)
     parser.add_argument("--name", type=str, default=None, required=True)
