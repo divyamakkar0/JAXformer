@@ -310,9 +310,9 @@ def main(cfg: config):
 
     @jax.jit
     def make_sharded_key(key):
-        key = jax.random.split(key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL)
+        key = jax.random.split(key, DATA_PARALLEL)
         key = jnp.asarray(key).reshape(
-            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, 2)
+            (DATA_PARALLEL, 2)
         )
         return key
 
