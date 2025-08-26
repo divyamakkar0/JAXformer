@@ -58,7 +58,8 @@ def init_devices(
 
 def main(cfg: config):
     key = jax.random.PRNGKey(0)
-    DATA_PARALLEL = cfg.device_config.n_device_axis
+    # DATA_PARALLEL = cfg.device_config.n_device_axis
+    DATA_PARALLEL = 32
 
     axes = (DATA_PARALLEL,)
     axes_name = ("dp", )
