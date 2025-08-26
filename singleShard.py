@@ -238,7 +238,7 @@ def main(cfg: config):
 
     param_spec = Transformer.get_p_spec(params)
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
-    key_spec = P("dp", "pp", "tp")
+    key_spec = P("dp")
 
     @jax.jit
     @partial(
