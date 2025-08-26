@@ -55,7 +55,6 @@ class Dense(nn.Module):
         tensor_size = jax.lax.psum(1, axis_name="tp")
         x = x + (1/tensor_size) * bias
         x = jax.lax.psum_scatter(x, "tp", scatter_dimension=x.ndim - 1, tiled=True)
-       
 
         return x
 
@@ -684,9 +683,7 @@ class shardedModel:
     ):
         stage = jax.lax.axis_index("pp")
         n_devices = jax.lax.axis_size("pp")
-        layers_per_device = stage_params["Layer_0"]["MLA_0"]["Dense_0"][
-            "Dense_0"
-        ]["kernel"].shape[0]
+        layers_per_device = stage_params["Layer_0"]["MLA_0"]["Dense_0"]["kernel"].shape[0]
         microbatch_per_device = inputs.shape[0]
         microbatches = n_devices * microbatch_per_device
         layers = layers_per_device * n_devices
