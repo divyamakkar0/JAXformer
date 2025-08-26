@@ -300,18 +300,17 @@ def main(cfg: config):
     @partial(
         jax.shard_map,
         mesh=mesh,
-        in_specs=(param_spec, data_spec, data_spec, key_spec),
+        in_specs=(param_spec, data_spec, data_spec),
         out_specs=P(),
         check_vma=False,
     )
-    def eval_step(params, x, y, key):
+    def eval_step(params, x, y):
+
         def single_step(_, batch):
-            loss, metrics = step(params, *batch, train=False) # Key does not matter
+            loss, metrics = step(params, *batch, key=jax.random.PRNGKey(0), train=False) # Key does not matter
             return loss, metrics
-        key = key.reshape(
-            cfg.eval_steps, 2
-        )
-        metrics = jax.lax.scan(single_step, 0, (x, y, key))
+
+        _, metrics = jax.lax.scan(single_step, 0, (x, y))
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
         return metrics
 
