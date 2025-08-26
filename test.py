@@ -241,31 +241,32 @@ def main(cfg: config):
         [model.embedding, model.block], mesh, cfg.model_config
     )
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
-    data_spec = P("pp", "dp", "tp")
     key_spec = P("dp", "pp", "tp")
 
     @jax.jit
+    @partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
+        out_specs=(param_spec, opt_spec, P()),
+        check_vma=False,
+    )
     def train_step(params, opt_state, x, y, key):
         step_fn = jax.value_and_grad(step)
 
-        @partial(
-            jax.shard_map,
-            mesh=mesh,
-            in_specs=(param_spec, data_spec, data_spec, key_spec),
-            out_specs=(param_spec, P()),
-            check_vma=False,
-        )
-        def single_step(params, x, y, key):
-            key = key.reshape(2,)
+        def single_step(batch):
+            x, y, key = batch
             loss, grads = step_fn(params, x, y, key, train=True)
             return grads, loss
 
 
         # grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         # loss = 0.0
-
+        key = key.reshape(
+            2,
+        )
         batch = (x[0], y[0], key)
-        grads, loss = single_step(params, *batch)
+        grads, loss = single_step(batch)
 
         # for i in range(cfg.grad_step):
         #     key, subkey = jax.random.split(key)
