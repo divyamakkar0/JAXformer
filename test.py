@@ -241,6 +241,7 @@ def main(cfg: config):
         [model.embedding, model.block], mesh, cfg.model_config
     )
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
+    data_spec = P("pp", "dp", "tp")
     key_spec = P("dp", "pp", "tp")
 
     @jax.jit
