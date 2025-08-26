@@ -220,9 +220,9 @@ def main(cfg: config):
             logits = logits.astype(jnp.float32)
             log_probs = jax.nn.log_softmax(logits, axis=-1)
 
-            M, B, T, V = logits.shape
+            *_, V = logits.shape
             y = y.reshape(-1)
-            log_probs = log_probs.reshape(M * B * T, V)
+            log_probs = log_probs.reshape(-1, V)
 
             loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
             loss = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_probs, y)).mean()
