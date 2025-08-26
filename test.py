@@ -53,6 +53,7 @@ def init_devices(
     try:
         mesh = jax.make_mesh((*axes,), (*axes_name,))
     except:
+        log("Failed to create mesh with make_mesh, falling back to sharding.Mesh")
         mesh = jax.sharding.Mesh(devices.reshape(axes), axes_name)
     return mesh
 
