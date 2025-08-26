@@ -211,11 +211,11 @@ def main(cfg: config):
 
     def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
-            logits, _ = model.pipe_step(
-                params,
+            logits, _ = model.apply(
+                {'params': params},
                 x,
-                key=key,
                 train=train,
+                rngs={'dropout': key}
             )
             logits = logits.astype(jnp.float32)
             log_probs = jax.nn.log_softmax(logits, axis=-1)
