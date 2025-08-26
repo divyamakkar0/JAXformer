@@ -20,7 +20,7 @@ jax.config.update(
 import optax
 from jax.sharding import PartitionSpec as P
 import numpy as np
-from test2 import shardedModel
+from test2 import Transformer
 from dataset import Dataset
 from utils import parse_args, config
 import time
@@ -77,7 +77,7 @@ def main(cfg: config):
     options = ocp.CheckpointManagerOptions(max_to_keep=1)
     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
 
-    data_spec = P(None, "pp", "dp", "tp")
+    data_spec = P(None, "dp")
     data_partition = jax.sharding.NamedSharding(mesh, data_spec)
 
     train_dataset, val_dataset = Dataset.getDataset(
@@ -86,7 +86,7 @@ def main(cfg: config):
         dp=DATA_PARALLEL,
     )
 
-    model = shardedModel(cfg.model_config)
+    model = Transformer.get_model(cfg.model_config)
 
     log("creating sharded model ...")
     key, init_key = jax.random.split(key, 2)
