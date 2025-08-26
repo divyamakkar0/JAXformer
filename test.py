@@ -253,7 +253,7 @@ def main(cfg: config):
             mesh=mesh,
             in_specs=(param_spec, data_spec, data_spec, key_spec),
             out_specs=(param_spec, P()),
-            check_vma=True,
+            check_vma=False,
         )
         def single_step(params, x, y, key):
             key = key.reshape(2,)
