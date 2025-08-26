@@ -43,9 +43,9 @@ class dataConfig:
 class LRConfig:
     """class for keeping track of learning rate args"""
 
-    max_lr: float = 4e-3
+    max_lr: float = 6e-4
     min_lr: float = 0
-    end_lr: float = 4e-4
+    end_lr: float = 6e-5
     warmup_steps: int = 1000
     end_steps: int = 6000
 
