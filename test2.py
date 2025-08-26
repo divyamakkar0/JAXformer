@@ -848,7 +848,9 @@ class shardedModel:
         prompt_length = out.shape[-1]
         generation_length = min(max_tokens, cfg.T - prompt_length)
 
-        @jax.jit
+        generation = jnp.zeros((n_devices, B // n_devices, generation_length + prompt_length), dtype=jnp.int32)
+        generation = generation.at[:, :, :prompt_length].set(out)
+
         def sample(params, out, cache, sample_key):
             sample_key, pipe_key = jax.random.split(sample_key, 2)
             logits, (cache, _) = shardedModel.pipe_step(
@@ -870,6 +872,7 @@ class shardedModel:
 
             return out_next, (cache, logits)
 
+        @jax.jit
         @partial(
             jax.shard_map,
             mesh=mesh,
@@ -885,24 +888,22 @@ class shardedModel:
             key = key.reshape(
                 2,
             )
-            for _ in range(generation_length):
-                start_time = time.time()
+            for current_idx in range(generation_length):
                 if not use_cache:
                     cache = None
                 key, sample_key = jax.random.split(key)
+                out = jax.lax.dynamic_slice_in_dim(generation, 0, prompt_length + current_idx + 1, axis=-1)
                 out_next, (cache, _logits) = sample(params, out, cache, sample_key)
 
-                out = jnp.concatenate([out, out_next], axis=-1)
-                end_time = time.time()
-                token_time = end_time - start_time
-                print(f"Token {_ + 1} generated \t {1 / token_time:.4f} tk/s")
+                generation = generation.at[:, :, prompt_length + current_idx].set(out_next)
+
             return out[None, None, ...]
 
         key = jax.random.fold_in(key, jax.process_index())
         sample_key = jnp.array(jax.random.split(key, B)).reshape(
             n_devices, B // n_devices, 2
         )
-        out = generate_shard(params, out, sample_key)
+        out = generate_shard(params, generation, sample_key)
 
         tokens = jax.device_get(out)
         tokens = tokens.reshape(-1, tokens.shape[-1])
