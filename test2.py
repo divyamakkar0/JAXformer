@@ -555,7 +555,6 @@ class shardedModel:
         self.dtype = convert_dtype(cfg.model_dtype)
         self.embedding = Embedding(
             vocab_size=cfg.vocab_size,
-            # T=cfg.T,
             model_dimension=cfg.model_dimension,
             model_dtype=self.dtype,
         )
