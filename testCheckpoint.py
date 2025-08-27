@@ -7,16 +7,16 @@ import os
 
 jax.distributed.initialize()
 OUTPUT_DIR = "./testSave"
-NAME = "testRun"
-checkpoint_dir = os.path.join(
-        os.path.abspath(OUTPUT_DIR), NAME, "checkpoints"
-  )
+# NAME = "testRun"
+# checkpoint_dir = os.path.join(
+#         os.path.abspath(OUTPUT_DIR), NAME, "checkpoints"
+#   )
 
-load = os.path.exists(checkpoint_dir)
-if not load:
-    os.makedirs(checkpoint_dir)
-    checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
-
+# load = os.path.exists(checkpoint_dir)
+# if not load:
+#     os.makedirs(checkpoint_dir)
+#     checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
+checkpoint_dir = "gs://jaxformer-test-bucket/checkpoints/testRun"
 options = ocp.CheckpointManagerOptions(max_to_keep=1)
 checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
 
