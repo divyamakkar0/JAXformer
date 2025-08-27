@@ -402,10 +402,13 @@ def main(cfg: config):
                 log(f"\t{output}")
 
             if jax.process_index() == 0:
+                save_path = os.path.join(
+                    os.path.abspath("./samples"), cfg.name
+                )
+                if not os.path.exists(save_path):
+                    os.makedirs(save_path)
                 with open(
-                    os.path.join(
-                        os.path.abspath("./samples"), cfg.name, "tokens.txt"
-                    ),
+                    os.path.join(save_path, "tokens.txt"),
                     "a",
                 ) as f:
                     f.write(f"{current_step} | {outputs}\n")
