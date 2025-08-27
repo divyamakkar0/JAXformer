@@ -27,7 +27,7 @@ test_pytree = {
     }
 
 mesh = jax.make_mesh((jax.device_count(), ), ('dp',))
-sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dp',))
+sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 test_pytree = jax.tree.map(lambda x: jax.device_put(x, sharding), test_pytree)
 
 step = 0
