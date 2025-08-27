@@ -417,7 +417,6 @@ def main(cfg: config):
             wandb.log(data=wandb_log, step=current_step)
 
 
-
     if use_wandb:
         wandb.finish()
 

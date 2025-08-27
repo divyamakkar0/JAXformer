@@ -3,7 +3,7 @@
 source .env
 SESSION="mysession"
 # command="python 2axismain.p:wqy "
-command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name test1231 --train_batch_size 64 --wandb"
+command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name test342 --train_batch_size 64 --wandb"
 IPS=(
     "35.186.25.28"
     "35.186.39.76"
@@ -38,8 +38,6 @@ for i in $(seq 0 7); do
   tmux send-keys -t "$SESSION":0.$i "bash setupTpu.sh" C-m
   tmux send-keys -t "$SESSION":0.$i "wandb login $WANDB_KEY" C-m
   tmux send-keys -t "$SESSION":0.$i "$command" C-m
-
-
 done
 
 for i in $(seq 0 7); do

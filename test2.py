@@ -575,6 +575,13 @@ class shardedModel:
     def init_weights(self, key, mesh):
         out_spec = shardedModel.get_p_spec([self.embedding, self.block], mesh, self.cfg)
 
+        def replace_fsdp(p: jax.sharding.PartitionSpec):
+            if p[-1] == "fsdp":
+                p = P(*p[:-1], None)
+            return p
+
+        out_spec_no_fsdp = jax.tree.map(lambda x: replace_fsdp(x), out_spec)
+
         x_embed = jnp.ones((1, self.cfg.T), dtype=jnp.int32)
         x_layer = jnp.ones((1, self.cfg.T, self.cfg.model_dimension), dtype=self.dtype)
 
@@ -592,7 +599,7 @@ class shardedModel:
             jax.shard_map,
             mesh=mesh,
             in_specs=(P(None, "tp"), P(None, None, "tp"), P("pp")),
-            out_specs=out_spec,
+            out_specs=out_spec_no_fsdp,
         )
         def init_params(x_embed, x_layer, layer_key):
             layer_key = layer_key.reshape(
@@ -914,15 +921,15 @@ class shardedModel:
             path = join_fn(key)
             if "moe" in path and "feedforward" in path:
                 if x.ndim == 4:
-                    return P("pp", None, "tp", None)
+                    return P("pp", None, "tp", "dp")
                 if x.ndim == 3:
-                    return P("pp", "tp", None)
+                    return P("pp", None, None)
 
             if "gamma" in path or "beta" in path:
                 return P("pp", None, None, "tp")
 
             if x.ndim == 3:
-                return P("pp", "tp", None)
+                return P("pp", "tp", "dp")
 
             return P("pp", None)
 
