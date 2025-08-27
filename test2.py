@@ -45,7 +45,7 @@ class Dense(nn.Module):
                 jnp.float32
             )
         else:
-            breakpoint()
+            kernel = self.scope.get_variable("params", "kernel")
             kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
 
         bias = self.param(
