@@ -70,11 +70,11 @@ class config:
     lr: LRConfig
     device_config: deviceConfig
     inference_config: inferenceConfig
+    output_dir: str
     training_steps: int
     name: str
     grad_step: int = 1
     alpha: float = 0.001
-    output_dir: str = "./results/"
     checkpoint_steps: int = 10
     eval_steps: int = 25
     seed: int = 0
@@ -120,7 +120,7 @@ def parse_args():
 
     parser.add_argument("--alpha", type=float, default=0.0001)
     parser.add_argument("--name", type=str, default=None, required=True)
-    parser.add_argument("--output_dir", type=str, default="./results/")
+    parser.add_argument("--output_dir", type=str, default="gs://results_jaxformer/")
     parser.add_argument("--checkpoint_steps", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wandb", action="store_true")
