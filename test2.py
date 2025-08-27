@@ -581,7 +581,7 @@ class shardedModel:
         out_spec = shardedModel.get_p_spec([self.embedding, self.block], mesh, self.cfg)
 
         def replace_fsdp(p: jax.sharding.PartitionSpec):
-            if p[-1] == "fsdp":
+            if p[-1] == "dp":
                 p = P(*p[:-1], None)
             return p
 
