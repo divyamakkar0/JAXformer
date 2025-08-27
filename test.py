@@ -189,7 +189,11 @@ def main(cfg: config):
                 config=asdict(cfg),
             )
             wandb_id = wandb.run.id
-        # save_checkpoint(init_step)
+        print("saving now. ..")
+        save_checkpoint(init_step)
+        print("kicked off")
+        checkpoint_manager.wait_until_finished()
+        print("done")
 
     if use_wandb:
         table = wandb.Table(
