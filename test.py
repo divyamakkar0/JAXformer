@@ -243,7 +243,7 @@ def main(cfg: config):
                 load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="pp"), load)
 
                 f, p = load["f"], load["p"]
-                loss_balance = (cfg.model.n_experts / cfg.model.k) * (f * p).sum()
+                loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * (f * p).sum()
 
             loss = loss_cross + cfg.alpha * loss_balance
 
@@ -258,7 +258,7 @@ def main(cfg: config):
 
 
     param_spec = shardedModel.get_p_spec(
-        [model.embedding, model.block], mesh, cfg.model_config
+        [model.embedding, model.block], mesh, cfg.model_config_config
     )
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
     key_spec = P("dp", "pp", "tp")
@@ -354,9 +354,9 @@ def main(cfg: config):
                 "loss/train_cross_entropy_loss": metrics["loss_cross"],
                 "lr": opt_state[1].hyperparams["learning_rate"],
             }
-            if cfg.model.moe:
+            if cfg.model_config.moe:
                 wandb_log["loss/load_loss"] = metrics["loss_balance"]
-                for h in range(cfg.model.n_experts):
+                for h in range(cfg.model_config.n_experts):
                     wandb_log[f"load/head_{h}"] = metrics[f"load_expert"][h]
 
         if current_step % cfg.checkpoint_steps == 0:
@@ -367,9 +367,9 @@ def main(cfg: config):
             if use_wandb:
                 wandb_log["loss/val_loss"] = val_metrics["loss"]
                 wandb_log["loss/val_cross_entropy_loss"] = val_metrics["loss_cross"]
-                if cfg.model.moe:
+                if cfg.model_config.moe:
                     wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
-                    for h in range(cfg.model.n_experts):
+                    for h in range(cfg.model_config.n_experts):
                         wandb_log[f"load/head_{h}"] = val_metrics[f"load_expert"][h]
 
             jax.experimental.multihost_utils.sync_global_devices("sync")
