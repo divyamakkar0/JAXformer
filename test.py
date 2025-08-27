@@ -257,8 +257,7 @@ def main(cfg: config):
 
 
     param_spec = shardedModel.get_p_spec(
-        [model.embedding, model.block], mesh, cfg.model_config_config
-    )
+        [model.embedding, model.block], mesh, cfg.model_config)
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
     key_spec = P("dp", "pp", "tp")
 
