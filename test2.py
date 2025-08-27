@@ -38,15 +38,15 @@ class Dense(nn.Module):
     def __call__(self, x: Array) -> Array:
 
         if self.is_mutable_collection("params"):
-            self.kernel = self.param(
+            kernel = self.param(
                 "kernel",
                 nn.initializers.lecun_normal(),
                 (x.shape[-1], self.features),
                 jnp.float32
             )
-            kernel = self.kernel
         else:
-            kernel = jax.lax.all_gather(self.kernel, "dp", axis=-1, tiled=True)
+            breakpoint()
+            kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
 
         bias = self.param(
             "bias", nn.initializers.zeros, (self.features,), jnp.float32
