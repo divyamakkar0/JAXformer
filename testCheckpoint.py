@@ -26,6 +26,10 @@ test_pytree = {
         "d": jnp.array([7, 8, 9])}
     }
 
+mesh = jax.make_mesh((jax.device_count(), ), ('dp',))
+sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec('dp',))
+test_pytree = jax.tree_map(lambda x: jax.device_put(x, sharding), test_pytree)
+
 step = 0
 print("Saving checkpoint...")
 checkpoint_manager.save(step, args=ocp.args.StandardSave(test_pytree))
