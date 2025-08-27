@@ -397,7 +397,7 @@ def main(cfg: config):
             if jax.process_index() == 0:
                 with open(
                     os.path.join(
-                        os.path.abspath(config.output_dir), config.name, "tokens.txt"
+                        os.path.abspath(cfg.output_dir), cfg.name, "tokens.txt"
                     ),
                     "a",
                 ) as f:

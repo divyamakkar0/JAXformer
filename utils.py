@@ -41,8 +41,6 @@ class dataConfig:
 
 @dataclass
 class LRConfig:
-    """class for keeping track of learning rate args"""
-
     max_lr: float
     min_lr: float
     end_lr: float
@@ -52,31 +50,34 @@ class LRConfig:
 
 @dataclass
 class deviceConfig:
-    """class for distrbuted config"""
-
     n_device_axis: List[int]
 
+@dataclass
+class inferenceConfig:
+
+    n_devices: int = 1
+    batch_size: int = 1
+    top_k: int = 10000
+    temperature: float = 1.0
+    max_tokens: int = 256
 
 @dataclass
 class config:
-    """class for keeping track of model args"""
-
     model_config: modelConfig
     data_config: dataConfig
     lr: LRConfig
+    device_config: deviceConfig
+    inference_config: inferenceConfig
     training_steps: int
     name: str
-    device_config: deviceConfig
     grad_step: int = 1
     alpha: float = 0.001
     output_dir: str = "./results/"
     checkpoint_steps: int = 10
-    inference_batch: int = 1
     eval_steps: int = 25
     seed: int = 0
     wandb: bool = True
     grad_clip_norm: float = 1.0
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
