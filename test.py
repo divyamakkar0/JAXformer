@@ -198,8 +198,7 @@ def main(cfg: config):
                 f"tokens_{i}"
                 for i in range(
                     cfg.inference_batch
-                    * cfg.model_config.blocks
-                    * (jax.device_count() // cfg.model_config.blocks)
+                    * jax.process_count()
                 )
             ],
             log_mode="INCREMENTAL",
@@ -396,7 +395,18 @@ def main(cfg: config):
             for output in outputs:
                 log(f"\t{output}")
 
-            #TODO: wandb table logging
+            if jax.process_index() == 0:
+                with open(
+                    os.path.join(
+                        os.path.abspath(config.output_dir), config.name, "tokens.txt"
+                    ),
+                    "a",
+                ) as f:
+                    f.write(f"{current_step} | {outputs}\n")
+
+            if use_wandb:
+                table.add_data(current_step, *outputs)
+                wandb_log["inference_tokens"] = table
 
             # save_checkpoint(current_step)
 
@@ -409,29 +419,6 @@ def main(cfg: config):
 
 
     if use_wandb:
-        table = wandb.Table(
-            columns=["step"]
-            + [
-                f"tokens_{i}"
-                for i in range(
-                    config.inference_batch
-                    * config.model.blocks
-                    * (jax.device_count() // config.model.blocks)
-                )
-            ],
-        )
-        wandb.Table.MAX_ROWS = total_steps // config.checkpoint_steps
-        with open(
-            os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"),
-            "r",
-        ) as f:
-            lines = f.readlines()
-        for i, line in enumerate(lines):
-            tokens = line.split("|")[1]
-            tokens = ast.literal_eval(tokens)
-            table.add_data(i, *tokens)
-
-        wandb.log({"inference_tokens": table})
         wandb.finish()
 
 
