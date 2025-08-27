@@ -47,6 +47,9 @@ class Dense(nn.Module):
             "bias", nn.initializers.zeros, (self.features,), jnp.float32
         )
 
+        if not self.is_mutable_collection("params"):
+            kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
+
         x, kernel, bias = jax.tree.map(
             lambda x: x.astype(self.dtype), (x, kernel, bias)
         )
@@ -579,9 +582,6 @@ class shardedModel:
             if p[-1] == "fsdp":
                 p = P(*p[:-1], None)
             return p
-
-
-        breakpoint()
 
         out_spec_no_fsdp = jax.tree.map(lambda x: replace_fsdp(x), out_spec)
 
