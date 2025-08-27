@@ -934,7 +934,7 @@ class shardedModel:
             return P("pp", None)
 
         embed_p_spec = jax.tree.map(
-            lambda _: P(),
+            lambda *_: P(),
             eval_shape[0],
         )
 
