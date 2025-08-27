@@ -46,11 +46,11 @@ class Dense(nn.Module):
         bias = self.param(
             "bias", nn.initializers.zeros, (self.features,), jnp.float32
         )
-        breakpoint()
 
         if not self.is_mutable_collection("params"):
-            params = self.scope.get_variable("params", "kernel")
+            print(kernel.shape)
             kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
+            print(kernel.shape)
 
         x, kernel, bias = jax.tree.map(
             lambda x: x.astype(self.dtype), (x, kernel, bias)

@@ -248,15 +248,15 @@ class Dense(nn.Module):
                 params["kernel"], "fsdp", axis=-1, tiled=True
             )
 
-        #     promote_dtype = lambda x: x.astype(self.dtype)
-        #     x = promote_dtype(x)
-        #     params = jax.tree.map(lambda x: promote_dtype(x), params)
+            promote_dtype = lambda x: x.astype(self.dtype)
+            x = promote_dtype(x)
+            params = jax.tree.map(lambda x: promote_dtype(x), params)
 
-        #     x = jnp.einsum("...C, CD -> ...D", x, params["kernel"])
-        #     x = x + params["bias"]
+            x = jnp.einsum("...C, CD -> ...D", x, params["kernel"])
+            x = x + params["bias"]
 
-        # else:
-        x = nn.Dense(features=self.features, dtype=self.dtype)(x)
+        else:
+            x = nn.Dense(features=self.features, dtype=self.dtype)(x)
 
         x = jax.lax.psum_scatter(x, "tensor", scatter_dimension=x.ndim - 1, tiled=True)
 

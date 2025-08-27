@@ -16,6 +16,7 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
+jax.config.update("jax_debug_jit", True)
 
 import optax
 from jax.sharding import PartitionSpec as P
