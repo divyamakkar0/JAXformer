@@ -587,8 +587,6 @@ class shardedModel:
 
         out_spec_no_fsdp = jax.tree.map(lambda x: replace_fsdp(x), out_spec)
 
-        breakpoint()
-
         x_embed = jnp.ones((1, self.cfg.T), dtype=jnp.int32)
         x_layer = jnp.ones((1, self.cfg.T, self.cfg.model_dimension), dtype=self.dtype)
 
@@ -633,6 +631,8 @@ class shardedModel:
             params,
             out_spec,
         )
+
+        breakpoint()
 
         return params
 
