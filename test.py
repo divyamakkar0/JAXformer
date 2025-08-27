@@ -198,8 +198,8 @@ def main(cfg: config):
                 f"tokens_{i}"
                 for i in range(
                     cfg.inference_batch
-                    * cfg.model.blocks
-                    * (jax.device_count() // cfg.model.blocks)
+                    * cfg.model_config.blocks
+                    * (jax.device_count() // cfg.model_config.blocks)
                 )
             ],
             log_mode="INCREMENTAL",
@@ -395,6 +395,8 @@ def main(cfg: config):
             log("Generated outputs:")
             for output in outputs:
                 log(f"\t{output}")
+
+            #TODO: wandb table logging
 
             # save_checkpoint(current_step)
 
