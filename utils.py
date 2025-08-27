@@ -55,11 +55,13 @@ class deviceConfig:
 @dataclass
 class inferenceConfig:
 
-    n_devices: int = 1
+    prompt: Optional[str] = None
     batch_size: int = 1
     top_k: int = 10000
     temperature: float = 1.0
+    n_devices: int = 1
     max_tokens: int = 256
+    use_cache: bool = True
 
 @dataclass
 class config:
@@ -126,7 +128,6 @@ def parse_args():
     parser.add_argument("--training_steps", type=int, default=20000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--eval_steps", type=int, default=25)
-    parser.add_argument("--inference_batch", type=int, default=1)
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
 
     parser.add_argument(
@@ -135,6 +136,14 @@ def parse_args():
         nargs="*",
         default=[1],
     )
+
+    parser.add_argument("--inference_batch", type=int, default=1)
+    parser.add_argument("--top_k", type=int, default=10000)
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--use_cache", action="store_true")
+    parser.add_argument("--max_tokens", type=int, default=40)
+    parser.add_argument("--prompt", type=str, default="hello world")
+    parser.add_argument("--n_devices", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -179,6 +188,16 @@ def parse_args():
         n_device_axis=args.n_device_axis,
     )
 
+    inference_cfg = inferenceConfig(
+        prompt=args.prompt,
+        batch_size=args.inference_batch,
+        top_k=args.top_k,
+        temperature=args.temperature,
+        n_devices=args.n_devices,
+        max_tokens=args.max_tokens,
+        use_cache=args.use_cache,
+    )
+
     cfg = config(
         model_config=model_cfg,
         data_config=data_cfg,
@@ -187,10 +206,10 @@ def parse_args():
         output_dir=args.output_dir,
         device_config=device_cfg,
         checkpoint_steps=args.checkpoint_steps,
+        inference_config=inference_cfg,
         seed=args.seed,
         training_steps=args.training_steps,
         grad_step=args.grad_step,
-        inference_batch=args.inference_batch,
         eval_steps=args.eval_steps,
         alpha=args.alpha,
         wandb=args.wandb,

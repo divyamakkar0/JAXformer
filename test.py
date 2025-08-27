@@ -197,7 +197,8 @@ def main(cfg: config):
             + [
                 f"tokens_{i}"
                 for i in range(
-                    cfg.inference_batch
+                    cfg.inference_config.batch_size
+                    * cfg.inference_config.n_devices
                     * jax.process_count()
                 )
             ],
@@ -382,12 +383,12 @@ def main(cfg: config):
                 params,
                 cfg.model_config,
                 key=sample_key,
-                x="hello world",
-                B=cfg.inference_batch,
-                k=10000,
-                temperature=1.0,
-                n_devices=1,
-                use_cache=True,
+                x=cfg.inference_config.prompt,
+                B=cfg.inference_config.batch_size,
+                k=cfg.inference_config.top_k,
+                temperature=cfg.inference_config.temperature,
+                n_devices=cfg.inference_config.n_devices,
+                use_cache=cfg.inference_config.use_cache,
             )
 
             log("Generated outputs:")
