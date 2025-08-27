@@ -48,7 +48,7 @@ class Dense(nn.Module):
         )
 
         if not self.is_mutable_collection("params"):
-            breakpoint()
+            print(kernel)
             kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
 
         x, kernel, bias = jax.tree.map(
