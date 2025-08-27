@@ -195,11 +195,7 @@ def main(cfg: config):
                 config=asdict(cfg),
             )
             wandb_id = wandb.run.id
-        print("saving now. ..")
         save_checkpoint(init_step)
-        print("kicked off")
-        checkpoint_manager.wait_until_finished()
-        print("done")
 
     if use_wandb:
         table = wandb.Table(
@@ -408,7 +404,7 @@ def main(cfg: config):
             if jax.process_index() == 0:
                 with open(
                     os.path.join(
-                        os.path.abspath(cfg.output_dir), cfg.name, "tokens.txt"
+                        os.path.abspath("./generated_samples"), cfg.name, "tokens.txt"
                     ),
                     "a",
                 ) as f:
@@ -418,7 +414,7 @@ def main(cfg: config):
                 table.add_data(current_step, *outputs)
                 wandb_log["inference_tokens"] = table
 
-            # save_checkpoint(current_step)
+            save_checkpoint(current_step)
 
             start = time.time()
             train_loss = []
