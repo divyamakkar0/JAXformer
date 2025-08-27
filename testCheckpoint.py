@@ -1,0 +1,34 @@
+import jax
+import jax.numpy as jnp
+
+import orbax
+import orbax.checkpoint as ocp
+import os
+
+jax.distributed.initialize()
+OUTPUT_DIR = "./testSave"
+NAME = "testRun"
+checkpoint_dir = os.path.join(
+        os.path.abspath(OUTPUT_DIR), NAME, "checkpoints"
+  )
+
+load = os.path.exists(checkpoint_dir)
+if not load:
+    os.makedirs(checkpoint_dir)
+    checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
+
+options = ocp.CheckpointManagerOptions(max_to_keep=1)
+checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
+
+test_pytree = {
+        "a": jnp.array([1, 2, 3]),
+        "b": {"c": jnp.array([4, 5, 6]),
+        "d": jnp.array([7, 8, 9])}
+    }
+
+step = 0
+print("Saving checkpoint...")
+checkpoint_manager.save(step, args=ocp.args.StandardSave(test_pytree))
+print("kicked off")
+checkpoint_manager.wait_until_finished()
+print("done")
