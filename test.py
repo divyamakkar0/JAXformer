@@ -404,7 +404,7 @@ def main(cfg: config):
             if jax.process_index() == 0:
                 with open(
                     os.path.join(
-                        os.path.abspath("./generated_samples"), cfg.name, "tokens.txt"
+                        os.path.abspath("./samples"), cfg.name, "tokens.txt"
                     ),
                     "a",
                 ) as f:

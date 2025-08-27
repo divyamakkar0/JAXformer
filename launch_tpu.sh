@@ -35,7 +35,7 @@ tmux new-window -t "$SESSION" -n "monitor" \; \
 
 for i in $(seq 0 7); do
   tmux send-keys -t "$SESSION":0.$i "ssh adityamakkar@${IPS[$i]}" C-m
-  tmux send-keys -t "$SESSION":0.$i "cd ~/Jaxformer && rm -rf results" C-m
+  tmux send-keys -t "$SESSION":0.$i "cd ~/Jaxformer && rm -rf samples && mkdir samples" C-m
   tmux send-keys -t "$SESSION":0.$i "git fetch origin && git reset --hard origin/main" C-m
   tmux send-keys -t "$SESSION":0.$i "bash setupTpu.sh" C-m
   tmux send-keys -t "$SESSION":0.$i "wandb login $WANDB_KEY" C-m
