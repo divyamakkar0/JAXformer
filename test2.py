@@ -36,20 +36,20 @@ class Dense(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        kernel = self.param(
-            "kernel",
-            nn.initializers.lecun_normal(),
-            (x.shape[-1], self.features),
-            jnp.float32
-        )
+
+        if self.is_mutable_collection("params"):
+            kernel = self.param(
+                "kernel",
+                nn.initializers.lecun_normal(),
+                (x.shape[-1], self.features),
+                jnp.float32
+            )
+        else:
+            kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
 
         bias = self.param(
             "bias", nn.initializers.zeros, (self.features,), jnp.float32
         )
-
-        # if not self.is_mutable_collection("params"):
-        #     kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
-
         x, kernel, bias = jax.tree.map(
             lambda x: x.astype(self.dtype), (x, kernel, bias)
         )
