@@ -48,9 +48,8 @@ class Dense(nn.Module):
         )
 
         if not self.is_mutable_collection("params"):
-            print(f"kernel.shape: {kernel.shape}")
+            breakpoint()
             kernel = jax.lax.all_gather(kernel, "dp", axis=-1, tiled=True)
-            print(f"gathered kernel.shape: {kernel.shape}")
 
         x, kernel, bias = jax.tree.map(
             lambda x: x.astype(self.dtype), (x, kernel, bias)
@@ -631,8 +630,6 @@ class shardedModel:
             params,
             out_spec,
         )
-
-        breakpoint()
 
         return params
 

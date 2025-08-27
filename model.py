@@ -242,11 +242,11 @@ class Dense(nn.Module):
 
     @nn.compact
     def __call__(self, x: Array):
-        # if not self.is_mutable_collection("params"):
-        #     params = self.scope.get_variable("params", "Dense_0")
-        #     params["kernel"] = jax.lax.all_gather(
-        #         params["kernel"], "fsdp", axis=-1, tiled=True
-        #     )
+        if not self.is_mutable_collection("params"):
+            params = self.scope.get_variable("params", "Dense_0")
+            params["kernel"] = jax.lax.all_gather(
+                params["kernel"], "fsdp", axis=-1, tiled=True
+            )
 
         #     promote_dtype = lambda x: x.astype(self.dtype)
         #     x = promote_dtype(x)
