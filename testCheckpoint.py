@@ -11,7 +11,7 @@ OUTPUT_DIR = "./testSave"
 # checkpoint_dir = os.path.join(
 #         os.path.abspath(OUTPUT_DIR), NAME, "checkpoints"
 #   )
-checkpoint_dir = "gs://jaxformer-test-bucket/checkpoints/testRun"
+checkpoint_dir = "gs://jaxformer-test-bucket2/checkpoints/testRun"
 # if not load:
 #     os.makedirs(checkpoint_dir)
 checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
