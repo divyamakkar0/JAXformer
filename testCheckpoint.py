@@ -15,7 +15,9 @@ checkpoint_dir = "gs://jaxformer-test-bucket2/checkpoints/testRun"
 # if not load:
 #     os.makedirs(checkpoint_dir)
 if jax.process_index() == 0:
+  print("creating checkpoint dir...")
   checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
+  print("done making checkpoint dir")
 
 options = ocp.CheckpointManagerOptions(max_to_keep=1)
 checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
