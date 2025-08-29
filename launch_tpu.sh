@@ -3,7 +3,7 @@
 source .env
 SESSION="mysession"
 # command="python 2axismain.p:wqy "
- command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name test342 --train_batch_size 128"
+ command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name test342 --train_batch_size 192"
 # command="python testCheckpoint.py"
 
 IPS=(

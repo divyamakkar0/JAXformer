@@ -1,5 +1,8 @@
-# import os
-# os.environ["XLA_FLAGS"] = '--xla_force_host_platform_device_count=8' # Use 8 CPU devices
+import os
+
+os.environ["XLA_FLAGS"] = (
+    "--xla_force_host_platform_device_count=8"  # Use 8 CPU devices
+)
 
 import jax
 import jax.numpy as jnp
@@ -15,7 +18,7 @@ import numpy as np
 # num_procs = int(sys.argv[2])
 # jax.distributed.initialize('localhost:10000', num_procs, proc_id)
 
-jax.distributed.initialize()
+# jax.distributed.initialize()
 
 devices = np.array(jax.devices())
 a1, a2 = devices.shape[0] // 2, 2

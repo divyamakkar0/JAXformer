@@ -587,7 +587,7 @@ class shardedModel:
 
         layer_devices = mesh.devices.shape[1]
 
-        assert self.cfg.blocks // layer_devices
+        assert self.cfg.blocks // layer_devices, "Number of blocks must be divisible by number of devices"
         layers_per_device = self.cfg.blocks // layer_devices
 
         key, embed_key = jax.random.split(key, 2)
@@ -633,7 +633,7 @@ class shardedModel:
         embedding_params, layer_params = params
 
         if cache is not None:
-            x = x[..., :1]
+            x = x[..., -1:]
 
         embeddings = self.embedding.apply({"params": embedding_params}, x, out=False)
 
@@ -683,11 +683,11 @@ class shardedModel:
         cache: Optional[Tuple[Array, Optional[Array]]],
         key: jax.random.PRNGKey,
     ):
-        stage = jax.lax.axis_index("pp")
+        device_idx = jax.lax.axis_index("pp")
         n_devices = jax.lax.axis_size("pp")
         layers_per_device = stage_params["Layer_0"]["MLA_0"]["Dense_0"]["kernel"].shape[
             0
-        ]
+        ] # TODO: Try switching this to using the config e.g self.cfg.layers // n_devices
         microbatch_per_device = inputs.shape[0]
         microbatches = n_devices * microbatch_per_device
         layers = layers_per_device * n_devices
@@ -705,14 +705,19 @@ class shardedModel:
         state_idx = jnp.zeros((layers_per_device,), dtype=jnp.int32)
         perm = [(i, (i + 1) % n_devices) for i in range(n_devices)]
 
-        ckV_cache = []
+        KV_cache = []
         KR_cache = []
         for i in range(microbatches + layers - 1):
             batch_idx = i % microbatch_per_device
             layer_idx = (i - layers + 1) % microbatch_per_device
 
-            state = state.at[0].set(jnp.where(stage == 0, inputs[batch_idx], state[0]))
-            state_idx = state_idx.at[0].set(jnp.where(stage == 0, 1, state_idx[0]))
+
+
+            state = state.at[0].set(jnp.where(device_idx == 0, inputs[batch_idx], state[0]))
+            state_idx = state_idx.at[0].set(jnp.where(device_idx == 0, 1, state_idx[0]))
+
+            if batch_idx == microbatch_per_device - 1:
+                inputs = jax.lax.ppermute(inputs, axis_name="pp", perm=perm)
 
             key, *layer_keys = jax.random.split(key, layers_per_device + 1)
             layer_keys = jnp.array(layer_keys)
@@ -728,12 +733,12 @@ class shardedModel:
             )
 
             if out_cache[0] is not None:
-                ckV_cache.append(out_cache[0])
+                KV_cache.append(out_cache[0])
             if out_cache[1] is not None:
                 KR_cache.append(out_cache[1])
 
             outputs = outputs.at[layer_idx].set(
-                jnp.where(stage == n_devices - 1, state[-1], outputs[layer_idx])
+                jnp.where(device_idx == n_devices - 1, state[-1], outputs[layer_idx])
             )
 
             state = jnp.concat(
@@ -746,24 +751,22 @@ class shardedModel:
                 ],
                 axis=0,
             )
-            if batch_idx == microbatch_per_device - 1:
-                inputs = jax.lax.ppermute(inputs, axis_name="pp", perm=perm)
 
             if layer_idx == microbatch_per_device - 1:
                 outputs = jax.lax.ppermute(outputs, axis_name="pp", perm=perm)
 
         outputs = jax.lax.ppermute(outputs, "pp", perm)
 
-        if len(ckV_cache) > 0:
-            ckV_cache = jnp.stack(ckV_cache, axis=0)
+        if len(KV_cache) > 0:
+            KV_cache = jnp.stack(KV_cache, axis=0)
         else:
-            ckV_cache = None
+            KV_cache = None
 
         if len(KR_cache) > 0:
             KR_cache = jnp.stack(KR_cache, axis=0)
         else:
             KR_cache = None
-        out_cache = (ckV_cache, KR_cache)
+        out_cache = (KV_cache, KR_cache)
 
         return outputs, out_cache
 
