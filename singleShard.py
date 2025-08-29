@@ -62,7 +62,7 @@ def main(cfg: config):
     DATA_PARALLEL = 32
 
     axes = (DATA_PARALLEL,)
-    axes_name = ("dp", )
+    axes_name = ("dp",)
 
     mesh = init_devices(axes, axes_name)
     log(mesh)
@@ -212,10 +212,7 @@ def main(cfg: config):
     def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
             logits, _ = model.apply(
-                {'params': params},
-                x,
-                train=train,
-                rngs={'dropout': key}
+                {"params": params}, x, train=train, rngs={"dropout": key}
             )
             logits = logits.astype(jnp.float32)
             log_probs = jax.nn.log_softmax(logits, axis=-1)
@@ -255,7 +252,6 @@ def main(cfg: config):
             x, y, key = batch
             loss, grads = step_fn(params, x, y, key, train=True)
             return grads, loss
-
 
         # grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
         # loss = 0.0
@@ -311,11 +307,8 @@ def main(cfg: config):
     @jax.jit
     def make_sharded_key(key):
         key = jax.random.split(key, DATA_PARALLEL)
-        key = jnp.asarray(key).reshape(
-            (DATA_PARALLEL, 2)
-        )
+        key = jnp.asarray(key).reshape((DATA_PARALLEL, 2))
         return key
-
 
     for current_step in range(init_step, total_steps):
         key, train_key, eval_key = jax.random.split(key, 3)

@@ -35,6 +35,7 @@ class RMSNorm(nn.Module):
 
         return x
 
+
 class Embeddings(nn.Module):
     model_dimension: int
     vocab_size: int
@@ -352,7 +353,7 @@ class MLA(nn.Module):
     dropout: float = 0.0
 
     def setup(self):
-        self.rope = (self.dhR != 0)
+        self.rope = self.dhR != 0
 
     @nn.compact
     def __call__(

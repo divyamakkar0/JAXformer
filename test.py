@@ -1,7 +1,4 @@
-from functools import partial
 import os
-
-from main import step
 
 os.environ["XLA_FLAGS"] = (
     "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true "
@@ -18,25 +15,26 @@ jax.config.update(
 )
 
 import optax
-from jax.sharding import PartitionSpec as P
 import numpy as np
+import time
+import json
+import wandb
+import orbax.checkpoint as ocp
+
+from dataclasses import asdict
+from jax.sharding import PartitionSpec as P
+from functools import partial
+from typing import Tuple
+from google.cloud import storage
 from test2 import shardedModel
 from dataset import Dataset
 from utils import parse_args, config
-import time
-from typing import Tuple
-import json
-import wandb
-from dataclasses import asdict
-import orbax.checkpoint as ocp
-from google.cloud import storage
-
-
 
 
 def log(msg: str):
     if jax.process_index() == 0:
         print(msg)
+
 
 def gcs_path_exists(path: str):
     client = storage.Client()
@@ -44,6 +42,7 @@ def gcs_path_exists(path: str):
     prefix = "/".join(prefix)
     exists = len(list(client.list_blobs(bucket_name, prefix=prefix, max_results=1))) > 0
     return exists
+
 
 def init_devices(
     axes: Tuple[int, ...], axes_name: Tuple[str, ...]
@@ -68,7 +67,7 @@ def init_devices(
 
 
 def main(cfg: config):
-    key = jax.random.PRNGKey(0)
+    key = jax.random.PRNGKey(cfg.seed)
     DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL = cfg.device_config.n_device_axis
 
     axes = (*cfg.device_config.n_device_axis,)
@@ -117,7 +116,7 @@ def main(cfg: config):
 
     default_sharding = jax.sharding.NamedSharding(mesh, P())
     opt_state = jax.tree.map(
-        lambda x: x if np.ndim(x) != 0 else jax.device_put(x, default_sharding),
+        lambda x: x if jnp.ndim(x) != 0 else jax.device_put(x, default_sharding),
         tx.init(params),
     )
 
@@ -186,6 +185,7 @@ def main(cfg: config):
 
     else:
         log("no checkpoint found, saving init copy")
+        save_checkpoint(init_step)
         if use_wandb:
             wandb.init(
                 entity="waterloo2",
@@ -195,7 +195,6 @@ def main(cfg: config):
                 config=asdict(cfg),
             )
             wandb_id = wandb.run.id
-        save_checkpoint(init_step)
 
     if use_wandb:
         table = wandb.Table(
@@ -226,7 +225,6 @@ def main(cfg: config):
                 key=key,
                 train=train,
             )
-            logits = logits.astype(jnp.bfloat16)
             log_probs = jax.nn.log_softmax(logits, axis=-1)
 
             M, B, T, V = logits.shape
@@ -242,14 +240,16 @@ def main(cfg: config):
 
             loss_balance = 0.0
 
-            #TODO: fix experts load balancing
+            # TODO: fix experts load balancing
             if load is not None:
                 load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="dp"), load)
                 load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="tp"), load)
                 load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="pp"), load)
 
                 f, p = load["f"], load["p"]
-                loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * (f * p).sum()
+                loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * (
+                    f * p
+                ).sum()
 
             loss = loss_cross + cfg.alpha * loss_balance
 
@@ -260,11 +260,12 @@ def main(cfg: config):
                 "load_expert": load["tokens_per_expert"] if load else None,
             }
             return loss, metrics
+
         return loss_fn(params, x, y, key)
 
-
     param_spec = shardedModel.get_p_spec(
-        [model.embedding, model.block], mesh, cfg.model_config)
+        [model.embedding, model.block], mesh, cfg.model_config
+    )
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
     key_spec = P("dp", "pp", "tp")
 
@@ -285,9 +286,7 @@ def main(cfg: config):
             return grads, metrics
 
         grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-        key = key.reshape(
-            cfg.grad_step, 2
-        )
+        key = key.reshape(cfg.grad_step, 2)
 
         grads, metrics = jax.lax.scan(
             single_step,
@@ -312,9 +311,10 @@ def main(cfg: config):
         check_vma=False,
     )
     def eval_step(params, x, y):
-
         def single_step(_, batch):
-            loss, metrics = step(params, *batch, key=jax.random.PRNGKey(0), train=False) # Key does not matter
+            loss, metrics = step(
+                params, *batch, key=jax.random.PRNGKey(0), train=False
+            )  # Key does not matter
             return loss, metrics
 
         _, metrics = jax.lax.scan(single_step, 0, (x, y))
@@ -332,12 +332,11 @@ def main(cfg: config):
     start = time.time()
     train_loss = []
 
-    @partial(
-        jax.jit,
-        static_argnames=["steps"]
-    )
+    @partial(jax.jit, static_argnames=["steps"])
     def make_sharded_key(key, steps=1):
-        key = jax.random.split(key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * steps)
+        key = jax.random.split(
+            key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * steps
+        )
         key = jnp.asarray(key).reshape(
             (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, steps, 2)
         )
@@ -402,9 +401,7 @@ def main(cfg: config):
                 log(f"\t{output}")
 
             if jax.process_index() == 0:
-                save_path = os.path.join(
-                    os.path.abspath("./samples"), cfg.name
-                )
+                save_path = os.path.join(os.path.abspath("./samples"), cfg.name)
                 if not os.path.exists(save_path):
                     os.makedirs(save_path)
                 with open(
@@ -424,7 +421,6 @@ def main(cfg: config):
 
         if use_wandb:
             wandb.log(data=wandb_log, step=current_step)
-
 
     if use_wandb:
         wandb.finish()

@@ -52,9 +52,9 @@ class LRConfig:
 class deviceConfig:
     n_device_axis: List[int]
 
+
 @dataclass
 class inferenceConfig:
-
     prompt: Optional[str] = None
     batch_size: int = 1
     top_k: int = 10000
@@ -62,6 +62,7 @@ class inferenceConfig:
     n_devices: int = 1
     max_tokens: int = 256
     use_cache: bool = True
+
 
 @dataclass
 class config:
@@ -80,6 +81,7 @@ class config:
     seed: int = 0
     wandb: bool = True
     grad_clip_norm: float = 1.0
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="model training")
@@ -101,7 +103,9 @@ def parse_args():
     parser.add_argument("--capacity_factor", type=float, default=1.5)
 
     parser.add_argument(
-        "--bucket_name", type=str, default="10bt_gpt2",
+        "--bucket_name",
+        type=str,
+        default="10bt_gpt2",
     )
     parser.add_argument(
         "--process_path", type=str, default="./bucket_downloads/processShard"

@@ -270,9 +270,7 @@ def main(config: config):
     log("setting up dataset")
 
     data_spec = P(None, "model", "fsdp", "tensor")
-    data_partition = jax.sharding.NamedSharding(
-        mesh, data_spec
-    )
+    data_partition = jax.sharding.NamedSharding(mesh, data_spec)
 
     # data_partition = jax.sharding.NamedSharding(
     #     mesh, P(None, "fsdp", "model", None, "tensor")
@@ -281,7 +279,10 @@ def main(config: config):
         train_dataset,
         val_dataset,
     ) = Dataset.getDataset(
-        config.data_config, partition=data_partition, dp=count["fsdp"], pp=count["model"]
+        config.data_config,
+        partition=data_partition,
+        dp=count["fsdp"],
+        pp=count["model"],
     )
     model_spec = shardedModel.get_p_spec(
         model=model,
@@ -402,7 +403,7 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=(model_spec, P()),
-            check_vma=True
+            check_vma=True,
         )
     )
 
@@ -419,10 +420,9 @@ def main(config: config):
                 data_spec,
             ),
             out_specs=P(),
-            check_vma=False
+            check_vma=False,
         )
     )
-
 
     jax.experimental.multihost_utils.sync_global_devices("test")
     tokens_per_step = train_dataset.tokens_per_step * config.grad_step
