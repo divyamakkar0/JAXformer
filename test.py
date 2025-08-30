@@ -36,15 +36,6 @@ def log(msg: str):
     if jax.process_index() == 0:
         print(msg)
 
-
-def gcs_path_exists(path: str):
-    client = storage.Client()
-    bucket_name, *prefix = path.split("/")[2:]
-    prefix = "/".join(prefix)
-    exists = len(list(client.list_blobs(bucket_name, prefix=prefix, max_results=1))) > 0
-    return exists
-
-
 def init_devices(
     axes: Tuple[int, ...], axes_name: Tuple[str, ...]
 ) -> jax.sharding.Mesh:
@@ -78,12 +69,9 @@ def main(cfg: config):
     log(mesh)
 
     checkpoint_dir = cfg.output_dir + cfg.name
-    load = gcs_path_exists(checkpoint_dir)
-    if not load:
-        checkpoint_dir = ocp.test_utils.erase_and_create_empty(checkpoint_dir)
-
     options = ocp.CheckpointManagerOptions(max_to_keep=1)
     checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
+    load = checkpoint_manager.latest_step() is not None
 
     data_spec = P(None, "pp", "dp", "tp")
     data_partition = jax.sharding.NamedSharding(mesh, data_spec)
@@ -422,7 +410,7 @@ def main(cfg: config):
             save_checkpoint(current_step)
             gen_end = time.time()
             print(f"Generation time: {gen_end:.4f} seconds")
-            
+
             start = time.time()
 
         if use_wandb:

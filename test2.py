@@ -105,6 +105,186 @@ class RMSNorm(nn.Module):
         return x
 
 
+
+class NoisyKGate(nn.Module):
+    model_dimension: int
+    n_experts: int
+    k: int
+    model_dtype: jnp.dtype
+
+    def setup(self):
+        self.centroids = Dense(features=self.n_experts, dtype=self.model_dtype)
+
+    def top(self, x: Array) -> Tuple[Array, Array]:
+        assert x.shape[0] == self.n_experts, "x must be of shape (n_experts, )"
+        g_i, i = jax.lax.top_k(x, self.k)
+        g = g_i / jnp.sum(g_i, axis=-1)
+
+        return g, i
+
+    def __call__(self, x: Array) -> Tuple[Array, Array, Array]:
+        local_scores = nn.sigmoid(self.centroids(x))
+
+        scores = jax.lax.all_gather(
+            local_scores,
+            "tensor",
+            axis=x.ndim - 1,
+            tiled=True,
+        ) # ( B, T, C) fully collected
+        g_scores, indices = jnp.apply_along_axis(func1d=self.top, axis=-1, arr=scores)
+
+        return g_scores, indices, scores
+
+
+class MoE(nn.Module):
+    model_dimension: int
+    n_shared: int
+    n_experts: int
+    k: int
+    dropout: float
+    capacity_factor: float = 1.0
+    model_dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x, train=True):
+        B, T, C = x.shape
+
+        shared = Dense(
+            features=self.model_dimension * self.n_shared,
+            dtype=self.model_dtype,
+        )
+
+        res_shared = shared(x)
+        res_shared = rearrange(res_shared, "B T (n d) -> B T n d", n=self.n_shared)
+        res_shared = jnp.sum(res_shared, axis=2)  # (B, T, n, d) -> (B, T, d)
+
+        router = NoisyKGate(
+            model_dimension=self.model_dimension,
+            n_experts=self.n_experts,
+            k=self.k,
+            model_dtype=self.model_dtype,
+        )
+        g_scores, indices, scores = router(x) # (B, T, k), (B, T, k), (B, T, n_experts)
+
+        capacity = B * T
+        if train:
+            capacity = int(capacity * self.capacity_factor / self.n_experts)
+
+        expert_inputs, score_mask, tokens_per_expert = self.scatter(
+            x, g_scores, indices, capacity
+        )
+
+        expert = FeedForward(
+            model_dimension=self.model_dimension,
+            ff_dim=4 * self.model_dimension,
+            dropout=self.dropout,
+            model_dtype=self.model_dtype,
+        )
+
+        expert_outputs = nn.vmap(
+            lambda expert, inp: expert(inp, train=train),
+            in_axes=(0),
+            out_axes=(0),
+            variable_axes={"params": 0},
+            split_rngs={"params": True, "dropout": True},
+        )(expert, expert_inputs)
+
+        expert_outputs = jnp.einsum("ecd,tec->td", expert_outputs, score_mask)
+        expert_outputs = expert_outputs.reshape(B, T, C)
+
+        f, p = self.auxiliary_loss(scores, indices)
+
+        aux = {"tokens_per_expert": tokens_per_expert, "f": f, "p": p}
+
+        x = res_shared + expert_outputs
+
+        return expert_outputs, aux
+
+    def scatter(
+        self, x: Array, scores: Array, indices: Array, capacity: int
+    ) -> Tuple[Array, Array]:
+        B, T, C = x.shape
+        x = x.reshape(B * T, C)
+        scores = scores.reshape(B * T, self.k)
+        indices = indices.reshape(B * T, self.k)
+
+        # sort to arrange in order of expert scores for each batch by
+        # the highest scored expert
+        sorted_token_idx = jnp.argsort(-scores[:, 0], axis=0)
+        sorted_indices = jnp.take_along_axis(indices, sorted_token_idx[:, None], axis=0)
+        sorted_scores = jnp.take_along_axis(scores, sorted_token_idx[:, None], axis=0)
+
+        # swapping gives you the highest highest score across the batch
+        # expert_1: [b_1, b_2, .. b_{B * T }], expert_2: [b_1, b_2, .. b_{B * T }], ...
+        # flatten then to get expert indices in order
+        flat_indices = jnp.swapaxes(sorted_indices, 0, 1).reshape(-1)
+        flat_scores = jnp.swapaxes(sorted_scores, 0, 1).reshape(-1)
+
+        # convert to one hot encoding
+        # then multiply to get the score for each instead of 1
+        expert_onehot = jax.nn.one_hot(flat_indices, self.n_experts, dtype=jnp.int32) # (B*T*k, n_experts)
+        expert_scores = flat_scores[:, None] * expert_onehot  # (B*T*k, n_experts)
+
+
+        position_in_expert = jnp.cumsum(expert_onehot, axis=0) * expert_onehot # get which position it is in the expert
+        # find max position across all batches since that is the total sum from cumsum
+        tokens_per_expert = jnp.max(position_in_expert, axis=0) / (B * T) # take average across batch
+
+        # reshape it back to get for
+        # expert_i: [b_1, b_2, .. b_{B * T }] where b_i is the one hot for which position it is in
+        # same for expert scores
+        position_in_expert = position_in_expert.reshape(self.k, B * T, self.n_experts)
+        expert_scores = expert_scores.reshape(self.k, B * T, self.n_experts)
+
+
+        position_in_expert = jnp.swapaxes(position_in_expert, 0, 1)
+        expert_scores = jnp.swapaxes(expert_scores, 0, 1)
+
+        final_pos = jnp.max(position_in_expert, axis=1) - 1
+        final_scores = jnp.max(expert_scores, axis=1)
+
+        unsorted_indices = jnp.argsort(sorted_token_idx)
+        final_pos = jnp.take_along_axis(final_pos, unsorted_indices[:, None], axis=0)
+        final_scores = jnp.take_along_axis(
+            final_scores, unsorted_indices[:, None], axis=0
+        )
+
+        dispatch_mask = jax.nn.one_hot(
+            final_pos, capacity, dtype=jnp.int32
+        )  # (B*T, n_experts, capacity)
+        scores_mask = (
+            dispatch_mask * final_scores[..., None]
+        )  # (B*T, n_experts, capacity)
+
+        expert_inputs = jnp.einsum("td,tec->ecd", x, dispatch_mask)
+
+        return expert_inputs, scores_mask, tokens_per_expert
+
+    def auxiliary_loss(self, scores: Array, indices: Array) -> Array:
+        B, T, _ = scores.shape
+
+        scores = scores / jnp.sum(scores, axis=-1, keepdims=True)
+        scores = jnp.take_along_axis(scores, indices, axis=-1)
+
+        total_batch = B * T * self.k
+        scores = scores.reshape(total_batch)
+        indices = indices.reshape(total_batch)
+
+        def load_fn(head_idx, scores, indices):
+            f_head = jnp.where(indices == head_idx, 1, 0)
+            f_head = jnp.sum(f_head) / (B * T)
+
+            p_head = jnp.where(indices == head_idx, scores, 0)
+            p_head = jnp.sum(p_head) / (B * T)
+
+            return f_head, p_head
+
+        f, p = jax.vmap(load_fn, in_axes=(0, None, None))(
+            jnp.arange(self.n_experts, dtype=jnp.int32), scores, indices
+        )
+
+        return f, p
+
 class Embedding(nn.Module):
     model_dimension: int
     vocab_size: int
