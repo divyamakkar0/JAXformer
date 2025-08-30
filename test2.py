@@ -282,6 +282,8 @@ class MoE(nn.Module):
         f = jax.nn.one_hot(indices, n_experts, dtype=jnp.float32)
         f = jnp.cumsum(f, axis=0)[-1] / (B * T)
 
+        breakpoint()
+
         return f, p
 
 class Embedding(nn.Module):
