@@ -595,6 +595,7 @@ class Block(nn.Module):
         KR_cache = jnp.stack(KR_cache, axis=0) if len(KR_cache) > 0 else None
 
         out_cache = (KV_cache, KR_cache)
+        breakpoint()
 
         return x, (out_cache, moe_stat)
 
