@@ -904,10 +904,13 @@ class shardedModel:
                 key,
             )
 
+
+
             print(jax.tree.map(
                 lambda x: x.shape,
                 out
             ))
+            breakpoint()
 
             return out
 
