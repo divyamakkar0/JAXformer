@@ -751,10 +751,10 @@ class shardedModel:
                 axis=0,
             )
 
-            if batch_idx == microbatch_per_device - 1:
+            if batch_idx == microbatch_per_device - 1 and i < microbatches:
                 inputs = jax.lax.ppermute(inputs, axis_name="pp", perm=perm)
 
-            if layer_idx == microbatch_per_device - 1:
+            if layer_idx == microbatch_per_device - 1 and i >= layers - 1:
                 outputs = jax.lax.ppermute(outputs, axis_name="pp", perm=perm)
 
         outputs = jax.lax.ppermute(outputs, "pp", perm)
