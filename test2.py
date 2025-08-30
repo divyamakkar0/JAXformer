@@ -895,7 +895,7 @@ class shardedModel:
                 grad_fn(stop_grad=False),
             ]
 
-            return jax.lax.switch(
+            out = jax.lax.switch(
                 state_idx,
                 fns,
                 x,
@@ -903,6 +903,13 @@ class shardedModel:
                 cache,
                 key,
             )
+
+            print(jax.tree.map(
+                lambda x: x.shape,
+                out
+            ))
+
+            return out
 
         layer_out, (out_cache, moe_stat) = self.pipeline(
             fwd_fn, layer_params, embeddings, cache, key
