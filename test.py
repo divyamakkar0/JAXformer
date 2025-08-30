@@ -15,9 +15,6 @@ jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
 
-jax.config.update(
-    "jax_disable_jit", True
-)
 
 import optax
 import numpy as np
@@ -263,7 +260,7 @@ def main(cfg: config):
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
     key_spec = P("dp", "pp", "tp")
 
-    @jax.jit
+    # @jax.jit
     @partial(
         jax.shard_map,
         mesh=mesh,
