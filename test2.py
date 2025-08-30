@@ -176,7 +176,6 @@ class MoE(nn.Module):
 
         expert = FeedForward(
             model_dimension=self.model_dimension,
-            ff_dim=4 * self.model_dimension,
             dropout_rate=self.dropout_rate,
             model_dtype=self.model_dtype,
         )
