@@ -519,10 +519,12 @@ class Layer(nn.Module):
         x = RMSNorm(model_dtype=self.model_dtype)(x)
         if self.use_moe:
             x, aux = MoE(
+                model_dimension=self.model_dimension,
                 n_experts=self.n_experts,
                 k=self.k,
                 n_shared=self.n_shared,
                 capacity_factor=self.capacity_factor,
+                dropout_rate=self.dropout_rate,
                 model_dtype=self.model_dtype,
             )(x, train=train)
         else:

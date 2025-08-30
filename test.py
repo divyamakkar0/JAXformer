@@ -133,7 +133,8 @@ def main(cfg: config):
         step,
     ):
         save_tree = make_save_tree(step)
-        checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
+        #TODO: uncomment htis after MOE is done
+        # checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
 
     if load:
         abstract_tree_map = jax.tree.map(
