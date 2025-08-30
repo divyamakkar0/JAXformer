@@ -126,13 +126,13 @@ class Embedding(nn.Module):
                 x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
             )
             if self.is_mutable_collection("params"):
-                x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
+                # x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
+            x = self.norm(x)
             x = jax.lax.all_to_all(
                 x, "tp", split_axis=x.ndim - 2, concat_axis=x.ndim - 1, tiled=True
             )
-            x = self.norm(x)
             x = self.embedding.attend(x)
 
         return x
@@ -711,13 +711,8 @@ class shardedModel:
             batch_idx = i % microbatch_per_device
             layer_idx = (i - layers + 1) % microbatch_per_device
 
-
-
             state = state.at[0].set(jnp.where(device_idx == 0, inputs[batch_idx], state[0]))
             state_idx = state_idx.at[0].set(jnp.where(device_idx == 0, 1, state_idx[0]))
-
-            if batch_idx == microbatch_per_device - 1:
-                inputs = jax.lax.ppermute(inputs, axis_name="pp", perm=perm)
 
             key, *layer_keys = jax.random.split(key, layers_per_device + 1)
             layer_keys = jnp.array(layer_keys)
@@ -751,6 +746,9 @@ class shardedModel:
                 ],
                 axis=0,
             )
+
+            if batch_idx == microbatch_per_device - 1:
+                inputs = jax.lax.ppermute(inputs, axis_name="pp", perm=perm)
 
             if layer_idx == microbatch_per_device - 1:
                 outputs = jax.lax.ppermute(outputs, axis_name="pp", perm=perm)
@@ -944,10 +942,14 @@ class shardedModel:
 
             return P("pp", None)
 
+        def embedding_partition(key: Tuple[str, ...], x: Array) -> P:
+            path = join_fn(key)
+            if "gamma" in path or "beta" in path:
+                return P(None, None, "tp")
+            return P(*(None for _ in range(x.ndim)))
+
         embed_p_spec = jax.tree.map(
-            lambda x: P(
-                *(None for _ in range(x.ndim)),
-            ),
+            embedding_partition,
             eval_shape[0],
         )
 
