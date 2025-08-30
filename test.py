@@ -385,6 +385,9 @@ def main(cfg: config):
             log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
 
+            start = time.time()
+            train_loss = []
+
         if current_step % (10 *cfg.checkpoint_steps) == 0:
             outputs = model.generate(
                 params,
@@ -417,9 +420,10 @@ def main(cfg: config):
                 wandb_log["inference_tokens"] = table
 
             save_checkpoint(current_step)
-
+            gen_end = time.time()
+            print(f"Generation time: {gen_end:.4f} seconds")
+            
             start = time.time()
-            train_loss = []
 
         if use_wandb:
             wandb.log(data=wandb_log, step=current_step)
