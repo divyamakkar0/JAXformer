@@ -7,6 +7,7 @@ os.environ["XLA_FLAGS"] = (
 import jax
 import jax.numpy as jnp
 
+#TODO: switch to gcs path
 jax.config.update("jax_compilation_cache_dir", "~/ax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)

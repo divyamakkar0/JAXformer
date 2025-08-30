@@ -602,7 +602,7 @@ class shardedModel:
             in_specs=(P(None, "tp"), P(None, None, "tp"), P("pp", "tp")),
             out_specs=out_spec_no_fsdp,
         )
-        def init_params(x_embed, x_layer, embed_key, layer_key):
+        def init_params(x_embed, x_layer, layer_key):
             layer_key = layer_key.reshape(
                 2,
             )
@@ -646,6 +646,7 @@ class shardedModel:
             rngs={"dropout": key} if train else None,
         )
 
+        #TODO: test other policies
         @partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
         def fwd_fn(state_idx, x, params, cache, key):
             def grad_fn(stop_grad):
@@ -708,6 +709,8 @@ class shardedModel:
 
         KV_cache = []
         KR_cache = []
+
+        #TODO: experiemnt with pipeline guards
         for i in range(microbatches + layers - 1):
             batch_idx = i % microbatch_per_device
             layer_idx = (i - layers + 1) % microbatch_per_device
