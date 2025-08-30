@@ -215,7 +215,6 @@ def main(cfg: config):
                 key=key,
                 train=train,
             )
-            breakpoint()
             log_probs = jax.nn.log_softmax(logits, axis=-1)
 
             M, B, T, V = logits.shape
@@ -288,6 +287,8 @@ def main(cfg: config):
         )
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
+
+        breakpoint()
         metrics = jax.tree.map(lambda x: x.mean(), metrics)
 
         updates, opt_state = tx.update(grads, opt_state, params)
