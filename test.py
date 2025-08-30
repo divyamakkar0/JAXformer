@@ -26,7 +26,6 @@ from dataclasses import asdict
 from jax.sharding import PartitionSpec as P
 from functools import partial
 from typing import Tuple
-from google.cloud import storage
 from test2 import shardedModel
 from dataset import Dataset
 from utils import parse_args, config
@@ -208,7 +207,7 @@ def main(cfg: config):
 
     def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
-            logits, (_, load) = model.pipe_step(
+            logits, (_, moe_stat) = model.pipe_step(
                 params,
                 x,
                 key=key,
@@ -229,16 +228,16 @@ def main(cfg: config):
 
             loss_balance = 0.0
 
-            # TODO: fix experts load balancing
-            if load is not None:
-                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="dp"), load)
-                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="tp"), load)
-                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="pp"), load)
+            # TODO: change to moe stat
+            # if load is not None:
+            #     load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="dp"), load)
+            #     load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="tp"), load)
+            #     load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="pp"), load)
 
-                f, p = load["f"], load["p"]
-                loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * (
-                    f * p
-                ).sum()
+            #     f, p = load["f"], load["p"]
+            #     loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * (
+            #         f * p
+            #     ).sum()
 
             loss = loss_cross + cfg.alpha * loss_balance
 
@@ -246,7 +245,8 @@ def main(cfg: config):
                 "loss": loss,
                 "loss_cross": loss_cross,
                 "loss_balance": loss_balance,
-                "load_expert": load["tokens_per_expert"] if load else None,
+                "load_expert": None,  # TODO: fix this
+                "moe_stat": moe_stat
             }
             return loss, metrics
 
@@ -338,6 +338,7 @@ def main(cfg: config):
         x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, metrics = train_step(params, opt_state, x, y, train_key)
+        breakpoint()
         train_loss.append(metrics["loss"])
 
         if use_wandb:
