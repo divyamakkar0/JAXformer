@@ -261,7 +261,7 @@ def main(cfg: config):
     key_spec = P("dp", "pp", "tp")
 
     #TODO: uncomment this
-    # @jax.jit
+    @jax.jit
     @partial(
         jax.shard_map,
         mesh=mesh,
@@ -288,8 +288,7 @@ def main(cfg: config):
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
 
-        breakpoint()
-        metrics = jax.tree.map(lambda x: x.mean(), metrics)
+        # metrics = jax.tree.map(lambda x: x.mean(), metrics)
 
         updates, opt_state = tx.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
@@ -343,6 +342,8 @@ def main(cfg: config):
         x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, metrics = train_step(params, opt_state, x, y, train_key)
+        
+        breakpoint()
         train_loss.append(metrics["loss"])
 
         if use_wandb:
