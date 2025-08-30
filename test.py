@@ -385,6 +385,7 @@ def main(cfg: config):
             log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
             log(log_string)
 
+        if current_step % (10 *cfg.checkpoint_steps) == 0:
             outputs = model.generate(
                 params,
                 cfg.model_config,
