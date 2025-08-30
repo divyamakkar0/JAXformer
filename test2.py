@@ -1013,6 +1013,24 @@ class shardedModel:
             *moe_stat
         )
 
+        def slice_moe(x: Array) -> Array:
+            def each_layer(layer_idx, x):
+                return jax.lax.dynamic_slice_in_dim(
+                    x,
+                    layers_per_device * device_idx + layer_idx,
+                    microbatches,
+                    axis=0
+                )
+            sliced_x = jax.vmap(each_layer, in_axes=(0, -2), out_axes=(-2))(jnp.arange(layers_per_device), x)
+            return sliced_x
+
+
+        moe_stat = jax.tree.map(
+            lambda x: slice_moe(x),
+            moe_stat
+        )
+        breakpoint()
+
         return outputs, (out_cache, moe_stat)
 
     def generate(
