@@ -586,22 +586,23 @@ class shardedModel:
         x_layer = jnp.ones((1, self.cfg.T, self.cfg.model_dimension), dtype=self.dtype)
 
         layer_devices = mesh.devices.shape[1]
+        tensor_devices = mesh.devices.shape[2]
 
         assert self.cfg.blocks // layer_devices, "Number of blocks must be divisible by number of devices"
         layers_per_device = self.cfg.blocks // layer_devices
 
         key, embed_key = jax.random.split(key, 2)
-        key, *layer_keys = jax.random.split(key, layer_devices + 1)
-        layer_keys = jnp.array(layer_keys).reshape(layer_devices, 2)
+        key, *layer_keys = jax.random.split(key, layer_devices * tensor_devices + 1)
+        layer_keys = jnp.array(layer_keys).reshape(layer_devices, tensor_devices, 2)
 
         @jax.jit
         @partial(
             jax.shard_map,
             mesh=mesh,
-            in_specs=(P(None, "tp"), P(None, None, "tp"), P("pp")),
+            in_specs=(P(None, "tp"), P(None, None, "tp"), P("pp", "tp")),
             out_specs=out_spec_no_fsdp,
         )
-        def init_params(x_embed, x_layer, layer_key):
+        def init_params(x_embed, x_layer, embed_key, layer_key):
             layer_key = layer_key.reshape(
                 2,
             )
@@ -948,7 +949,7 @@ class shardedModel:
                 return P(None, None, "tp")
             return P(*(None for _ in range(x.ndim)))
 
-        embed_p_spec = jax.tree.map(
+        embed_p_spec = jax.tree.map_with_path(
             embedding_partition,
             eval_shape[0],
         )
