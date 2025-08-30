@@ -904,13 +904,6 @@ class shardedModel:
                 key,
             )
 
-
-
-            print(jax.tree.map(
-                lambda x: x.shape,
-                out
-            ))
-
             return out
 
         layer_out, (out_cache, moe_stat) = self.pipeline(
@@ -1019,8 +1012,6 @@ class shardedModel:
             lambda *x: jnp.stack(x, axis=0),
             *moe_stat
         )
-
-        breakpoint()
 
         return outputs, (out_cache, moe_stat)
 

@@ -215,6 +215,7 @@ def main(cfg: config):
                 key=key,
                 train=train,
             )
+            breakpoint()
             log_probs = jax.nn.log_softmax(logits, axis=-1)
 
             M, B, T, V = logits.shape
