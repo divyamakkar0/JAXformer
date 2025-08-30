@@ -910,7 +910,6 @@ class shardedModel:
                 lambda x: x.shape,
                 out
             ))
-            breakpoint()
 
             return out
 
@@ -975,7 +974,6 @@ class shardedModel:
             state, (out_cache, out_moe_stat) = jax.vmap(fn)(
                 state_idx, state, stage_params, current_cache, layer_keys
             )
-            breakpoint()
 
             if out_cache[0] is not None:
                 KV_cache.append(out_cache[0])
@@ -1021,6 +1019,8 @@ class shardedModel:
             lambda *x: jnp.stack(x, axis=0),
             *moe_stat
         )
+
+        breakpoint()
 
         return outputs, (out_cache, moe_stat)
 
