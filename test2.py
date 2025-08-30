@@ -127,7 +127,7 @@ class NoisyKGate(nn.Module):
 
         scores = jax.lax.all_gather(
             local_scores,
-            "tensor",
+            "tp",
             axis=x.ndim - 1,
             tiled=True,
         ) # ( B, T, C) fully collected
