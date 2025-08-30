@@ -141,7 +141,7 @@ class MoE(nn.Module):
     n_shared: int
     n_experts: int
     k: int
-    dropout: float
+    dropout_rate: float
     capacity_factor: float = 1.0
     model_dtype: jnp.dtype = jnp.float32
 
