@@ -280,9 +280,9 @@ class MoE(nn.Module):
         total_batch = B * T * self.k
         indices = indices.reshape(total_batch)
         f = jax.nn.one_hot(indices, n_experts, dtype=jnp.float32)
-        f = jnp.cumsum(f, axis=0)[-1] / (B * T)
 
-        breakpoint()
+        #TODO: check if -1 is the largest should be
+        f = jnp.cumsum(f, axis=0)[-1] / (B * T)
 
         return f, p
 
@@ -965,6 +965,7 @@ class shardedModel:
             state, (out_cache, out_moe_stat) = jax.vmap(fn)(
                 state_idx, state, stage_params, current_cache, layer_keys
             )
+            breakpoint()
 
             if out_cache[0] is not None:
                 KV_cache.append(out_cache[0])
