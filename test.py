@@ -303,7 +303,7 @@ def main(cfg: config):
             return loss, metrics
 
         _, metrics = jax.lax.scan(single_step, 0, (x, y))
-        metrics = jax.tree.map(lambda x: x.mean(), metrics)
+        metrics = jax.tree.map(lambda x: x.mean(axis=0), metrics)
         return metrics
 
     total_steps = cfg.training_steps
