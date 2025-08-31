@@ -20,7 +20,6 @@ class modelConfig:
     dhR: int
     dropout_rate: float = 0.1
     model_dtype: str = "bfloat16"
-    moe: bool = False
     k: int = 0
     n_experts: int = 0
     n_shared: int = 0
@@ -96,7 +95,6 @@ def parse_args():
     parser.add_argument("--dhR", type=int, default=64)
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
-    parser.add_argument("--moe", action="store_true")
     parser.add_argument("--k", type=int, default=2)
     parser.add_argument("--n_experts", type=int, default=8)
     parser.add_argument("--n_shared", type=int, default=2)
@@ -162,7 +160,6 @@ def parse_args():
         dhR=args.dhR,
         dropout_rate=args.dropout_rate,
         model_dtype=args.model_dtype,
-        moe=args.moe,
         k=args.k,
         n_experts=args.n_experts,
         n_shared=args.n_shared,

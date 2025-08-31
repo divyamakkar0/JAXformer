@@ -7,13 +7,13 @@ os.environ["XLA_FLAGS"] = (
 import jax
 import jax.numpy as jnp
 
-#TODO: switch to gcs path
 jax.config.update("jax_compilation_cache_dir", "gs://jaxformer-cache/")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
+
 
 import optax
 import numpy as np
@@ -26,7 +26,6 @@ from dataclasses import asdict
 from jax.sharding import PartitionSpec as P
 from functools import partial
 from typing import Tuple
-from google.cloud import storage
 from test2 import shardedModel
 from dataset import Dataset
 from utils import parse_args, config
@@ -126,24 +125,33 @@ def main(cfg: config):
             "val_step_idx": val_dataset.step_idx,
             "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data),
             "step": step,
-            "wandb_id": wandb_id,
         }
-        return save_tree
+        metadata = {
+            "wandb_id": wandb_id
+        }
+        return save_tree, metadata
 
     def save_checkpoint(
         step,
     ):
-        save_tree = make_save_tree(step)
-        checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
+        save_tree, metadata = make_save_tree(step)
+        checkpoint_manager.save(step, args=ocp.args.Composite(
+            state=ocp.args.StandardSave(save_tree),
+            metadata=ocp.args.JsonSave(metadata)
+        ))
 
     if load:
-        abstract_tree_map = jax.tree.map(
-            ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)
+        abstract_tree_state = jax.tree.map(
+            ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)[0]
         )
-        tree_state = checkpoint_manager.restore(
+        tree = checkpoint_manager.restore(
             checkpoint_manager.latest_step(),
-            args=ocp.args.StandardRestore(abstract_tree_map),
-        )
+            args=ocp.args.Composite(
+                state=ocp.args.StandardRestore(abstract_tree_state),
+                metadata=ocp.args.JsonRestore(),
+        ))
+
+        tree_state, tree_metadata = tree.state, tree.metadata
 
         init_step = tree_state["step"]
         log(f"loading checkpoint @ step {init_step}")
@@ -160,21 +168,20 @@ def main(cfg: config):
         val_dataset.shard_idx = tree_state["val_shard_idx"]
         val_dataset.load_next_shard()
 
-        wandb_id = tree_state["wandb_id"]
+        wandb_id = tree_metadata["wandb_id"]
         if use_wandb:
             assert wandb_id is not None, "wandb_id is None"
             wandb.init(
                 entity="waterloo2",
                 project="jaxformer",
-                name=config.name,
+                name=cfg.name,
                 resume="must",
                 id=wandb_id,
-                config=asdict(config),
+                config=asdict(cfg),
             )
 
     else:
         log("no checkpoint found, saving init copy")
-        save_checkpoint(init_step)
         if use_wandb:
             wandb.init(
                 entity="waterloo2",
@@ -184,6 +191,7 @@ def main(cfg: config):
                 config=asdict(cfg),
             )
             wandb_id = wandb.run.id
+        save_checkpoint(init_step)
 
     if use_wandb:
         table = wandb.Table(
@@ -199,16 +207,12 @@ def main(cfg: config):
             log_mode="INCREMENTAL",
         )
 
-    param_count = jax.tree.reduce(
-        lambda x, y: x + y.size,
-        params,
-        0,
-    )
-    log(f"Total parameters: {param_count:,}")
+    param_count, active_param_count = model.param_count(params)
+    log(f"Total parameters: {param_count:,} with {active_param_count:,} active")
 
     def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
-            logits, (_, load) = model.pipe_step(
+            logits, (_, moe_stat) = model.pipe_step(
                 params,
                 x,
                 key=key,
@@ -229,16 +233,11 @@ def main(cfg: config):
 
             loss_balance = 0.0
 
-            # TODO: fix experts load balancing
-            if load is not None:
-                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="dp"), load)
-                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="tp"), load)
-                load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="pp"), load)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="dp"), moe_stat)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="tp"), moe_stat)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="pp"), moe_stat)
 
-                f, p = load["f"], load["p"]
-                loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * (
-                    f * p
-                ).sum()
+            loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * moe_stat["aux_loss"].sum()
 
             loss = loss_cross + cfg.alpha * loss_balance
 
@@ -246,8 +245,9 @@ def main(cfg: config):
                 "loss": loss,
                 "loss_cross": loss_cross,
                 "loss_balance": loss_balance,
-                "load_expert": load["tokens_per_expert"] if load else None,
+                "load_expert": moe_stat["tokens_per_expert"]
             }
+
             return loss, metrics
 
         return loss_fn(params, x, y, key)
@@ -284,7 +284,8 @@ def main(cfg: config):
         )
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
-        metrics = jax.tree.map(lambda x: x.mean(), metrics)
+
+        metrics = jax.tree.map(lambda x: x.mean(axis=0), metrics)
 
         updates, opt_state = tx.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
@@ -307,11 +308,11 @@ def main(cfg: config):
             return loss, metrics
 
         _, metrics = jax.lax.scan(single_step, 0, (x, y))
-        metrics = jax.tree.map(lambda x: x.mean(), metrics)
+        metrics = jax.tree.map(lambda x: x.mean(axis=0), metrics)
         return metrics
 
     total_steps = cfg.training_steps
-    total_tokens = train_dataset.tokens_per_step
+    total_tokens = train_dataset.tokens_per_step * cfg.grad_step
 
     jax.experimental.multihost_utils.sync_global_devices("sync")
     log(f"Total steps: {total_steps}")
@@ -320,6 +321,8 @@ def main(cfg: config):
     key, sample_key = jax.random.split(key, 2)
     start = time.time()
     train_loss = []
+    wandb_log_array = []
+
 
     @partial(jax.jit, static_argnames=["steps"])
     def make_sharded_key(key, steps=1):
@@ -347,10 +350,9 @@ def main(cfg: config):
                 "loss/train_cross_entropy_loss": metrics["loss_cross"],
                 "lr": opt_state[1].hyperparams["learning_rate"],
             }
-            if cfg.model_config.moe:
-                wandb_log["loss/load_loss"] = metrics["loss_balance"]
-                for h in range(cfg.model_config.n_experts):
-                    wandb_log[f"load/head_{h}"] = metrics[f"load_expert"][h]
+            wandb_log["loss/load_loss"] = metrics["loss_balance"]
+            for h in range(cfg.model_config.n_experts):
+                wandb_log[f"load/head_{h}"] = jax.device_get(metrics[f"load_expert"])[h]
 
         if current_step % cfg.checkpoint_steps == 0:
             time_per_batch = time.time() - start
@@ -360,10 +362,9 @@ def main(cfg: config):
             if use_wandb:
                 wandb_log["loss/val_loss"] = val_metrics["loss"]
                 wandb_log["loss/val_cross_entropy_loss"] = val_metrics["loss_cross"]
-                if cfg.model_config.moe:
-                    wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
-                    for h in range(cfg.model_config.n_experts):
-                        wandb_log[f"load/head_{h}"] = val_metrics[f"load_expert"][h]
+                wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
+                for h in range(cfg.model_config.n_experts):
+                    wandb_log[f"load/head_{h}"] = jax.device_get(val_metrics[f"load_expert"])[h]
 
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
@@ -408,13 +409,18 @@ def main(cfg: config):
                 wandb_log["inference_tokens"] = table
 
             save_checkpoint(current_step)
-            gen_end = time.time()
-            print(f"Generation time: {gen_end:.4f} seconds")
-
+            gen_time = time.time() - start
+            log(f"Generation time: {gen_time:.4f} seconds")
             start = time.time()
 
         if use_wandb:
-            wandb.log(data=wandb_log, step=current_step)
+            wandb_log_array.append(
+                {'data': wandb_log, 'step': current_step}
+            )
+            if current_step % (10 * cfg.checkpoint_steps) == 0:
+                for log_entry in wandb_log_array:
+                    wandb.log(data=log_entry['data'], step=log_entry['step'])
+                wandb_log_array = []
 
     if use_wandb:
         wandb.finish()

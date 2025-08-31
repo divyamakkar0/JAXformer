@@ -127,7 +127,7 @@ class NoisyKGate(nn.Module):
 
         scores = jax.lax.all_gather(
             local_scores,
-            "tensor",
+            "tp",
             axis=x.ndim - 1,
             tiled=True,
         ) # ( B, T, C) fully collected
@@ -141,7 +141,7 @@ class MoE(nn.Module):
     n_shared: int
     n_experts: int
     k: int
-    dropout: float
+    dropout_rate: float
     capacity_factor: float = 1.0
     model_dtype: jnp.dtype = jnp.float32
 
@@ -172,12 +172,11 @@ class MoE(nn.Module):
 
         expert_inputs, score_mask, tokens_per_expert = self.scatter(
             x, g_scores, indices, capacity
-        )
+        ) # (e, c, d) , (B * T, e, c), (e,)
 
         expert = FeedForward(
             model_dimension=self.model_dimension,
-            ff_dim=4 * self.model_dimension,
-            dropout=self.dropout,
+            dropout_rate=self.dropout_rate,
             model_dtype=self.model_dtype,
         )
 
@@ -189,6 +188,7 @@ class MoE(nn.Module):
             split_rngs={"params": True, "dropout": True},
         )(expert, expert_inputs)
 
+        # sum the out by the weighted dim
         expert_outputs = jnp.einsum("ecd,tec->td", expert_outputs, score_mask)
         expert_outputs = expert_outputs.reshape(B, T, C)
 
@@ -236,52 +236,53 @@ class MoE(nn.Module):
         position_in_expert = position_in_expert.reshape(self.k, B * T, self.n_experts)
         expert_scores = expert_scores.reshape(self.k, B * T, self.n_experts)
 
+        # go back to orginal shape
+        position_in_expert = jnp.swapaxes(position_in_expert, 0, 1)  # (B*T, k, n_experts)
+        expert_scores = jnp.swapaxes(expert_scores, 0, 1) # (B*T, k, n_experts)
 
-        position_in_expert = jnp.swapaxes(position_in_expert, 0, 1)
-        expert_scores = jnp.swapaxes(expert_scores, 0, 1)
+        # for every batch in each expert find the non-zero expert position
+        # as for every expert we only have one non-zero value
+        final_pos = jnp.max(position_in_expert, axis=1) - 1 # make it 0 indexed
+        final_scores = jnp.max(expert_scores, axis=1) # do the same for the score
 
-        final_pos = jnp.max(position_in_expert, axis=1) - 1
-        final_scores = jnp.max(expert_scores, axis=1)
-
+        # unsort the indices
         unsorted_indices = jnp.argsort(sorted_token_idx)
         final_pos = jnp.take_along_axis(final_pos, unsorted_indices[:, None], axis=0)
         final_scores = jnp.take_along_axis(
             final_scores, unsorted_indices[:, None], axis=0
         )
-
+        # final pos is now the orginal order where each index is the position in the expert
+        # if it is greater than or less than the capcity / 0 (hence -1) the row will be 0 in the capcity
+        # hence we have for each positoin and expert the one hot tells us which position it is in
+        # if it is in
         dispatch_mask = jax.nn.one_hot(
             final_pos, capacity, dtype=jnp.int32
         )  # (B*T, n_experts, capacity)
+        # multiply out all the values in the capcity by final score
+        # we can replicate since at most 1 value will be non zero
         scores_mask = (
             dispatch_mask * final_scores[..., None]
         )  # (B*T, n_experts, capacity)
 
-        expert_inputs = jnp.einsum("td,tec->ecd", x, dispatch_mask)
+        # since only one expert at every position in capactiy at most
+        # we can sum to get rid of batch dim and get the exepect capacity dimension indicies
+        expert_inputs = jnp.einsum("bd,bec->ecd", x, dispatch_mask)
 
         return expert_inputs, scores_mask, tokens_per_expert
 
     def auxiliary_loss(self, scores: Array, indices: Array) -> Array:
-        B, T, _ = scores.shape
+        B, T, n_experts = scores.shape
 
         scores = scores / jnp.sum(scores, axis=-1, keepdims=True)
-        scores = jnp.take_along_axis(scores, indices, axis=-1)
+        scores = scores.reshape(B * T, n_experts)
+        p = jnp.sum(scores, axis=0) / (B * T)
 
         total_batch = B * T * self.k
-        scores = scores.reshape(total_batch)
         indices = indices.reshape(total_batch)
+        f = jax.nn.one_hot(indices, n_experts, dtype=jnp.float32)
 
-        def load_fn(head_idx, scores, indices):
-            f_head = jnp.where(indices == head_idx, 1, 0)
-            f_head = jnp.sum(f_head) / (B * T)
-
-            p_head = jnp.where(indices == head_idx, scores, 0)
-            p_head = jnp.sum(p_head) / (B * T)
-
-            return f_head, p_head
-
-        f, p = jax.vmap(load_fn, in_axes=(0, None, None))(
-            jnp.arange(self.n_experts, dtype=jnp.int32), scores, indices
-        )
+        #TODO: check if -1 is the largest should be
+        f = jnp.cumsum(f, axis=0)[-1] / (B * T)
 
         return f, p
 
@@ -306,7 +307,6 @@ class Embedding(nn.Module):
                 x, "tp", split_axis=x.ndim - 1, concat_axis=x.ndim - 2, tiled=True
             )
             if self.is_mutable_collection("params"):
-                # x = jax.lax.all_gather(x, "tp", axis=-1, tiled=True)
                 _ = self.norm(x)
         else:
             x = self.norm(x)
@@ -489,6 +489,11 @@ class Layer(nn.Module):
     T: int
     latent_dim: int
     dhR: int
+    n_experts: int
+    k: int
+    n_shared: int
+    capacity_factor: float
+    use_moe: bool = False
     dropout_rate: float = 0.1
     model_dtype: jnp.dtype = jnp.bfloat16
 
@@ -512,14 +517,25 @@ class Layer(nn.Module):
         x_res = x
 
         x = RMSNorm(model_dtype=self.model_dtype)(x)
-        x = FeedForward(
-            model_dimension=self.model_dimension,
-            dropout_rate=self.dropout_rate,
-            model_dtype=self.model_dtype,
-        )(x, train=train)
+        if self.use_moe:
+            x, aux = MoE(
+                model_dimension=self.model_dimension,
+                n_experts=self.n_experts,
+                k=self.k,
+                n_shared=self.n_shared,
+                capacity_factor=self.capacity_factor,
+                dropout_rate=self.dropout_rate,
+                model_dtype=self.model_dtype,
+            )(x, train=train)
+        else:
+            x, aux = FeedForward(
+                model_dimension=self.model_dimension,
+                dropout_rate=self.dropout_rate,
+                model_dtype=self.model_dtype,
+            )(x, train=train), None
         x = x + x_res
 
-        return x, cache
+        return x, (cache, aux)
 
 
 class Block(nn.Module):
@@ -529,6 +545,10 @@ class Block(nn.Module):
     T: int
     latent_dim: int
     dhR: int
+    n_experts: int
+    k: int
+    n_shared: int
+    capacity_factor: float
     dropout_rate: float = 0.1
     model_dtype: jnp.dtype = jnp.bfloat16
 
@@ -538,6 +558,7 @@ class Block(nn.Module):
     ) -> Tuple[Array, cache_type]:
         KV_cache = []
         KR_cache = []
+        moe_stat = None
 
         for i in range(self.layers):
             current_cache = [None, None]
@@ -546,15 +567,23 @@ class Block(nn.Module):
                 if i < self.layers - 1:
                     current_cache[1] = cache[1][i]
 
-            x, cache_out = Layer(
+            x, (cache_out, aux) = Layer(
                 model_dimension=self.model_dimension,
                 n_heads=self.n_heads,
                 T=self.T,
                 latent_dim=self.latent_dim,
                 dhR=self.dhR if i < self.layers - 1 else 0,
+                n_experts=self.n_experts,
+                k=self.k,
+                n_shared=self.n_shared,
+                capacity_factor=self.capacity_factor,
+                use_moe=(i == self.layers - 1),
                 dropout_rate=self.dropout_rate,
                 model_dtype=self.model_dtype,
             )(x, current_cache, train=train)
+
+            if aux is not None:
+                moe_stat = aux
 
             ckV, kRT = cache_out
             if ckV is not None:
@@ -567,7 +596,7 @@ class Block(nn.Module):
 
         out_cache = (KV_cache, KR_cache)
 
-        return x, out_cache
+        return x, (out_cache, moe_stat)
 
 
 class Transformer(nn.Module):
@@ -579,6 +608,10 @@ class Transformer(nn.Module):
     T: int
     latent_dim: int
     dhR: int
+    n_experts: int
+    k: int
+    n_shared: int
+    capacity_factor: float
     dropout_rate: float = 0.1
     model_dtype: jnp.dtype = jnp.bfloat16
 
@@ -602,6 +635,7 @@ class Transformer(nn.Module):
 
         KV_cache = []
         ckRT_cache = []
+        moe_stat = []
 
         for i in range(self.blocks):
             if cache is None:
@@ -611,21 +645,28 @@ class Transformer(nn.Module):
                 kRT = cache[1][i] if cache[1] is not None else None
                 layer_cache = (cKV, kRT)
 
-            x, cache_out = Block(
+            x, (cache_out, moe_stat_out) = Block(
                 layers=self.layers_per_block,
                 model_dimension=self.model_dimension,
                 n_heads=self.n_head,
                 T=self.T,
                 latent_dim=self.latent_dim,
                 dhR=self.dhR,
+                n_experts=self.n_experts,
+                k=self.k,
+                n_shared=self.n_shared,
+                capacity_factor=self.capacity_factor,
                 dropout_rate=self.dropout_rate,
                 model_dtype=self.model_dtype,
             )(x, layer_cache, train=train)
+
 
             if cache_out[0] is not None:
                 KV_cache.append(cache_out[0])
             if cache_out[1] is not None:
                 ckRT_cache.append(cache_out[1])
+
+            moe_stat.append(moe_stat_out)
 
         if len(KV_cache) > 0:
             KV_cache = jnp.stack(KV_cache, axis=0)
@@ -637,10 +678,15 @@ class Transformer(nn.Module):
             ckRT_cache = None
         out_cache = (KV_cache, ckRT_cache)
 
+        moe_stat = jax.tree.map(
+            lambda *x: jnp.stack(x, axis=0),
+            *moe_stat
+        )
+
         x_out = embedding(x, out=True)
         x_out = x_out.reshape(*B, T, self.vocab_size)
 
-        return x_out, out_cache
+        return x_out, (out_cache, moe_stat)
 
     def init_weights(self, key: jax.random.key, mesh: jax.sharding.Mesh) -> PyTree:
         params = self.init(key, jnp.ones((1, self.T), dtype=jnp.int32), train=False)[
@@ -665,6 +711,10 @@ class Transformer(nn.Module):
             T=cfg.T,
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
+            n_experts=cfg.n_experts,
+            k=cfg.k,
+            n_shared=cfg.n_shared,
+            capacity_factor=cfg.capacity_factor,
             dropout_rate=cfg.dropout_rate,
             model_dtype=convert_dtype(cfg.model_dtype),
         )
@@ -746,6 +796,10 @@ class shardedModel:
             T=cfg.T,
             latent_dim=cfg.latent_dim,
             dhR=cfg.dhR,
+            n_experts=cfg.n_experts,
+            k=cfg.k,
+            n_shared=cfg.n_shared,
+            capacity_factor=cfg.capacity_factor,
             dropout_rate=cfg.dropout_rate,
             model_dtype=self.dtype,
         )
@@ -841,7 +895,7 @@ class shardedModel:
                 grad_fn(stop_grad=False),
             ]
 
-            return jax.lax.switch(
+            out = jax.lax.switch(
                 state_idx,
                 fns,
                 x,
@@ -850,12 +904,14 @@ class shardedModel:
                 key,
             )
 
-        layer_out, out_cache = self.pipeline(
+            return out
+
+        layer_out, (out_cache, moe_stat) = self.pipeline(
             fwd_fn, layer_params, embeddings, cache, key
         )
 
         logits = self.embedding.apply({"params": embedding_params}, layer_out, out=True)
-        return logits, (out_cache, None)
+        return logits, (out_cache, moe_stat)
 
     def pipeline(
         self,
@@ -890,7 +946,8 @@ class shardedModel:
         KV_cache = []
         KR_cache = []
 
-        #TODO: experiemnt with pipeline guards
+        moe_stat = []
+
         for i in range(microbatches + layers - 1):
             batch_idx = i % microbatch_per_device
             layer_idx = (i - layers + 1) % microbatch_per_device
@@ -907,7 +964,7 @@ class shardedModel:
                 if cache[1] is not None:
                     current_cache[1] = cache[1][i]
 
-            state, out_cache = jax.vmap(fn)(
+            state, (out_cache, out_moe_stat) = jax.vmap(fn)(
                 state_idx, state, stage_params, current_cache, layer_keys
             )
 
@@ -915,6 +972,7 @@ class shardedModel:
                 KV_cache.append(out_cache[0])
             if out_cache[1] is not None:
                 KR_cache.append(out_cache[1])
+            moe_stat.append(out_moe_stat)
 
             outputs = outputs.at[layer_idx].set(
                 jnp.where(device_idx == n_devices - 1, state[-1], outputs[layer_idx])
@@ -950,7 +1008,33 @@ class shardedModel:
             KR_cache = None
         out_cache = (KV_cache, KR_cache)
 
-        return outputs, out_cache
+        moe_stat = jax.tree.map(
+            lambda *x: jnp.stack(x, axis=0),
+            *moe_stat
+        )
+
+        def slice_moe(x: Array) -> Array:
+            def each_layer(layer_idx, x):
+                return jax.lax.dynamic_slice_in_dim(
+                    x,
+                    layers_per_device * device_idx + layer_idx,
+                    microbatches,
+                    axis=0
+                )
+            sliced_x = jax.vmap(each_layer, in_axes=(0, -2), out_axes=(-2))(jnp.arange(layers_per_device), x)
+            return sliced_x
+
+        moe_stat = jax.tree.map(
+            lambda x: slice_moe(x).mean(axis=0), # mean across microbatches
+            moe_stat
+        )
+
+        moe_stat = {
+            "tokens_per_expert": moe_stat["tokens_per_expert"].sum(axis=0), # (experts,)
+            "aux_loss": moe_stat['f'] * moe_stat['p'], # (layers_per_device, experts)
+        }
+
+        return outputs, (out_cache, moe_stat)
 
     def generate(
         self,
@@ -1143,6 +1227,33 @@ class shardedModel:
         )
 
         return embed_p_spec, layer_p_spec
+
+    def param_count(self, params):
+
+        total_params = jax.tree.reduce(
+            lambda x, y: x + y.size,
+            params,
+            0,
+        )
+
+        join_fn = lambda path: " ".join(i.key for i in path).lower()
+
+        def count_active_params(key, x):
+            path = join_fn(key)
+            n_elements = x.size
+
+            is_expert = "moe" in path and "feedforward" in path
+            if is_expert:
+                n_elements = n_elements // self.cfg.n_experts * self.cfg.k
+
+            return n_elements
+
+        active_params_map = jax.tree.map_with_path(count_active_params, params[1])
+        active_params = jax.tree.reduce(
+            lambda x, y: x + y, active_params_map, 0
+        )
+
+        return total_params, active_params
 
 
 if __name__ == "__main__":
