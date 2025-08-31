@@ -345,7 +345,7 @@ def main(cfg: config):
             }
             wandb_log["loss/load_loss"] = metrics["loss_balance"]
             for h in range(cfg.model_config.n_experts):
-                wandb_log[f"load/head_{h}"] = metrics[f"load_expert"][h]
+                wandb_log[f"load/head_{h}"] = jax.device_get(metrics[f"load_expert"])[h]
 
         if current_step % cfg.checkpoint_steps == 0:
             time_per_batch = time.time() - start
@@ -359,7 +359,7 @@ def main(cfg: config):
                 wandb_log["loss/val_cross_entropy_loss"] = val_metrics["loss_cross"]
                 wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
                 for h in range(cfg.model_config.n_experts):
-                    wandb_log[f"load/head_{h}"] = val_metrics[f"load_expert"][h]
+                    wandb_log[f"load/head_{h}"] = jax.device_get(val_metrics[f"load_expert"])[h]
 
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
