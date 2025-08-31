@@ -1239,8 +1239,6 @@ class shardedModel:
         join_fn = lambda path: " ".join(i.key for i in path).lower()
 
         def count_active_params(key, x):
-            print(key)
-            breakpoint()
             path = join_fn(key)
             n_elements = x.size
 
@@ -1250,7 +1248,7 @@ class shardedModel:
 
             return n_elements
 
-        active_params_map = jax.tree.map_with_path(count_active_params, params)
+        active_params_map = jax.tree.map_with_path(count_active_params, params[1])
         active_params = jax.tree.reduce(
             lambda x, y: x + y, active_params_map, 0
         )
