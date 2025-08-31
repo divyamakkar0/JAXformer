@@ -3,7 +3,9 @@
 source .env
 SESSION="mysession"
 # command="python 2axismain.p:wqy "
+
  command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name moeTest --train_batch_size 192 --use_cache --wandb"
+
 # command="python testCheckpoint.py"
 
 IPS=(
@@ -43,7 +45,7 @@ for i in $(seq 0 7); do
 done
 
 for i in $(seq 0 7); do
-  tmux send-keys -t "$SESSION":1.$i "ssh adityamakkar@${IPS[$i]}" C-m
+  tmux send-keys -t "$SESSION":1.$i "ssh aditymakkar@${IPS[$i]}" C-m
   tmux send-keys -t "$SESSION":1.$i "watch -n 1 tpu-info" C-m
 done
 
