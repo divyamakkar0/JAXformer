@@ -96,7 +96,7 @@ def parse_args():
     parser.add_argument("--dropout_rate", type=float, default=0.2)
     parser.add_argument("--model_dtype", type=str, default="bfloat16")
     parser.add_argument("--k", type=int, default=2)
-    parser.add_argument("--n_experts", type=int, default=8)
+    parser.add_argument("--n_experts", type=int, default=16)
     parser.add_argument("--n_shared", type=int, default=2)
     parser.add_argument("--capacity_factor", type=float, default=1.5)
 
@@ -117,8 +117,8 @@ def parse_args():
     parser.add_argument("--max_lr", type=float, default=6e-4)
     parser.add_argument("--min_lr", type=float, default=0)
     parser.add_argument("--end_lr", type=float, default=6e-5)
-    parser.add_argument("--warmup_steps", type=int, default=715)
-    parser.add_argument("--end_steps", type=int, default=19073)
+    parser.add_argument("--warmup_steps", type=int, default=5000)
+    parser.add_argument("--end_steps", type=int, default=75000)
 
     parser.add_argument("--alpha", type=float, default=0.0001)
     parser.add_argument("--name", type=str, default=None, required=True)
@@ -127,7 +127,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wandb", action="store_true")
 
-    parser.add_argument("--training_steps", type=int, default=20000)
+    parser.add_argument("--training_steps", type=int, default=100000)
     parser.add_argument("--grad_step", type=int, default=1)
     parser.add_argument("--eval_steps", type=int, default=25)
     parser.add_argument("--grad_clip_norm", type=float, default=1.0)
