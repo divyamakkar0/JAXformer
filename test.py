@@ -336,7 +336,6 @@ def main(cfg: config):
         x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, metrics = train_step(params, opt_state, x, y, train_key)
-        breakpoint()
         train_loss.append(metrics["loss"])
 
         if use_wandb:
@@ -346,10 +345,9 @@ def main(cfg: config):
                 "loss/train_cross_entropy_loss": metrics["loss_cross"],
                 "lr": opt_state[1].hyperparams["learning_rate"],
             }
-            if cfg.model_config.moe:
-                wandb_log["loss/load_loss"] = metrics["loss_balance"]
-                for h in range(cfg.model_config.n_experts):
-                    wandb_log[f"load/head_{h}"] = metrics[f"load_expert"][h]
+            wandb_log["loss/load_loss"] = metrics["loss_balance"]
+            for h in range(cfg.model_config.n_experts):
+                wandb_log[f"load/head_{h}"] = metrics[f"load_expert"][h]
 
         if current_step % cfg.checkpoint_steps == 0:
             time_per_batch = time.time() - start
@@ -359,10 +357,9 @@ def main(cfg: config):
             if use_wandb:
                 wandb_log["loss/val_loss"] = val_metrics["loss"]
                 wandb_log["loss/val_cross_entropy_loss"] = val_metrics["loss_cross"]
-                if cfg.model_config.moe:
-                    wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
-                    for h in range(cfg.model_config.n_experts):
-                        wandb_log[f"load/head_{h}"] = val_metrics[f"load_expert"][h]
+                wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
+                for h in range(cfg.model_config.n_experts):
+                    wandb_log[f"load/head_{h}"] = val_metrics[f"load_expert"][h]
 
             jax.experimental.multihost_utils.sync_global_devices("sync")
 
