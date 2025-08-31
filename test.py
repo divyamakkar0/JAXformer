@@ -135,10 +135,10 @@ def main(cfg: config):
         step,
     ):
         save_tree, metadata = make_save_tree(step)
-        # checkpoint_manager.save(step, args=ocp.args.Composite(
-        #     state=ocp.args.StandardSave(save_tree),
-        #     metadata=ocp.args.JsonSave(metadata)
-        # ))
+        checkpoint_manager.save(step, args=ocp.args.Composite(
+            state=ocp.args.StandardSave(save_tree),
+            metadata=ocp.args.JsonSave(metadata)
+        ))
 
     if load:
         abstract_tree_map = jax.tree.map(
