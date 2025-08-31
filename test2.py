@@ -1236,12 +1236,24 @@ class shardedModel:
             0,
         )
 
+        join_fn = lambda path: " ".join(i.key for i in path).lower()
+
         def count_active_params(key, x):
+            path = join_fn(key)
+            n_elements = x.size
 
-            return x.size
+            is_expert = "moe" in path and "feedforward" in path
+            if is_expert:
+                n_elements = n_elements // self.cfg.n_experts * self.cfg.k
 
-        active_params = jax.tree.map_with_path(count_active_params, params)
-        return total_params
+            return n_elements
+
+        active_params_map = jax.tree.map_with_path(count_active_params, params)
+        active_params = jax.tree.reduce(
+            lambda x, y: x + y, active_params_map, 0
+        )
+
+        return total_params, active_params
 
 
 if __name__ == "__main__":

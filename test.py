@@ -137,7 +137,7 @@ def main(cfg: config):
         save_tree, metadata = make_save_tree(step)
         checkpoint_manager.save(step, args=ocp.args.Composite(
             state=ocp.args.StandardSave(save_tree),
-            metadata=ocp.args.Metadata(metadata)
+            metadata=ocp.args.JsonSave(metadata)
         ))
 
     if load:
