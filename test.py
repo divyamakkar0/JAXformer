@@ -402,9 +402,8 @@ def main(cfg: config):
                 wandb_log["inference_tokens"] = table
 
             save_checkpoint(current_step)
-            gen_end = time.time()
-            print(f"Generation time: {gen_end:.4f} seconds")
-
+            gen_time = time.time() - start
+            log(f"Generation time: {gen_time:.4f} seconds")
             start = time.time()
 
         if use_wandb:
