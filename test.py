@@ -141,14 +141,14 @@ def main(cfg: config):
         ))
 
     if load:
-        abstract_tree_map = jax.tree.map(
-            ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)
+        abstract_tree_state = jax.tree.map(
+            ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)[0]
         )
         tree = checkpoint_manager.restore(
             checkpoint_manager.latest_step(),
             args=ocp.args.Composite(
-                state=ocp.args.StandardRestore(abstract_tree_map),
-                metadata=ocp.args.JsonRestore(abstract_tree_map),
+                state=ocp.args.StandardRestore(abstract_tree_state),
+                metadata=ocp.args.JsonRestore(),
         ))
 
         tree_state, tree_metadata = tree.state, tree.metadata
