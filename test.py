@@ -146,8 +146,10 @@ def main(cfg: config):
         )
         tree = checkpoint_manager.restore(
             checkpoint_manager.latest_step(),
-            args=ocp.args.StandardRestore(abstract_tree_map),
-        )
+            args=ocp.args.Composite(
+                state=ocp.args.StandardRestore(abstract_tree_map),
+                metadata=ocp.args.JsonRestore(abstract_tree_map),
+        ))
 
         tree_state, tree_metadata = tree.state, tree.metadata
 
