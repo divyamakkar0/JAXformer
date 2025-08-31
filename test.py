@@ -173,7 +173,7 @@ def main(cfg: config):
 
     else:
         log("no checkpoint found, saving init copy")
-        save_checkpoint(init_step)
+
         if use_wandb:
             wandb.init(
                 entity="waterloo2",
@@ -183,6 +183,7 @@ def main(cfg: config):
                 config=asdict(cfg),
             )
             wandb_id = wandb.run.id
+        save_checkpoint(init_step)
 
     if use_wandb:
         table = wandb.Table(
@@ -307,7 +308,7 @@ def main(cfg: config):
         return metrics
 
     total_steps = cfg.training_steps
-    total_tokens = train_dataset.tokens_per_step
+    total_tokens = train_dataset.tokens_per_step * cfg.grad_step
 
     jax.experimental.multihost_utils.sync_global_devices("sync")
     log(f"Total steps: {total_steps}")

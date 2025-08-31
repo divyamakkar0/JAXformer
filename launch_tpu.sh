@@ -3,7 +3,7 @@
 source .env
 SESSION="mysession"
 # command="python 2axismain.p:wqy "
- command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name moeGPT2test11 --train_batch_size 192 --use_cache --wandb"
+ command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name moeTest --train_batch_size 192 --use_cache --wandb"
 # command="python testCheckpoint.py"
 
 IPS=(
