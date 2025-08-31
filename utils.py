@@ -86,7 +86,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="model training")
 
     parser.add_argument("--model_dimension", type=int, default=768)
-    parser.add_argument("--vocab_size", type=int, default=50304)
+    parser.add_argument("--vocab_size", type=int, default=100277)
     parser.add_argument("--n_head", type=int, default=12)
     parser.add_argument("--blocks", type=int, default=8)
     parser.add_argument("--layers_per_block", type=int, default=6)
@@ -103,7 +103,7 @@ def parse_args():
     parser.add_argument(
         "--bucket_name",
         type=str,
-        default="10bt_gpt2",
+        default="350bt_gpt4",
     )
     parser.add_argument(
         "--process_path", type=str, default="./bucket_downloads/processShard"
