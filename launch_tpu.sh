@@ -3,7 +3,7 @@
 source .env
 SESSION="mysession"
 # command="python 2axismain.p:wqy "
- command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name newEmbed4 --train_batch_size 192 --use_cache"
+command="python test.py --checkpoint_steps=10 --n_device_axis 8 2 2 --name newEmbed4 --train_batch_size 192 --use_cache"
 # command="python testCheckpoint.py"
 
 IPS=(
@@ -34,7 +34,7 @@ tmux new-window -t "$SESSION" -n "monitor" \; \
   select-layout tiled
 
 for i in $(seq 0 7); do
-  tmux send-keys -t "$SESSION":0.$i "ssh adityamakkar@${IPS[$i]}" C-m
+  tmux send-keys -t "$SESSION":0.$i "ssh divyamakkar@${IPS[$i]}" C-m
   tmux send-keys -t "$SESSION":0.$i "cd ~/Jaxformer && rm -rf samples && mkdir samples" C-m
   tmux send-keys -t "$SESSION":0.$i "git fetch origin && git reset --hard origin/main" C-m
   tmux send-keys -t "$SESSION":0.$i "bash setupTpu.sh" C-m
@@ -43,7 +43,7 @@ for i in $(seq 0 7); do
 done
 
 for i in $(seq 0 7); do
-  tmux send-keys -t "$SESSION":1.$i "ssh adityamakkar@${IPS[$i]}" C-m
+  tmux send-keys -t "$SESSION":1.$i "ssh divyamakkar@${IPS[$i]}" C-m
   tmux send-keys -t "$SESSION":1.$i "watch -n 1 tpu-info" C-m
 done
 
