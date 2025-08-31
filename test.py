@@ -230,16 +230,11 @@ def main(cfg: config):
 
             loss_balance = 0.0
 
-            # TODO: change to moe stat
-            # if load is not None:
-            #     load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="dp"), load)
-            #     load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="tp"), load)
-            #     load = jax.tree.map(lambda x: jax.lax.pmean(x, axis_name="pp"), load)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="dp"), moe_stat)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="tp"), moe_stat)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="pp"), moe_stat)
 
-            #     f, p = load["f"], load["p"]
-            #     loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * (
-            #         f * p
-            #     ).sum()
+            loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * moe_stat["aux_loss"].sum()
 
             loss = loss_cross + cfg.alpha * loss_balance
 
@@ -247,9 +242,9 @@ def main(cfg: config):
                 "loss": loss,
                 "loss_cross": loss_cross,
                 "loss_balance": loss_balance,
-                "load_expert": None,  # TODO: fix this
-                "moe_stat": moe_stat
+                "load_expert": moe_stat["tokens_per_expert"]
             }
+
             return loss, metrics
 
         return loss_fn(params, x, y, key)
@@ -260,7 +255,6 @@ def main(cfg: config):
     opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
     key_spec = P("dp", "pp", "tp")
 
-    #TODO: uncomment this
     @jax.jit
     @partial(
         jax.shard_map,
@@ -288,7 +282,7 @@ def main(cfg: config):
 
         grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
 
-        # metrics = jax.tree.map(lambda x: x.mean(), metrics)
+        metrics = jax.tree.map(lambda x: x.mean(axis=0), metrics)
 
         updates, opt_state = tx.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
@@ -342,7 +336,6 @@ def main(cfg: config):
         x, y = train_dataset(step=cfg.grad_step)
 
         params, opt_state, metrics = train_step(params, opt_state, x, y, train_key)
-        
         breakpoint()
         train_loss.append(metrics["loss"])
 

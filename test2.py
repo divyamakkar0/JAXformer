@@ -1024,12 +1024,15 @@ class shardedModel:
             sliced_x = jax.vmap(each_layer, in_axes=(0, -2), out_axes=(-2))(jnp.arange(layers_per_device), x)
             return sliced_x
 
-
         moe_stat = jax.tree.map(
-            lambda x: slice_moe(x),
+            lambda x: slice_moe(x).mean(axis=0), # mean across microbatches
             moe_stat
         )
-        breakpoint()
+
+        moe_stat = {
+            "tokens_per_expert": moe_stat["tokens_per_expert"],
+            "aux_loss": moe_stat['f'] * moe_stat['p'], # (layers_per_device, experts)
+        }
 
         return outputs, (out_cache, moe_stat)
 
