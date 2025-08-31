@@ -352,6 +352,8 @@ def main(cfg: config):
             eval_x, eval_y = val_dataset(step=cfg.eval_steps)
             val_metrics = eval_step(params, eval_x, eval_y)
 
+            breakpoint()
+
             if use_wandb:
                 wandb_log["loss/val_loss"] = val_metrics["loss"]
                 wandb_log["loss/val_cross_entropy_loss"] = val_metrics["loss_cross"]
