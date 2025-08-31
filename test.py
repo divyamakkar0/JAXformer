@@ -125,24 +125,31 @@ def main(cfg: config):
             "val_step_idx": val_dataset.step_idx,
             "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data),
             "step": step,
-            "wandb_id": wandb_id,
         }
-        return save_tree
+        metadata = {
+            "wandb_id": wandb_id
+        }
+        return save_tree, metadata
 
     def save_checkpoint(
         step,
     ):
-        save_tree = make_save_tree(step)
-        checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
+        save_tree, metadata = make_save_tree(step)
+        checkpoint_manager.save(step, args=ocp.args.Composite(
+            state=ocp.args.StandardSave(save_tree),
+            metadata=ocp.args.Metadata(metadata)
+        ))
 
     if load:
         abstract_tree_map = jax.tree.map(
             ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)
         )
-        tree_state = checkpoint_manager.restore(
+        tree = checkpoint_manager.restore(
             checkpoint_manager.latest_step(),
             args=ocp.args.StandardRestore(abstract_tree_map),
         )
+
+        tree_state, tree_metadata = tree.state, tree.metadata
 
         init_step = tree_state["step"]
         log(f"loading checkpoint @ step {init_step}")
@@ -159,7 +166,7 @@ def main(cfg: config):
         val_dataset.shard_idx = tree_state["val_shard_idx"]
         val_dataset.load_next_shard()
 
-        wandb_id = tree_state["wandb_id"]
+        wandb_id = tree_metadata["wandb_id"]
         if use_wandb:
             assert wandb_id is not None, "wandb_id is None"
             wandb.init(
@@ -173,7 +180,6 @@ def main(cfg: config):
 
     else:
         log("no checkpoint found, saving init copy")
-
         if use_wandb:
             wandb.init(
                 entity="waterloo2",

@@ -1228,6 +1228,21 @@ class shardedModel:
 
         return embed_p_spec, layer_p_spec
 
+    @property
+    def param_count(self, params):
+        total_params = jax.tree.reduce(
+            lambda x, y: x + y.size,
+            params,
+            0,
+        )
+
+        def count_active_params(key, x):
+
+            return x.size
+
+        active_params = jax.tree.map_with_path(count_active_params, params)
+        return total_params
+
 
 if __name__ == "__main__":
     jax.distributed.initialize()
