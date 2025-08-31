@@ -7,7 +7,6 @@ os.environ["XLA_FLAGS"] = (
 import jax
 import jax.numpy as jnp
 
-#TODO: switch to gcs path
 jax.config.update("jax_compilation_cache_dir", "gs://jaxformer-cache/")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
@@ -134,8 +133,7 @@ def main(cfg: config):
         step,
     ):
         save_tree = make_save_tree(step)
-        #TODO: uncomment htis after MOE is done
-        # checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
+        checkpoint_manager.save(step, args=ocp.args.StandardSave(save_tree))
 
     if load:
         abstract_tree_map = jax.tree.map(
