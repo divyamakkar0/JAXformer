@@ -174,10 +174,10 @@ def main(cfg: config):
             wandb.init(
                 entity="waterloo2",
                 project="jaxformer",
-                name=config.name,
+                name=cfg.name,
                 resume="must",
                 id=wandb_id,
-                config=asdict(config),
+                config=asdict(cfg),
             )
 
     else:
