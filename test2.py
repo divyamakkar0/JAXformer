@@ -1071,7 +1071,7 @@ class shardedModel:
             params,
             out_spec,
         )
-        enc = tiktoken.get_encoding("gpt2")
+        enc = tiktoken.get_encoding("cl100k_base")
         out = jnp.array(
             [enc._special_tokens["<|endoftext|>"]] if x == "" else enc.encode(x),
             dtype=jnp.int32,

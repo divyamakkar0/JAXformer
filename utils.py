@@ -143,7 +143,7 @@ def parse_args():
     parser.add_argument("--top_k", type=int, default=10000)
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--use_cache", action="store_true")
-    parser.add_argument("--max_tokens", type=int, default=40)
+    parser.add_argument("--max_tokens", type=int, default=10)
     parser.add_argument("--prompt", type=str, default="hello world")
     parser.add_argument("--n_devices", type=int, default=1)
 
