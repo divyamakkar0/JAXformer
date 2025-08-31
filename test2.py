@@ -1030,7 +1030,7 @@ class shardedModel:
         )
 
         moe_stat = {
-            "tokens_per_expert": moe_stat["tokens_per_expert"].sum(axis=0), # ()
+            "tokens_per_expert": moe_stat["tokens_per_expert"].sum(axis=0), # (experts,)
             "aux_loss": moe_stat['f'] * moe_stat['p'], # (layers_per_device, experts)
         }
 
