@@ -1228,7 +1228,6 @@ class shardedModel:
 
         return embed_p_spec, layer_p_spec
 
-    @property
     def param_count(self, params):
         total_params = jax.tree.reduce(
             lambda x, y: x + y.size,

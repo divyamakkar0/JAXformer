@@ -205,12 +205,8 @@ def main(cfg: config):
             log_mode="INCREMENTAL",
         )
 
-    param_count = jax.tree.reduce(
-        lambda x, y: x + y.size,
-        params,
-        0,
-    )
-    log(f"Total parameters: {param_count:,}")
+    param_count, active_param_count = model.param_count(params)
+    log(f"Total parameters: {param_count:,} with {active_param_count:,} active")
 
     def step(params, x, y, key, train):
         def loss_fn(params, x, y, key):
