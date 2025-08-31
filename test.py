@@ -321,6 +321,8 @@ def main(cfg: config):
     key, sample_key = jax.random.split(key, 2)
     start = time.time()
     train_loss = []
+    wandb_log_array = []
+
 
     @partial(jax.jit, static_argnames=["steps"])
     def make_sharded_key(key, steps=1):
@@ -412,7 +414,13 @@ def main(cfg: config):
             start = time.time()
 
         if use_wandb:
-            wandb.log(data=wandb_log, step=current_step)
+            wandb_log_array.append(
+                {'data': wandb_log, 'step': current_step}
+            )
+            if current_step % (10 * cfg.checkpoint_steps) == 0:
+                for log_entry in wandb_log_array:
+                    wandb.log(data=log_entry['data'], step=log_entry['step'])
+                wandb_log_array = []
 
     if use_wandb:
         wandb.finish()
