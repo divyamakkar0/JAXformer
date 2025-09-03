@@ -22,7 +22,6 @@ dtype_map = {
     "int64": jnp.int64,
 }
 
-
 def convert_dtype(dtype_str):
     if dtype_str in dtype_map:
         return dtype_map[dtype_str]
@@ -107,7 +106,6 @@ class RMSNorm(nn.Module):
 
 
 class NoisyKGate(nn.Module):
-    model_dimension: int
     n_experts: int
     k: int
     model_dtype: jnp.dtype
@@ -159,7 +157,6 @@ class MoE(nn.Module):
         res_shared = jnp.sum(res_shared, axis=2)  # (B, T, n, d) -> (B, T, d)
 
         router = NoisyKGate(
-            model_dimension=self.model_dimension,
             n_experts=self.n_experts,
             k=self.k,
             model_dtype=self.model_dtype,
@@ -280,9 +277,7 @@ class MoE(nn.Module):
         total_batch = B * T * self.k
         indices = indices.reshape(total_batch)
         f = jax.nn.one_hot(indices, n_experts, dtype=jnp.float32)
-
-        #TODO: check if -1 is the largest should be
-        f = jnp.cumsum(f, axis=0)[-1] / (B * T)
+        f = jnp.sum(f, axis=0) / (B * T)
 
         return f, p
 
@@ -1071,7 +1066,7 @@ class shardedModel:
             params,
             out_spec,
         )
-        enc = tiktoken.get_encoding("cl100k_base")
+        enc = tiktoken.encoding_for_model("gpt-4")
         out = jnp.array(
             [enc._special_tokens["<|endoftext|>"]] if x == "" else enc.encode(x),
             dtype=jnp.int32,

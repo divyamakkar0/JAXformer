@@ -14,7 +14,6 @@ jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
 
-
 import optax
 import numpy as np
 import time

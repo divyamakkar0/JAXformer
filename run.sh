@@ -6,9 +6,9 @@ command="python test.py --checkpoint_steps=75 --n_device_axis 8 2 2 --name moe1B
 
 echo "Running on $IP"
 
-ssh -o StrictHostKeyChecking=no adityamakkar@$IP "
+ssh adityamakkar@$IP "
 
-    tmux kill-session -t $SESSION 2>/dev/null || true
+    tmux kill-session -t $SESSION
     tmux new-session -d -s $SESSION
 
     tmux send-keys -t $SESSION:0 'cd ~/Jaxformer && rm -rf samples && mkdir samples' C-m
