@@ -1,6 +1,5 @@
 import os
 import jax
-import jax.numpy as jnp
 from jax.sharding import NamedSharding
 import numpy as np
 from typing import Optional, Tuple
@@ -186,41 +185,3 @@ class Dataset:
     @property
     def tokens_per_step(self):
         return self.dp * self.batch_size * self.T
-
-
-if __name__ == "__main__":
-    test_cfg = dataConfig(
-        bucket_name="10bt_gpt4",
-        process_path="./bucket_downloads/processShard",
-        train_folder_name="train",
-        val_folder_name="val",
-        T=1024,
-        train_batch_size=16,
-    )
-    train, test = Dataset.getDataset(test_cfg, None)
-
-    train_step_id = 20
-    train_shard_id = ((train.shard_idx - 1) % len(train.data),)
-
-    breakpoint()
-    train.load_next_shard()
-
-    val_step_id = 20
-    val_shard_id = ((test.shard_idx - 1) % len(test.data),)
-    test.load_next_shard()
-
-    # start = time.time()
-    # train, test = Dataset.getDataset(test_cfg, None)
-    # jax.random.key(0)
-    # end = time.time()
-    # print(f"time taken to load dataset: {(end - start):.2f} seconds")
-    # for i in range(6104 * 4):
-    #     x,y = train()
-
-    # print(len(train), len(test))
-    # breakpoint()
-
-    if os.path.exists(train.process_path):
-        os.remove(train.process_path)
-    if os.path.exists(test.process_path):
-        os.remove(test.process_path)

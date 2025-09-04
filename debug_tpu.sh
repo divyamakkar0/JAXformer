@@ -1,12 +1,8 @@
 #!/bin/bash
 
-source .env
+source .env # wandb key from here
 SESSION="mysession"
-# command="python 2axismain.p:wqy "
-
- command="python test.py --checkpoint_steps=1 --n_device_axis 8 2 2 --name moe1B --train_batch_size 16 --use_cache --wandb --eval_steps 1"
-
-# command="python testCheckpoint.py"
+command="python main.py --checkpoint_steps=1 --n_device_axis 8 2 2 --name moe1B --train_batch_size 16 --use_cache --wandb --eval_steps 1"
 
 IPS=(
     "35.186.25.28"

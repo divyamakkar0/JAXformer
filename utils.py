@@ -218,8 +218,3 @@ def parse_args():
     )
 
     return cfg
-
-
-if __name__ == "__main__":
-    cfg = parse_args()
-    print(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))

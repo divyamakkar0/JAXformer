@@ -3,263 +3,164 @@ import os
 os.environ["XLA_FLAGS"] = (
     "--xla_gpu_triton_gemm_any=True --xla_gpu_enable_latency_hiding_scheduler=true "
 )
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 import jax
 import jax.numpy as jnp
 
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_compilation_cache_dir", "gs://jaxformer-cache/")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update(
     "jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir"
 )
-jax.config.update("jax_debug_nans", True)
-jax.config.update("jax_disable_jit", False)
-jax.config.update("jax_default_matmul_precision", "float32")
 
-import flax
-from flax.training import train_state
-import time
-import ast
-import json
 import optax
-
-from utils import parse_args, config
-from model import Decoder
-from dataset import Dataset
-
+import numpy as np
+import time
+import json
 import wandb
-from dataclasses import asdict
-
 import orbax.checkpoint as ocp
 
-from jax.sharding import Mesh
+from dataclasses import asdict
 from jax.sharding import PartitionSpec as P
 from functools import partial
-import numpy as np
+from typing import Tuple
+from model import shardedModel
+from dataset import Dataset
+from utils import parse_args, config
 
 
-def setup_devices():
-    jax.distributed.initialize()
+def log(msg: str):
+    if jax.process_index() == 0:
+        print(msg)
+
+
+def init_devices(
+    axes: Tuple[int, ...], axes_name: Tuple[str, ...]
+) -> jax.sharding.Mesh:
     devices = np.array(jax.devices())
-
-    print("Available TPU Devices:")
-    for i, d in enumerate(devices):
-        print(
-            f"  [{i}] ID: {d.id}, Process: {d.process_index}, "
+    for idx in np.ndindex(devices.shape):
+        d = devices[idx]
+        log(
+            f"  {idx} ID: {d.id}, Process: {d.process_index}, "
             f"Coords: {d.coords}, Core: {d.core_on_chip}"
         )
 
-    mesh = Mesh(devices, axis_names=("data"))
-    count = devices.shape[0]
-    return mesh, count
+    assert devices.size == np.prod(axes), (
+        f"Expected {np.prod(axes)} devices, got {devices.shape[0]}"
+    )
+    try:
+        mesh = jax.make_mesh(axes, axes_name)
+    except:
+        log("Failed to create mesh with make_mesh, falling back to sharding.Mesh")
+        mesh = jax.sharding.Mesh(devices.reshape(axes), axes_name)
+    return mesh
 
 
-def init_state(mesh, config, model, params, *, step=0, opt_state=None):
+def main(cfg: config):
+    key = jax.random.PRNGKey(cfg.seed)
+    DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL = cfg.device_config.n_device_axis
+
+    axes = (*cfg.device_config.n_device_axis,)
+    axes_name = ("dp", "pp", "tp")
+
+    mesh = init_devices(axes, axes_name)
+    log(mesh)
+
+    checkpoint_dir = cfg.output_dir + cfg.name
+    options = ocp.CheckpointManagerOptions(max_to_keep=1)
+    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, options=options)
+    load = checkpoint_manager.latest_step() is not None
+
+    data_spec = P(None, "pp", "dp", "tp")
+    data_partition = jax.sharding.NamedSharding(mesh, data_spec)
+
+    train_dataset, val_dataset = Dataset.getDataset(
+        cfg.data_config,
+        partition=data_partition,
+        dp=DATA_PARALLEL,
+        pp=LAYER_PARALLEL,
+        tp=TENSOR_PARALLEL,
+    )
+
+    model = shardedModel(cfg.model_config)
+
+    log("creating sharded model ...")
+    key, init_key = jax.random.split(key, 2)
+    params = model.init_weights(init_key, mesh)
+
     lr_scheduler = optax.warmup_cosine_decay_schedule(
-        init_value=config.lr.min_lr,
-        peak_value=config.lr.max_lr,
-        warmup_steps=config.lr.warmup_steps,
-        decay_steps=config.lr.end_steps,
-        end_value=config.lr.end_lr,
+        init_value=cfg.lr.min_lr,
+        peak_value=cfg.lr.max_lr,
+        warmup_steps=cfg.lr.warmup_steps,
+        decay_steps=cfg.lr.end_steps,
+        end_value=cfg.lr.end_lr,
     )
 
     tx = optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.inject_hyperparams(optax.adamw)(lr_scheduler),
+        optax.inject_hyperparams(optax.adamw)(learning_rate=lr_scheduler),
     )
 
-    if opt_state is None:
-        opt_state = tx.init(params)
-
-    @jax.jit
-    @partial(jax.shard_map, mesh=mesh, in_specs=(P(), P()), out_specs=(P()))
-    def state_fn(params, opt_state):
-        state = train_state.TrainState(
-            step=step, apply_fn=model.apply, params=params, tx=tx, opt_state=opt_state
-        )
-        return state
-
-    state_init = state_fn(params, opt_state)
-    return state_init
-
-
-class KeyState:
-    def __init__(self, seed: int):
-        self.key = jax.random.PRNGKey(seed)
-
-    def __call__(self, num: int = 1):
-        self.key, *rng = jax.random.split(self.key, num=num + 1)
-        if num == 1:
-            return rng[0]
-        else:
-            return jnp.array(rng)
-
-
-def loss(model, alpha, params, key, x, y, train):
-    B, T = x.shape
-    pred, (_, load) = model.apply(
-        {"params": params}, x, train=train, rngs={"dropout": key}
+    default_sharding = jax.sharding.NamedSharding(mesh, P())
+    opt_state = jax.tree.map(
+        lambda x: x if jnp.ndim(x) != 0 else jax.device_put(x, default_sharding),
+        tx.init(params),
     )
-    log_prob = jax.nn.log_softmax(pred, axis=-1).reshape(B * T, -1)
-    loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
-    y = y.reshape(B * T)
-    loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_prob, y)).mean()
-
-    loss_balance = 0.0
-    if load is not None:
-        loss_balance = model.n_experts / (model.k * T**2) * load.sum(axis=0)
-
-    loss = loss_cross + alpha * loss_balance
-
-    return loss, (load, loss_cross, loss_balance)
-
-
-def step(loss_fn, grad_steps, params, key, x, y, train=True):
-    if train:
-        loss_fn = jax.value_and_grad(loss_fn, argnums=0, has_aux=True)
-
-    def step_fn(grads, batch):
-        *data, key = batch
-        val = loss_fn(params, key, *data, train=train)
-
-        if train:
-            val, grads_new = val
-            grads = jax.tree.map(
-                lambda x, y: x + y,
-                grads,
-                grads_new,
-            )
-        else:
-            grads = None
-
-        loss, (load, loss_cross, loss_balance) = val
-
-        metrics = {
-            "loss": loss,
-            "loss_cross": loss_cross,
-        }
-
-        if load is not None:
-            load = load.mean(axis=0)
-            metrics["loss_load"] = loss_balance
-            for h in range(load.shape[0]):
-                metrics[f"load/head_{h}"] = load[h]
-
-        return grads, metrics
-
-    B, T = x.shape
-
-    x = x.reshape(grad_steps, B // grad_steps, T)
-    y = y.reshape(grad_steps, B // grad_steps, T)
-
-    grads = None
-    if train:
-        grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
-
-    grads, metrics = jax.lax.scan(step_fn, init=grads, xs=(x, y, key), unroll=1)
-
-    if grads is not None:
-        grads = jax.tree.map(lambda x: x / grad_steps, grads)
-        grads = jax.lax.pmean(grads, axis_name="data")
-
-    metrics = jax.tree.map(lambda x: x.mean(), metrics)
-    metrics = jax.lax.pmean(metrics, axis_name="data")
-
-    return grads, metrics
-
-
-def main(config: config):
-    print("setting up devices")
-    mesh, count = setup_devices()
-
-    key = KeyState(config.seed)
-
-    print("setting up model")
-    model, global_params = Decoder.get_model(model_config=config.model, init_key=key())
-    param_count = sum(x.size for x in jax.tree.leaves(global_params))
-    print(f"Model parameter count: {param_count:,d} ")
-
-    print("setting up state & dataset")
-    state = init_state(mesh, config, model, global_params)
-
-    total_steps = config.training_steps
-    config.data.train_batch_size *= count * config.grad_step
-    config.data.val_batch_size *= count * config.eval_steps
-    print("setting up dataset")
-    (
-        train_dataset,
-        val_dataset,
-    ) = Dataset.getDataset(config.data)
-
-    print(f"train steps: {len(train_dataset)} | val steps: {len(val_dataset)}")
-
-    loss_fn = jax.tree_util.Partial(loss, model, config.alpha)
-
-    train_step = jax.jit(
-        jax.shard_map(
-            lambda key, params, x, y: step(
-                loss_fn, config.grad_step, params, key, x, y, train=True
-            ),
-            mesh=mesh,
-            in_specs=(P("data"), P(), P("data"), P("data")),
-            out_specs=(P(), P()),
-        )
-    )
-
-    eval_step = jax.jit(
-        jax.shard_map(
-            lambda key, params, x, y: step(
-                loss_fn, config.eval_steps, params, key, x, y, train=False
-            )[1],
-            mesh=mesh,
-            in_specs=(P("data"), P(), P("data"), P("data")),
-            out_specs=(P()),
-        )
-    )
-
-    checkpoint_dir = os.path.join(
-        os.path.abspath(config.output_dir), config.name, "checkpoints"
-    )
-    load = os.path.exists(checkpoint_dir)
-
-    checkpointer = ocp.PyTreeCheckpointer()
-    options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
-    checkpoint_manager = ocp.CheckpointManager(checkpoint_dir, checkpointer, options)
-
-    def save_checkpoint(step, wandb_id):
-        save_tree = {
-            "state": flax.serialization.to_state_dict(state),
-            "key": jax.device_get(key.key),
-            "train_step_idx": train_dataset.step_idx,
-            "train_shard_idx": (train_dataset.shard_idx - 1)
-            % len(train_dataset.data_path),
-            "val_step_idx": val_dataset.step_idx,
-            "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data_path),
-            "step": step,
-            "wandb_id": wandb_id,
-        }
-        checkpoint_manager.save(step, save_tree)
 
     init_step = 0
-
-    use_wandb = config.wandb is True
+    use_wandb = cfg.wandb is True and jax.process_index() == 0
     wandb_id = None
+
+    def make_save_tree(step):
+        model_state = {
+            "params": params,
+            "opt_state": opt_state,
+        }
+        save_tree = {
+            "state": model_state,
+            "key": jax.device_get(key),
+            "train_step_idx": train_dataset.step_idx,
+            "train_shard_idx": (train_dataset.shard_idx - 1) % len(train_dataset.data),
+            "val_step_idx": val_dataset.step_idx,
+            "val_shard_idx": (val_dataset.shard_idx - 1) % len(val_dataset.data),
+            "step": step,
+        }
+        metadata = {"wandb_id": wandb_id}
+        return save_tree, metadata
+
+    def save_checkpoint(
+        step,
+    ):
+        save_tree, metadata = make_save_tree(step)
+        checkpoint_manager.save(
+            step,
+            args=ocp.args.Composite(
+                state=ocp.args.StandardSave(save_tree),
+                metadata=ocp.args.JsonSave(metadata),
+            ),
+        )
+
     if load:
-        tree_state = checkpoint_manager.restore(checkpoint_manager.latest_step())
+        abstract_tree_state = jax.tree.map(
+            ocp.utils.to_shape_dtype_struct, make_save_tree(init_step)[0]
+        )
+        tree = checkpoint_manager.restore(
+            checkpoint_manager.latest_step(),
+            args=ocp.args.Composite(
+                state=ocp.args.StandardRestore(abstract_tree_state),
+                metadata=ocp.args.JsonRestore(),
+            ),
+        )
+
+        tree_state, tree_metadata = tree.state, tree.metadata
 
         init_step = tree_state["step"]
+        log(f"loading checkpoint @ step {init_step}")
+
         key.key = tree_state["key"]
-        unsharded_state = flax.serialization.from_state_dict(state, tree_state["state"])
-        state = init_state(
-            mesh,
-            config,
-            model,
-            params=unsharded_state.params,
-            step=init_step,
-            opt_state=unsharded_state.opt_state,
-        )
+        params = tree_state["state"]["params"]
+        opt_state = tree_state["state"]["opt_state"]
 
         train_dataset.step_idx = tree_state["train_step_idx"]
         train_dataset.shard_idx = tree_state["train_shard_idx"]
@@ -269,158 +170,267 @@ def main(config: config):
         val_dataset.shard_idx = tree_state["val_shard_idx"]
         val_dataset.load_next_shard()
 
-        wandb_id = tree_state["wandb_id"]
+        wandb_id = tree_metadata["wandb_id"]
         if use_wandb:
             assert wandb_id is not None, "wandb_id is None"
             wandb.init(
                 entity="waterloo2",
                 project="jaxformer",
-                name=config.name,
+                name=cfg.name,
                 resume="must",
                 id=wandb_id,
-                config=asdict(config),
+                config=asdict(cfg),
             )
-        print(f"loading checkpoint @ step {init_step}")
+
     else:
-        print("No checkpoint found, starting from scratch")
+        log("no checkpoint found, saving init copy")
         if use_wandb:
             wandb.init(
                 entity="waterloo2",
                 project="jaxformer",
-                name=config.name,
+                name=cfg.name,
                 resume="allow",
-                config=asdict(config),
+                config=asdict(cfg),
             )
             wandb_id = wandb.run.id
-        save_checkpoint(0, wandb_id)
+        save_checkpoint(init_step)
 
-    print("start training")
+    if use_wandb:
+        table = wandb.Table(
+            columns=["step"]
+            + [
+                f"tokens_{i}"
+                for i in range(
+                    cfg.inference_config.batch_size
+                    * cfg.inference_config.n_devices
+                    * jax.process_count()
+                )
+            ],
+            log_mode="INCREMENTAL",
+        )
 
+    param_count, active_param_count = model.param_count(params)
+    log(f"Total parameters: {param_count:,} with {active_param_count:,} active")
+
+    def step(params, x, y, key, train):
+        def loss_fn(params, x, y, key):
+            logits, (_, moe_stat) = model.pipe_step(
+                params,
+                x,
+                key=key,
+                train=train,
+            )
+            log_probs = jax.nn.log_softmax(logits, axis=-1)
+
+            M, B, T, V = logits.shape
+            y = y.reshape(-1)
+            log_probs = log_probs.reshape(M * B * T, V)
+
+            loss_idx = lambda x, idx: jax.lax.dynamic_slice(x, (idx,), (1,))
+            loss_cross = -(jax.vmap(loss_idx, in_axes=(0, 0))(log_probs, y)).mean()
+
+            loss_cross = jax.lax.pmean(loss_cross, axis_name="dp")
+            loss_cross = jax.lax.pmean(loss_cross, axis_name="tp")
+            loss_cross = jax.lax.pmean(loss_cross, axis_name="pp")
+
+            loss_balance = 0.0
+
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="dp"), moe_stat)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="tp"), moe_stat)
+            moe_stat = jax.tree.map(lambda x: jax.lax.psum(x, axis_name="pp"), moe_stat)
+
+            loss_balance = (cfg.model_config.n_experts / cfg.model_config.k) * moe_stat[
+                "aux_loss"
+            ].sum()
+
+            loss = loss_cross + cfg.alpha * loss_balance
+
+            metrics = {
+                "loss": loss,
+                "loss_cross": loss_cross,
+                "loss_balance": loss_balance,
+                "load_expert": moe_stat["tokens_per_expert"],
+            }
+
+            return loss, metrics
+
+        return loss_fn(params, x, y, key)
+
+    param_spec = shardedModel.get_p_spec(
+        [model.embedding, model.block], mesh, cfg.model_config
+    )
+    opt_spec = jax.tree.map(lambda x: x.sharding.spec, opt_state)
+    key_spec = P("dp", "pp", "tp")
+
+    @jax.jit
+    @partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(param_spec, opt_spec, data_spec, data_spec, key_spec),
+        out_specs=(param_spec, opt_spec, P()),
+        check_vma=False,
+    )
+    def train_step(params, opt_state, x, y, key):
+        step_fn = jax.value_and_grad(step, has_aux=True)
+
+        def single_step(grads, batch):
+            (_, metrics), grads_current = step_fn(params, *batch, train=True)
+            grads = jax.tree.map(lambda x, y: x + y, grads, grads_current)
+            return grads, metrics
+
+        grads = jax.tree.map(lambda x: jnp.zeros_like(x), params)
+        key = key.reshape(cfg.grad_step, 2)
+
+        grads, metrics = jax.lax.scan(
+            single_step,
+            grads,
+            (x, y, key),
+        )
+
+        grads = jax.tree.map(lambda x: x / cfg.grad_step, grads)
+
+        metrics = jax.tree.map(lambda x: x.mean(axis=0), metrics)
+
+        updates, opt_state = tx.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+
+        return params, opt_state, metrics
+
+    @jax.jit
+    @partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(param_spec, data_spec, data_spec),
+        out_specs=P(),
+        check_vma=False,
+    )
+    def eval_step(params, x, y):
+        def single_step(_, batch):
+            loss, metrics = step(
+                params, *batch, key=jax.random.PRNGKey(0), train=False
+            )  # Key does not matter
+            return loss, metrics
+
+        _, metrics = jax.lax.scan(single_step, 0, (x, y))
+        metrics = jax.tree.map(lambda x: x.mean(axis=0), metrics)
+        return metrics
+
+    total_steps = cfg.training_steps
+    total_tokens = train_dataset.tokens_per_step * cfg.grad_step
+
+    jax.experimental.multihost_utils.sync_global_devices("sync")
+    log(f"Total steps: {total_steps}")
+    log(f"Total tokens per step: {total_tokens:,}")
+
+    key, sample_key = jax.random.split(key, 2)
     start = time.time()
-    train_loss = 0.0
-    sample_key = key()
+    train_loss = []
+    wandb_log_array = []
+
+    @partial(jax.jit, static_argnames=["steps"])
+    def make_sharded_key(key, steps=1):
+        key = jax.random.split(
+            key, DATA_PARALLEL * LAYER_PARALLEL * TENSOR_PARALLEL * steps
+        )
+        key = jnp.asarray(key).reshape(
+            (DATA_PARALLEL, LAYER_PARALLEL, TENSOR_PARALLEL, steps, 2)
+        )
+        return key
 
     for current_step in range(init_step, total_steps):
-        with jax.named_scope("train_step"):
-            if count * config.grad_step == 1:
-                keys = jnp.array([key()])
-            else:
-                keys = key(count * config.grad_step)
+        key, train_key = jax.random.split(key)
+        train_key = make_sharded_key(train_key, steps=cfg.grad_step)
 
-            grads, metrics = train_step(
-                keys,
-                state.params,
-                *train_dataset(),
-            )
+        x, y = train_dataset(step=cfg.grad_step)
 
-        state = state.apply_gradients(grads=grads)
-        train_loss += metrics["loss"]
+        params, opt_state, metrics = train_step(params, opt_state, x, y, train_key)
+        train_loss.append(metrics["loss"])
 
         if use_wandb:
             wandb_log = {
                 "step": current_step,
                 "loss/train_loss": metrics["loss"],
                 "loss/train_cross_entropy_loss": metrics["loss_cross"],
-                "lr": state.opt_state[1].hyperparams["learning_rate"],
+                "lr": opt_state[1].hyperparams["learning_rate"],
             }
-            if config.model.moe:
-                wandb_log["loss/load_loss"] = metrics["loss_load"]
-                for h in range(config.model.n_experts):
-                    wandb_log[f"load/head_{h}"] = metrics[f"load/head_{h}"]
+            wandb_log["loss/load_loss"] = metrics["loss_balance"]
+            for h in range(cfg.model_config.n_experts):
+                wandb_log[f"load/head_{h}"] = jax.device_get(metrics[f"load_expert"])[h]
 
-        if current_step % config.checkpoint_steps == 0:
-            end = time.time()
-            total_time = end - start
-            tokens_per_second = (
-                config.data.train_batch_size * config.model.T * config.checkpoint_steps
-            ) / total_time
-            train_loss = (
-                (train_loss / config.checkpoint_steps)
-                if current_step > 0
-                else train_loss
-            )
-
-            with jax.named_scope("eval_step"):
-                if count * config.grad_step == 1:
-                    keys = jnp.array([key()])
-                else:
-                    keys = key(count * config.grad_step)
-                metrics_val = eval_step(
-                    key(count * config.eval_steps),
-                    state.params,
-                    *val_dataset(),
-                )
+        if current_step % cfg.checkpoint_steps == 0:
+            time_per_batch = time.time() - start
+            eval_x, eval_y = val_dataset(step=cfg.eval_steps)
+            val_metrics = eval_step(params, eval_x, eval_y)
 
             if use_wandb:
-                wandb_log["loss/val_loss"] = metrics_val["loss"]
-                wandb_log["loss/val_cross_entropy_loss"] = metrics_val["loss_cross"]
-                if config.model.moe:
-                    wandb_log["loss/val_load_loss"] = metrics_val["loss_load"]
-                    for h in range(config.model.n_experts):
-                        wandb_log[f"load/head_{h}"] = metrics_val[f"load/head_{h}"]
+                wandb_log["loss/val_loss"] = val_metrics["loss"]
+                wandb_log["loss/val_cross_entropy_loss"] = val_metrics["loss_cross"]
+                wandb_log["loss/val_load_loss"] = val_metrics["loss_balance"]
+                for h in range(cfg.model_config.n_experts):
+                    wandb_log[f"load/head_{h}"] = jax.device_get(
+                        val_metrics[f"load_expert"]
+                    )[h]
 
-            log_string = (
-                f"step: {current_step} "
-                + f" | val_loss: {float(metrics_val['loss']):.4f} "
-                + f" | train_loss: {float(train_loss):.4f} "
-                + f" | tokens/s: {float(tokens_per_second):.2f} "
-                + f" | time: {float(end - start):.2f}s"
-            )
+            jax.experimental.multihost_utils.sync_global_devices("sync")
 
-            print(log_string)
+            tokens_per_second = cfg.checkpoint_steps * total_tokens / time_per_batch
+            train_loss = jnp.array(train_loss).mean().item()
+            eval_loss = val_metrics["loss"].item()
+            log_string = f"Step {current_step + 1}, Loss: {train_loss:.4f}, Eval Loss: {eval_loss:.4f}, tk/s: {tokens_per_second:,.2f}"
+            log(log_string)
 
-            params_host_device = jax.device_put(
-                jax.device_get(state.params), mesh.devices[0]
-            )
-            tokens = model.generate(
-                params_host_device,
-                sample_key,
-                "",
-                B=config.inference_batch,
-                k=10000,
-                max_tokens=30,
-                temperature=1,
-            )
-
-            print("tokens: ", tokens)
-            with open(
-                os.path.join(
-                    os.path.abspath(config.output_dir), config.name, "tokens.txt"
-                ),
-                "a",
-            ) as f:
-                f.write(f"{current_step} | {tokens}\n")
-
-            save_checkpoint(current_step, wandb_id)
             start = time.time()
-            train_loss = 0.0
+            train_loss = []
+
+        if current_step % (10 * cfg.checkpoint_steps) == 0:
+            outputs = model.generate(
+                params,
+                cfg.model_config,
+                key=sample_key,
+                x=cfg.inference_config.prompt,
+                B=cfg.inference_config.batch_size,
+                k=cfg.inference_config.top_k,
+                temperature=cfg.inference_config.temperature,
+                n_devices=cfg.inference_config.n_devices,
+                use_cache=cfg.inference_config.use_cache,
+            )
+
+            log("Generated outputs:")
+            for output in outputs:
+                log(f"\t{output}")
+
+            if jax.process_index() == 0:
+                save_path = os.path.join(os.path.abspath("./samples"), cfg.name)
+                if not os.path.exists(save_path):
+                    os.makedirs(save_path)
+                with open(
+                    os.path.join(save_path, "tokens.txt"),
+                    "a",
+                ) as f:
+                    f.write(f"{current_step} | {outputs}\n")
+
+            if use_wandb:
+                table.add_data(current_step, *outputs)
+                wandb_log["inference_tokens"] = table
+
+            save_checkpoint(current_step)
+            gen_time = time.time() - start
+            log(f"Generation time: {gen_time:.4f} seconds")
+            start = time.time()
 
         if use_wandb:
-            wandb.log(
-                data=wandb_log,
-                step=current_step,
-            )
+            wandb_log_array.append({"data": wandb_log, "step": current_step})
+            if current_step % (10 * cfg.checkpoint_steps) == 0:
+                for log_entry in wandb_log_array:
+                    wandb.log(data=log_entry["data"], step=log_entry["step"])
+                wandb_log_array = []
 
     if use_wandb:
-        table = wandb.Table(
-            columns=[f"tokens_{i}" for i in range(config.inference_batch)]
-        )
-        wandb.Table.MAX_ROWS = total_steps // config.checkpoint_steps
-        with open(
-            os.path.join(os.path.abspath(config.output_dir), config.name, "tokens.txt"),
-            "r",
-        ) as f:
-            lines = f.readlines()
-        for line in lines:
-            tokens = line.split("|")[1]
-            tokens = ast.literal_eval(tokens)
-            table.add_data(tokens)
-
-        wandb.log({"inference_tokens": table})
         wandb.finish()
 
 
 if __name__ == "__main__":
+    jax.distributed.initialize()
     cfg = parse_args()
     print(json.dumps(cfg.__dict__, indent=4, default=lambda o: o.__dict__))
     main(cfg)

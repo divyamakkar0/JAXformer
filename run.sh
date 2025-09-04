@@ -2,7 +2,7 @@
 
 IP=$1
 SESSION="trainingRun"
-command="python test.py --checkpoint_steps=75 --n_device_axis 8 2 2 --name moe1B --train_batch_size 32 --use_cache --wandb --eval_steps 10"
+command="python main.py --checkpoint_steps=75 --n_device_axis 8 2 2 --name moe1B --train_batch_size 32 --use_cache --wandb --eval_steps 10"
 
 echo "Running on $IP"
 
