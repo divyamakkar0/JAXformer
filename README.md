@@ -28,4 +28,4 @@ Results for a 1B model (300M active) trained to 3.28 val loss using 3-D sharding
 
 ## Acknowledgements
 
-This guide was written by Aditya Makkar, Divya Makkar, and Chinmay Jindal. The website uses a Distill-style Jekyll theme created by https://github.com/alshedivat/al-folio. The idea of the blog is inspired by https://jax-ml.github.io/scaling-book/ and the work of [Andrej Karpathy](https://x.com/karpathy). The [TRC](https://sites.research.google/trc/about/) was used to provide the compute needed. 
+This guide was written by Aditya Makkar, Divya Makkar, and Chinmay Jindal. The website uses a Distill-style Jekyll theme created by https://github.com/alshedivat/al-folio. The idea of the blog is inspired by https://jax-ml.github.io/scaling-book/ and the work of [Andrej Karpathy](https://x.com/karpathy). Google's [TRC](https://sites.research.google/trc/about/) was used to provide the compute needed.
