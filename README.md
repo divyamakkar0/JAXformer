@@ -1,4 +1,6 @@
-## JAXformer
+![banner](banner.png)
+
+# JAXformer
 
 This is a a zero-to-one guide on scaling modern transformers with n-dimensional parallelism in JAX. The repo for [JAXformer](jaxformer.com) covers data processing, FSDP, pipeline parellism, tensor parellism, weight-sharding, activation-sharding, MoE scaling and much more.
 
