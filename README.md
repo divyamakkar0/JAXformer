@@ -2,6 +2,10 @@
 
 A Zero-to-One Guide on Scaling Modern Transformers with N-Dimensional Parallelism in JAX. The repo for [JAXformer](jaxformer.com) covers data processing, FSDP, pipeline parellism, tensor parellism, weight-sharding, activation-sharding, MoE scaling and much more.
 
+## Acknowledgements
+
+This guide was written by Aditya Makkar, Divya Makkar, and Chinmay Jindal. The website uses a Distill-style Jekyll theme created by https://github.com/alshedivat/al-folio. Add acknledgements for deepm,ind, tpu cloud, etc. Thank you!
+
 ## Structure
 
 The model that is built up throughout the blog is in `model.py`. The main training script is in `main.py`. `utils.py` and `dataset.py` contain the dataclasses and dataset processing implementations. `debug_tpu.sh` launches a TMUX with 8 panes to ssh into 8 nodes at once running the command in the `command` variable. `launcher.sh` ssh's headlessly into each node and executves `run.sh` creating TMUX terminals inside the ssh to allow for runs to continue even if the ssh connection is broken. `setup_tpu.sh` setups all the dependencies on the TPU.
