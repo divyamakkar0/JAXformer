@@ -1,8 +1,14 @@
-![banner](banner.png)
+<picture>
+  <source srcset="media/banner-light.png" media="(prefers-color-scheme: dark)">
+  <source srcset="media/banner.png" media="(prefers-color-scheme: light)">
+  <img src="media/banner.png" alt="JAXformer banner">
+</picture>
+
+<br>
 
 # JAXformer
 
-This is a zero-to-one guide on scaling modern transformers with n-dimensional parallelism in JAX. Our blog for [JAXformer](https://jaxformer.com) covers a from-scratch guide to distributed data processing, FSDP, pipeline parallelism, tensor parallelism, weight-sharding, activation-sharding, MoE scaling and much more. Our guide aims to bridge the gap between theory and end-to-end implementation by demonstrating how to scale a modern language model. 
+This is a zero-to-one guide on scaling modern transformers with n-dimensional parallelism in JAX. Our blog for [JAXformer](https://jaxformer.com) covers a from-scratch guide to distributed data processing, FSDP, pipeline parallelism, tensor parallelism, weight-sharding, activation-sharding, MoE scaling and much more. Our guide aims to bridge the gap between theory and end-to-end implementation by demonstrating how to scale a modern language model.
 
 ## Structure
 
