@@ -29,7 +29,7 @@ Results for a 1B model (300M active) trained to 3.28 val loss using 3-D sharding
 
 ## Contributing and Contact
 
-If you see any issues or have questions, please leave a comment on the website itself (powered by Giscus) or in the GitHub discussion. Feel free to send a PR if you want to contribute.
+If you see any issues or have questions, open up an issue or send in a PR. 
 
 ## Acknowledgements
 
