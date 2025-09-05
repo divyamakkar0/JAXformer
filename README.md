@@ -1,6 +1,8 @@
-## JAXformer
+![banner](banner.png)
 
-A Zero-to-One Guide on Scaling Modern Transformers with N-Dimensional Parallelism in JAX. The repo for [JAXformer](jaxformer.com) covers data processing, FSDP, pipeline parellism, tensor parellism, weight-sharding, activation-sharding, MoE scaling and much more.
+# JAXformer
+
+This is a a zero-to-one guide on scaling modern transformers with n-dimensional parallelism in JAX. The repo for [JAXformer](jaxformer.com) covers data processing, FSDP, pipeline parellism, tensor parellism, weight-sharding, activation-sharding, MoE scaling and much more.
 
 ## Structure
 
@@ -25,6 +27,9 @@ Results for a 1B model (300M active) trained to 3.28 val loss using 3-D sharding
   <img src="https://raw.githubusercontent.com/divyamakkar0/Jaxformer/main/public/experts.png" alt="Experts per Head" width="500"/>
 </p>
 
+## Contributing and Contact
+
+If you see any issues or have questions, please leave a comment on the website itself (powered by Giscus) or in the GitHub discussion. Feel free to send a PR if you want to contribute.
 
 ## Acknowledgements
 
