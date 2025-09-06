@@ -14,4 +14,3 @@ IPS=(
 
 
 printf "%s\n" "${IPS[@]}" | xargs -n 1 -P 0 -I {} bash run.sh {}
-

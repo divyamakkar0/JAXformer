@@ -9,3 +9,8 @@ results/*
 wandb/*
 .vscode/*
 .DS_Store
+.env
+data_dir/
+edu_fineweb10B
+checkpoints/
+final_data/
