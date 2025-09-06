@@ -39,4 +39,6 @@ If you see any issues or have questions, open up an issue or send in a PR. You c
 
 ## Acknowledgements
 
-This guide was written by Aditya Makkar, Divya Makkar, and Chinmay Jindal. The website uses a Distill-style Jekyll theme called [Al-Folio](https://github.com/alshedivat/al-folio). The idea of the blog and front-end structure is inspired by Google DeepMind's [How to Scale Your Model](https://jax-ml.github.io/scaling-book/) guide. [Google's TRC](https://sites.research.google/trc/about/) was used to provide the compute needed. Thanks!
+This guide was written by [Aditya Makkar](https://x.com/AdityaMakkar000), [Divya Makkar](https://x.com/_DivyaMakkar), and [Chinmay Jindal](https://x.com/chinmayjindal_). We are all undergraduate students studying Computer Science at the University of Waterloo. 
+
+The website uses a Distill-style Jekyll theme called [Al-Folio](https://github.com/alshedivat/al-folio). The idea of the blog and front-end structure is inspired by Google DeepMind's [How to Scale Your Model](https://jax-ml.github.io/scaling-book/) guide. [Google's TRC](https://sites.research.google/trc/about/) was used to provide the compute needed. Thanks!
