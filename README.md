@@ -1,7 +1,7 @@
 <picture>
-  <source srcset="media/banner-light.png" media="(prefers-color-scheme: dark)">
-  <source srcset="media/banner.png" media="(prefers-color-scheme: light)">
-  <img src="media/banner.png" alt="JAXformer banner">
+  <source srcset="public/banner-light.png" media="(prefers-color-scheme: dark)">
+  <source srcset="public/banner.png" media="(prefers-color-scheme: light)">
+  <img src="public/banner.png" alt="JAXformer banner">
 </picture>
 
 <br>
